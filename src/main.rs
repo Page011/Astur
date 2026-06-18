@@ -236,6 +236,20 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         // Reposition/create bars for the new monitor layout, then retile.
         ensure_bars();
         push_cmd(Cmd::RefreshMonitors);
+    } else if msg == WM_RELOAD {
+        // Config changed: rebuild font + bars (must happen on this thread so it
+        // can't race a paint).
+        make_bar_font(
+            BAR_HEIGHT.load(Ordering::Relaxed) as i32,
+            BAR_FONT_SIZE.load(Ordering::Relaxed) as i32,
+        );
+        if BAR_HEIGHT.load(Ordering::Relaxed) > 0 {
+            ensure_bars();
+        } else {
+            for b in BARS.lock().unwrap().iter() {
+                let _ = ShowWindow(hwnd_from(b.hwnd), SW_HIDE);
+            }
+        }
     }
     DefWindowProcW(h, msg, w, l)
 }
@@ -630,6 +644,14 @@ struct Config {
     bar_inactive: u32,          // COLORREF empty-workspace text
     ignore_classes: Vec<String>, // window classes never tiled/managed
     float_classes: Vec<String>,  // window classes managed but auto-floated
+    key_focus_next: u32,      // Alt+<key> focus next window in the stack (default J)
+    key_focus_prev: u32,      // Alt+<key> focus previous window in the stack (default K)
+    key_shrink_master: u32,   // Alt+<key> shrink the master area (default H)
+    key_grow_master: u32,     // Alt+<key> grow the master area (default L)
+    key_promote_master: u32,  // Alt+<key> promote focused window to master (default M)
+    key_toggle_tiling: u32,   // Alt+<key> toggle tiling on/off (default T)
+    key_toggle_float: u32,    // Alt+<key> toggle floating for focused window (default F)
+    key_close_window: u32,    // Alt+<key> close the focused window (default W)
 }
 
 impl Config {
@@ -665,6 +687,14 @@ impl Config {
             bar_inactive: parse_color("#565F89", 0x00895F56),
             ignore_classes: Vec::new(),
             float_classes: Vec::new(),
+            key_focus_next: 0x4A,     // J
+            key_focus_prev: 0x4B,     // K
+            key_shrink_master: 0x48,  // H
+            key_grow_master: 0x4C,    // L
+            key_promote_master: 0x4D, // M
+            key_toggle_tiling: 0x54,  // T
+            key_toggle_float: 0x46,   // F
+            key_close_window: 0x57,   // W
         }
     }
 }
@@ -711,7 +741,10 @@ const DEFAULT_CONFIG: &str = "\
 # values: shared | per_monitor
 workspace_mode = shared
 
-# Number of workspaces (per monitor).  int 1 - 10
+# Number of workspaces.  int 1 - 10
+#   shared mode      = TOTAL across all monitors (distributed from the main
+#                      monitor outward).
+#   per_monitor mode = workspaces per monitor.
 workspaces = 10
 
 # Keys (with LEFT ALT) that select workspaces 1, 2, 3, ... in order. Add Shift
@@ -796,7 +829,7 @@ terminal = wt.exe
 browser =
 
 # ============================================================================
-# Hotkeys (LEFT ALT is the modifier; fixed binds below are not configurable)
+# Hotkeys (LEFT ALT is the modifier)
 # ============================================================================
 #   Alt + left-drag      move window under cursor (drops back into the tiling)
 #   Alt + right-drag     resize nearest corner (red bracket marker)
@@ -815,6 +848,18 @@ browser =
 #   Alt+Shift+<ws key>   move focused window to that workspace (and follow it)
 #   Alt+Tab              normal task switcher (still works)
 #   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by suprland)
+#
+# The letter keys above (J K H L M T F W) are rebindable. Each takes a single
+# key name (see the 'keys' type at the top of this file). Arrows and Enter
+# are fixed.  key
+key_focus_next = J
+key_focus_prev = K
+key_shrink_master = H
+key_grow_master = L
+key_promote_master = M
+key_toggle_tiling = T
+key_toggle_float = F
+key_close_window = W
 # ============================================================================
 ";
 
@@ -1019,6 +1064,46 @@ fn parse_into(c: &mut Config, text: &str) {
             "focus_follows_mouse" => c.focus_follows_mouse = parse_bool(v),
             "ignore_classes" => c.ignore_classes = parse_list(v),
             "float_classes" => c.float_classes = parse_list(v),
+            "key_focus_next" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_focus_next = k;
+                }
+            }
+            "key_focus_prev" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_focus_prev = k;
+                }
+            }
+            "key_shrink_master" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_shrink_master = k;
+                }
+            }
+            "key_grow_master" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_grow_master = k;
+                }
+            }
+            "key_promote_master" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_promote_master = k;
+                }
+            }
+            "key_toggle_tiling" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_toggle_tiling = k;
+                }
+            }
+            "key_toggle_float" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_toggle_float = k;
+                }
+            }
+            "key_close_window" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_close_window = k;
+                }
+            }
             // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
             "enabled" | "bar_enabled" => c.bar_enabled = parse_bool(v),
             "height" | "bar_height" => {
@@ -1078,6 +1163,7 @@ enum Cmd {
     MoveGeo(Dir),               // Alt+Shift+arrow: move the window in a direction
     FocusMouse(isize),          // focus-follows-mouse: cursor hovered this window
     BarClick(isize, usize),     // bar pill clicked: (monitor hmon, local workspace)
+    Reload(Box<Config>),        // config file changed on disk; apply live
 }
 
 static CMDQ: Mutex<VecDeque<Cmd>> = Mutex::new(VecDeque::new());
@@ -1103,6 +1189,29 @@ static FLOAT_CLASSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 // VK code per workspace (index = workspace), read by the keyboard hook.
 static WORKSPACE_KEYS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
+/// Rebindable single-letter hotkeys (config keys `key_*`); defaults match the
+/// historical hardcoded J/K/H/L/M/T/F/W binds.
+struct HotkeyBinds {
+    focus_next: u32,
+    focus_prev: u32,
+    shrink_master: u32,
+    grow_master: u32,
+    promote_master: u32,
+    toggle_tiling: u32,
+    toggle_float: u32,
+    close_window: u32,
+}
+static HOTKEYS: Mutex<HotkeyBinds> = Mutex::new(HotkeyBinds {
+    focus_next: 0x4A,
+    focus_prev: 0x4B,
+    shrink_master: 0x48,
+    grow_master: 0x4C,
+    promote_master: 0x4D,
+    toggle_tiling: 0x54,
+    toggle_float: 0x46,
+    close_window: 0x57,
+});
+
 // ---- status bar (one per monitor) ----
 /// A bar window bound to one monitor.
 #[derive(Clone, Copy)]
@@ -1116,6 +1225,7 @@ static BAR_HINST: AtomicIsize = AtomicIsize::new(0);
 // Bar geometry, set at startup so ensure_bars works without a Config in hand.
 static BAR_HEIGHT: AtomicIsize = AtomicIsize::new(0); // 0 = bar disabled
 static BAR_BOTTOM: AtomicBool = AtomicBool::new(false);
+static BAR_FONT_SIZE: AtomicIsize = AtomicIsize::new(0); // 0 = auto from height
 // Width of each workspace pill in px, and the bar text height, set from config.
 static BAR_CELL: AtomicIsize = AtomicIsize::new(34);
 // Shared font handle for all bars (created once).
@@ -1170,6 +1280,9 @@ impl BarData {
 static BAR: Mutex<BarData> = Mutex::new(BarData::new());
 // Custom message: manager asks a bar to repaint.
 const WM_BAR_REFRESH: u32 = WM_USER + 1;
+// Custom message (to the marker window): config changed, rebuild bars on the
+// main thread.
+const WM_RELOAD: u32 = WM_USER + 2;
 // SetTimer id for the bar clock tick.
 const BAR_TIMER_ID: usize = 1;
 
@@ -2190,6 +2303,41 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
             }
         }
+        Cmd::Reload(cfg) => {
+            mgr.cfg = *cfg;
+            // Apply new workspace counts / mode, then recompute work areas for
+            // the (possibly changed) bar height. Bars themselves are recreated
+            // on the main thread (WM_RELOAD -> ensure_bars).
+            distribute_workspaces(
+                &mut mgr.monitors,
+                mgr.primary,
+                mgr.cfg.workspaces,
+                mgr.cfg.per_monitor,
+            );
+            reserve_bar(&mut mgr.monitors, &mgr.cfg);
+            // Reset every window's styling so disabling opacity/borders takes
+            // effect, then re-apply from scratch.
+            SUPPRESS.store(true, Ordering::Relaxed);
+            for m in &mgr.monitors {
+                for ws in &m.workspaces {
+                    for &h in &ws.windows {
+                        let hwnd = hwnd_from(h);
+                        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+                        let def: u32 = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
+                        let _ = DwmSetWindowAttribute(
+                            hwnd,
+                            DWMWA_BORDER_COLOR,
+                            &def as *const _ as *const c_void,
+                            core::mem::size_of::<u32>() as u32,
+                        );
+                    }
+                }
+            }
+            SUPPRESS.store(false, Ordering::Relaxed);
+            STYLED_FOCUS.store(0, Ordering::Relaxed);
+            retile_all(mgr);
+            style_all(mgr);
+        }
         Cmd::FocusDir(d) => {
             if !mgr.tiling {
                 return;
@@ -2583,12 +2731,13 @@ unsafe extern "system" fn bar_mon_enum(
     BOOL(1)
 }
 
-/// Build the shared bar font and pill-cell width from config.
-unsafe fn make_bar_font(cfg: &Config) {
-    let size = if cfg.bar_font_size > 0 {
-        cfg.bar_font_size
+/// Build the shared bar font and pill-cell width. Call only on the main thread
+/// (the bars' paint thread) so deleting the old font can't race a paint.
+unsafe fn make_bar_font(height: i32, font_size: i32) {
+    let size = if font_size > 0 {
+        font_size
     } else {
-        ((cfg.bar_height as f32) * 0.5) as i32
+        ((height as f32) * 0.5) as i32
     }
     .max(8);
     let f = CreateFontW(
@@ -2607,8 +2756,11 @@ unsafe fn make_bar_font(cfg: &Config) {
         0, // DEFAULT_PITCH | FF_DONTCARE
         w!("Segoe UI"),
     );
-    BAR_FONT.store(f.0 as isize, Ordering::Relaxed);
-    BAR_CELL.store(((cfg.bar_height as f32) * 1.25) as isize, Ordering::Relaxed);
+    let prev = BAR_FONT.swap(f.0 as isize, Ordering::Relaxed);
+    if prev != 0 {
+        let _ = DeleteObject(HGDIOBJ(prev as *mut c_void));
+    }
+    BAR_CELL.store((height.max(8) as f32 * 1.25) as isize, Ordering::Relaxed);
 }
 
 /// Create or reposition one bar window per monitor. Safe to call repeatedly
@@ -3012,6 +3164,59 @@ fn focus_follow_worker() {
     }
 }
 
+/// Watch the two config files and apply changes live, so editing + saving a
+/// config takes effect without restarting suprland.
+fn config_watcher() {
+    use std::time::SystemTime;
+    let wm = config_path("SUPRLAND_CONFIG", "suprland.conf");
+    let nav = config_path("SUPRLAND_NAVBAR", "navbar.conf");
+    let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let mut last: (Option<SystemTime>, Option<SystemTime>) = (mtime(&wm), mtime(&nav));
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(1000));
+        let now = (mtime(&wm), mtime(&nav));
+        if now == last {
+            continue;
+        }
+        last = now;
+        let cfg = load_config();
+        // Statics the hooks/workers read directly.
+        FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
+        *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
+        *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
+        *WORKSPACE_KEYS.lock().unwrap() = cfg.workspace_keys.clone();
+        {
+            let mut hk = HOTKEYS.lock().unwrap();
+            hk.focus_next = cfg.key_focus_next;
+            hk.focus_prev = cfg.key_focus_prev;
+            hk.shrink_master = cfg.key_shrink_master;
+            hk.grow_master = cfg.key_grow_master;
+            hk.promote_master = cfg.key_promote_master;
+            hk.toggle_tiling = cfg.key_toggle_tiling;
+            hk.toggle_float = cfg.key_toggle_float;
+            hk.close_window = cfg.key_close_window;
+        }
+        BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
+        BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
+        BAR_HEIGHT.store(
+            if cfg.bar_enabled {
+                cfg.bar_height as isize
+            } else {
+                0
+            },
+            Ordering::Relaxed,
+        );
+        // Manager applies the rest; the marker (main thread) rebuilds the bars.
+        push_cmd(Cmd::Reload(Box::new(cfg)));
+        let marker = MARKER_HWND.load(Ordering::Relaxed);
+        if marker != 0 {
+            unsafe {
+                let _ = PostMessageW(hwnd_from(marker), WM_RELOAD, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
 fn manager_loop(cfg: Config) {
     let mut mgr = unsafe {
         let mut monitors = enumerate_monitors();
@@ -3124,18 +3329,39 @@ unsafe extern "system" fn win_event_proc(
     }
 }
 
-/// Map an Alt+key (with optional Shift) hotkey to a manager command.
+/// Map an Alt+key (with optional Shift) hotkey to a manager command. The
+/// letter binds are rebindable via config (see `HOTKEYS`); arrows and Enter
+/// are fixed.
 fn map_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
+    {
+        let hk = HOTKEYS.lock().unwrap();
+        if vk == hk.focus_next {
+            return Some(if shift { Cmd::SwapDir(1) } else { Cmd::FocusDir(1) });
+        }
+        if vk == hk.focus_prev {
+            return Some(if shift { Cmd::SwapDir(-1) } else { Cmd::FocusDir(-1) });
+        }
+        if vk == hk.shrink_master {
+            return Some(Cmd::ResizeMaster(-0.05));
+        }
+        if vk == hk.grow_master {
+            return Some(Cmd::ResizeMaster(0.05));
+        }
+        if vk == hk.promote_master {
+            return Some(Cmd::PromoteMaster);
+        }
+        if vk == hk.toggle_tiling {
+            return Some(Cmd::ToggleTiling);
+        }
+        if vk == hk.toggle_float {
+            return Some(Cmd::ToggleFloat);
+        }
+        if vk == hk.close_window {
+            return Some(Cmd::CloseFocused);
+        }
+    }
     match vk {
-        0x4A => Some(if shift { Cmd::SwapDir(1) } else { Cmd::FocusDir(1) }), // J
-        0x4B => Some(if shift { Cmd::SwapDir(-1) } else { Cmd::FocusDir(-1) }), // K
-        0x48 => Some(Cmd::ResizeMaster(-0.05)),                               // H shrink master
-        0x4C => Some(Cmd::ResizeMaster(0.05)),                                // L grow master
-        0x4D => Some(Cmd::PromoteMaster),                                     // M promote master
         0x0D => Some(if shift { Cmd::LaunchBrowser } else { Cmd::LaunchTerminal }), // Enter
-        0x54 => Some(Cmd::ToggleTiling),                                      // T
-        0x46 => Some(Cmd::ToggleFloat),                                       // F
-        0x57 => Some(Cmd::CloseFocused),                                      // W close window
         0x25 => Some(if shift { Cmd::MoveGeo(Dir::Left) } else { Cmd::FocusGeo(Dir::Left) }), // Left
         0x26 => Some(if shift { Cmd::MoveGeo(Dir::Up) } else { Cmd::FocusGeo(Dir::Up) }),     // Up
         0x27 => Some(if shift { Cmd::MoveGeo(Dir::Right) } else { Cmd::FocusGeo(Dir::Right) }), // Right
@@ -3173,11 +3399,23 @@ fn main() {
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
         *WORKSPACE_KEYS.lock().unwrap() = cfg.workspace_keys.clone();
+        {
+            let mut hk = HOTKEYS.lock().unwrap();
+            hk.focus_next = cfg.key_focus_next;
+            hk.focus_prev = cfg.key_focus_prev;
+            hk.shrink_master = cfg.key_shrink_master;
+            hk.grow_master = cfg.key_grow_master;
+            hk.promote_master = cfg.key_promote_master;
+            hk.toggle_tiling = cfg.key_toggle_tiling;
+            hk.toggle_float = cfg.key_toggle_float;
+            hk.close_window = cfg.key_close_window;
+        }
         BAR_HINST.store(hinst.0 as isize, Ordering::Relaxed);
         if cfg.bar_enabled {
             BAR_HEIGHT.store(cfg.bar_height as isize, Ordering::Relaxed);
         }
         BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
+        BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
 
         // Red, click-through, topmost corner-marker overlay.
         let brush = CreateSolidBrush(COLORREF(0x000000FF)); // 0x00BBGGRR -> red
@@ -3219,7 +3457,7 @@ fn main() {
                 ..Default::default()
             };
             RegisterClassW(&bwc);
-            make_bar_font(&cfg);
+            make_bar_font(cfg.bar_height, cfg.bar_font_size);
             ensure_bars();
         }
 
@@ -3293,6 +3531,8 @@ fn main() {
         std::thread::spawn(position_worker);
         // Focus-follows-mouse poll loop (no-op unless enabled in config).
         std::thread::spawn(focus_follow_worker);
+        // Hot-reload config files on save.
+        std::thread::spawn(config_watcher);
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
         std::thread::spawn(move || manager_loop(cfg));
 

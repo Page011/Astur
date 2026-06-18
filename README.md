@@ -9,7 +9,7 @@ inspired by Hyprland's mouse bindings.
 ## Install
 
 Download `suprland-windows-x64.exe` from [Releases](../../releases/latest) and run it.
-No installer. No admin rights required. Single `.exe`.
+No installer. Single `.exe`.
 
 ## What it does
 
@@ -29,13 +29,22 @@ Right Alt is untouched for normal use. Alt+Tab still works.
 | `Alt` + `T` | Toggle tiling mode on/off |
 | `Alt` + `J` / `K` | Focus next / previous window |
 | `Alt` + `Shift+J` / `Shift+K` | Swap window with next / previous |
+| `Alt` + arrows | Focus window by direction (cursor follows) |
+| `Alt` + `Shift` + arrows | Move window by direction (across monitors) |
 | `Alt` + `H` / `L` | Shrink / grow master column |
-| `Alt` + `Enter` | Promote focused window to master |
+| `Alt` + `M` | Promote focused window to master |
 | `Alt` + `F` | Toggle float for focused window |
-| `Alt` + `Q` | Close focused window |
+| `Alt` + `W` | Close focused window |
+| `Alt` + `Enter` | Launch terminal |
+| `Alt` + `Shift+Enter` | Launch browser |
 | `Alt` + `1`–`9` | Switch to workspace 1–9 |
 | `Alt` + `Shift+1`–`9` | Move focused window to workspace |
 | `Alt` + `Tab` | Switch apps (pass-through preserved) |
+
+The letter binds (`J K H L M T F W`) are rebindable in
+`%USERPROFILE%\.suprland\suprland.conf` (`key_focus_next`, `key_close_window`,
+etc.). Workspace keys, gaps, layout, borders, and the status bar are configured
+in the same file. Arrows and `Enter` are fixed.
 
 ## Build from source
 
