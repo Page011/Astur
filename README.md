@@ -3,7 +3,7 @@
 Alt-drag move/resize and master-stack tiling window manager for Windows,
 inspired by Hyprland's mouse bindings.
 
-[![GitHub release](https://img.shields.io/github/v/release/YOUR_USERNAME/suprland)](https://github.com/YOUR_USERNAME/suprland/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/Page011/Suprland)](https://github.com/Page011/Suprland/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## Install
@@ -42,7 +42,7 @@ Right Alt is untouched for normal use. Alt+Tab still works.
 Requires [Rust stable](https://rustup.rs).
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/suprland
+git clone https://github.com/Page011/Suprland
 cd suprland
 cargo build --release
 # binary at: target/release/suprland.exe

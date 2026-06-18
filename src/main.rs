@@ -1182,6 +1182,10 @@ struct Workspace {
     windows: Vec<isize>,  // all managed windows in this workspace (tiled order)
     floating: Vec<isize>, // subset of `windows` excluded from tiling
     focused: isize,       // last-focused window handle (0 = none)
+    // Per-split size ratios for the dwindle layout (index = split level, i.e.
+    // tiled-window index). Each is the fraction the window at that level takes of
+    // its split; missing/extra entries default to 0.5. Edited by resizing.
+    splits: Vec<f32>,
 }
 
 impl Workspace {
@@ -1190,6 +1194,7 @@ impl Workspace {
             windows: Vec::new(),
             floating: Vec::new(),
             focused: 0,
+            splits: Vec::new(),
         }
     }
 }
@@ -1197,7 +1202,8 @@ impl Workspace {
 /// One physical display: its own workspaces, tiled on its own work area.
 struct Monitor {
     hmon: isize,        // HMONITOR (raw) — identity across enumerations
-    work_area: RECT,    // taskbar-excluded area to tile within
+    base_work: RECT,    // taskbar-excluded area, before the bar is subtracted
+    work_area: RECT,    // tiling area (base_work minus the status bar)
     workspaces: Vec<Workspace>,
     active: usize,      // index of the currently-shown workspace
 }
@@ -1210,6 +1216,7 @@ impl Monitor {
         }
         Monitor {
             hmon,
+            base_work: work_area,
             work_area,
             workspaces,
             active: 0,
@@ -1465,10 +1472,16 @@ fn master_stack(area: RECT, n: usize, ratio: f32, outer: i32, inner: i32) -> Vec
     out
 }
 
-/// Dwindle/spiral layout (Hyprland / omarchy default): each window takes half of
-/// the remaining space, alternating the split along the longer side, so windows
-/// spiral toward the bottom corner and a newly opened window lands there.
-fn dwindle_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
+/// The split ratio for level `i`, defaulting to 0.5 and clamped to a sane range.
+fn split_ratio(splits: &[f32], i: usize) -> f32 {
+    splits.get(i).copied().unwrap_or(0.5).clamp(0.05, 0.95)
+}
+
+/// Dwindle/spiral layout (Hyprland / omarchy default): each window takes a
+/// fraction (`splits[i]`, default half) of the remaining space, alternating the
+/// split along the longer side, so windows spiral toward the bottom corner.
+/// Resizing a window edits the relevant `splits` entry (see `resize_dwindle`).
+fn dwindle_layout(area: RECT, n: usize, outer: i32, inner: i32, splits: &[f32]) -> Vec<RECT> {
     let mut out = Vec::with_capacity(n);
     if n == 0 {
         return out;
@@ -1489,9 +1502,9 @@ fn dwindle_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
         }
         let w = cur.right - cur.left;
         let h = cur.bottom - cur.top;
+        let r = split_ratio(splits, i);
         if w >= h {
-            // split left/right: this window takes the left half.
-            let half = (w - inner) / 2;
+            let half = ((w - inner) as f32 * r) as i32;
             out.push(RECT {
                 left: cur.left,
                 top: cur.top,
@@ -1500,8 +1513,7 @@ fn dwindle_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
             });
             cur.left += half + inner;
         } else {
-            // split top/bottom: this window takes the top half.
-            let half = (h - inner) / 2;
+            let half = ((h - inner) as f32 * r) as i32;
             out.push(RECT {
                 left: cur.left,
                 top: cur.top,
@@ -1512,6 +1524,69 @@ fn dwindle_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
         }
     }
     out
+}
+
+/// Update `splits` so the dwindle window at tiled index `idx` matches the size
+/// the user dragged it to (`new`). Replays the cascade to find that window's
+/// split level + axis, then back-computes the ratio. Neighbours reflow to fill.
+fn resize_dwindle(
+    splits: &mut Vec<f32>,
+    area: RECT,
+    n: usize,
+    outer: i32,
+    inner: i32,
+    idx: usize,
+    new: RECT,
+) {
+    if n < 2 {
+        return;
+    }
+    // The window at idx owns split level idx (it takes the first part); the very
+    // last window instead shares level n-2 (it is that split's remainder).
+    let (level, is_remainder) = if idx < n - 1 {
+        (idx, false)
+    } else {
+        (n - 2, true)
+    };
+    if splits.len() < n - 1 {
+        splits.resize(n - 1, 0.5);
+    }
+    // Replay the cascade up to `level` to find that split's available rect.
+    let mut cur = RECT {
+        left: area.left + outer,
+        top: area.top + outer,
+        right: area.right - outer,
+        bottom: area.bottom - outer,
+    };
+    for i in 0..level {
+        let w = cur.right - cur.left;
+        let h = cur.bottom - cur.top;
+        let r = split_ratio(splits, i);
+        if w >= h {
+            let half = ((w - inner) as f32 * r) as i32;
+            cur.left += half + inner;
+        } else {
+            let half = ((h - inner) as f32 * r) as i32;
+            cur.top += half + inner;
+        }
+    }
+    let w = cur.right - cur.left;
+    let h = cur.bottom - cur.top;
+    let vertical = w >= h;
+    let avail = (if vertical { w } else { h } - inner).max(1) as f32;
+    let new_size = if vertical {
+        new.right - new.left
+    } else {
+        new.bottom - new.top
+    } as f32;
+    // First-half window: ratio = its size / available. Remainder window: it gets
+    // (1 - ratio), so ratio = 1 - its size / available.
+    let ratio = if is_remainder {
+        1.0 - new_size / avail
+    } else {
+        new_size / avail
+    };
+    splits[level] = ratio.clamp(0.05, 0.95);
 }
 
 /// Enumerate physical monitors, sorted left-to-right (0 = leftmost), each with
@@ -1533,7 +1608,7 @@ unsafe extern "system" fn monitor_enum_proc(
     BOOL(1)
 }
 
-unsafe fn enumerate_monitors(count: usize) -> Vec<Monitor> {
+unsafe fn enumerate_monitors() -> Vec<Monitor> {
     let mut raw: Vec<(isize, i32, RECT)> = Vec::new();
     let _ = EnumDisplayMonitors(
         None,
@@ -1545,22 +1620,64 @@ unsafe fn enumerate_monitors(count: usize) -> Vec<Monitor> {
         raw.push((0, 0, work_area_at(POINT { x: 0, y: 0 })));
     }
     raw.sort_by_key(|m| m.1); // left-to-right
+    // One placeholder workspace each; distribute_workspaces sets the real counts.
     raw.into_iter()
-        .map(|(h, _, wa)| Monitor::new(h, wa, count))
+        .map(|(h, _, wa)| Monitor::new(h, wa, 1))
         .collect()
 }
 
-/// Shrink every monitor's tiling work area to leave room for its status bar, so
-/// tiled windows never sit under it. A bar lives on each monitor.
-unsafe fn reserve_bar(monitors: &mut [Monitor], cfg: &Config) {
-    if !cfg.bar_enabled || cfg.bar_height <= 0 {
-        return;
-    }
-    for m in monitors.iter_mut() {
-        if cfg.bar_bottom {
-            m.work_area.bottom -= cfg.bar_height;
+/// Index of the primary (main) monitor — the one containing the origin (0,0).
+unsafe fn primary_index(monitors: &[Monitor]) -> usize {
+    let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTONEAREST).0 as isize;
+    monitors.iter().position(|m| m.hmon == hmon).unwrap_or(0)
+}
+
+/// Set each monitor's workspace count. In `per_monitor` mode every monitor gets
+/// `total` workspaces; in shared mode `total` is the GLOBAL number, distributed
+/// round-robin from the primary monitor outward (so it's a total, not per-screen).
+/// Existing workspaces (and their windows) are preserved.
+fn distribute_workspaces(monitors: &mut [Monitor], primary: usize, total: usize, per_monitor: bool) {
+    let n = monitors.len().max(1);
+    for (idx, m) in monitors.iter_mut().enumerate() {
+        let count = if per_monitor {
+            total
         } else {
-            m.work_area.top += cfg.bar_height;
+            let off = (idx + n - primary % n) % n;
+            if off >= total {
+                0
+            } else {
+                (total - 1 - off) / n + 1
+            }
+        }
+        .max(1);
+        while m.workspaces.len() < count {
+            m.workspaces.push(Workspace::new());
+        }
+        // Shrinking: don't lose windows on removed workspaces — fold them into
+        // the first workspace so they stay managed.
+        while m.workspaces.len() > count {
+            let extra = m.workspaces.pop().unwrap();
+            m.workspaces[0].windows.extend(extra.windows);
+            m.workspaces[0].floating.extend(extra.floating);
+        }
+        if m.active >= m.workspaces.len() {
+            m.active = 0;
+        }
+    }
+}
+
+/// Recompute every monitor's tiling work area from its base (taskbar-excluded)
+/// area, leaving room for the status bar so tiled windows never sit under it.
+/// Idempotent — safe to call again on config reload.
+unsafe fn reserve_bar(monitors: &mut [Monitor], cfg: &Config) {
+    for m in monitors.iter_mut() {
+        m.work_area = m.base_work;
+        if cfg.bar_enabled && cfg.bar_height > 0 {
+            if cfg.bar_bottom {
+                m.work_area.bottom -= cfg.bar_height;
+            } else {
+                m.work_area.top += cfg.bar_height;
+            }
         }
     }
 }
@@ -1613,11 +1730,11 @@ fn launch(cmd: &str) {
         .spawn();
 }
 
-/// Reveal every tracked window and pull it onto the primary display, so nothing
-/// is left hidden (off other workspaces) or stranded when suprland exits.
+/// Reveal every tracked window (so nothing is left hidden on another workspace)
+/// and undo suprland's styling — but leave every window exactly where it is, so
+/// quitting doesn't disturb the current layout.
 unsafe fn restore_all_windows() {
     SUPPRESS.store(true, Ordering::Relaxed);
-    let primary = work_area_at(POINT { x: 0, y: 0 });
     let list = MANAGED.lock().unwrap().clone();
     for h in list {
         let hwnd = hwnd_from(h);
@@ -1625,7 +1742,7 @@ unsafe fn restore_all_windows() {
             continue;
         }
         let _ = ShowWindow(hwnd, SW_SHOW);
-        // Undo any dimming and restore the default border.
+        // Undo any dimming and restore the default border. Positions untouched.
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
         let def: u32 = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
         let _ = DwmSetWindowAttribute(
@@ -1634,23 +1751,6 @@ unsafe fn restore_all_windows() {
             &def as *const _ as *const c_void,
             core::mem::size_of::<u32>() as u32,
         );
-        let mut r = RECT::default();
-        if GetWindowRect(hwnd, &mut r).is_ok() {
-            let w = (r.right - r.left).max(MIN_W);
-            let h2 = (r.bottom - r.top).max(MIN_H);
-            // Clamp onto the primary work area if it's hidden/off-screen there.
-            let x = r.left.clamp(primary.left, (primary.right - w).max(primary.left));
-            let y = r.top.clamp(primary.top, (primary.bottom - h2).max(primary.top));
-            let _ = SetWindowPos(
-                hwnd,
-                None,
-                x,
-                y,
-                w,
-                h2,
-                SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-            );
-        }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
 }
@@ -1707,7 +1807,13 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
             mgr.cfg.inner_gap,
         )
     } else {
-        dwindle_layout(mon.work_area, n, mgr.cfg.outer_gap, mgr.cfg.inner_gap)
+        dwindle_layout(
+            mon.work_area,
+            n,
+            mgr.cfg.outer_gap,
+            mgr.cfg.inner_gap,
+            &ws.splits,
+        )
     };
     if rects.len() < n {
         return;
@@ -1972,7 +2078,9 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             }
         }
     }
-    let mut fresh = enumerate_monitors(mgr.cfg.workspaces);
+    let mut fresh = enumerate_monitors();
+    let primary = primary_index(&fresh);
+    distribute_workspaces(&mut fresh, primary, mgr.cfg.workspaces, mgr.cfg.per_monitor);
     for mon in fresh.iter_mut() {
         if let Some((_, a)) = old_active.iter().find(|(hm, _)| *hm == mon.hmon) {
             if *a < mon.workspaces.len() {
@@ -1982,9 +2090,7 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
     }
     reserve_bar(&mut fresh, &mgr.cfg);
     mgr.monitors = fresh;
-    // Recompute which monitor is primary (main) after the layout change.
-    let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTONEAREST).0 as isize;
-    mgr.primary = mgr.mon_by_hmon(primary).unwrap_or(0);
+    mgr.primary = primary;
     for (old_hmon, wi, h) in tracked {
         if !is_manageable(hwnd_from(h)) {
             continue;
@@ -2303,17 +2409,42 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             {
                 return;
             }
-            // Resizing the master window updates the split ratio; otherwise the
-            // window just snaps back to its tiled slot.
-            if mgr.monitors[mi].workspaces[wi].windows.first() == Some(&h) {
-                let mut r = RECT::default();
-                if GetWindowRect(hwnd_from(h), &mut r).is_ok() {
-                    let wa = mgr.monitors[mi].work_area;
+            let mut r = RECT::default();
+            if GetWindowRect(hwnd_from(h), &mut r).is_err() {
+                retile_monitor(mgr, mi);
+                return;
+            }
+            let wa = mgr.monitors[mi].work_area;
+            // Tiled order must match what retile_monitor / dwindle_layout use.
+            let tiled: Vec<isize> = mgr.monitors[mi].workspaces[wi]
+                .windows
+                .iter()
+                .copied()
+                .filter(|w| {
+                    !mgr.monitors[mi].workspaces[wi].floating.contains(w)
+                        && !IsIconic(hwnd_from(*w)).as_bool()
+                })
+                .collect();
+            let n = tiled.len();
+            if mgr.cfg.layout == "master" {
+                // Master width sets the ratio; stack windows snap back.
+                if tiled.first() == Some(&h) {
                     let total =
                         (wa.right - wa.left - 2 * mgr.cfg.outer_gap - mgr.cfg.inner_gap).max(1);
                     let mw = (r.right - r.left).max(1);
                     mgr.cfg.master_ratio = (mw as f32 / total as f32).clamp(0.15, 0.85);
                 }
+            } else if let Some(idx) = tiled.iter().position(|&w| w == h) {
+                // Dwindle: edit the split ratio so neighbours reflow to fill.
+                resize_dwindle(
+                    &mut mgr.monitors[mi].workspaces[wi].splits,
+                    wa,
+                    n,
+                    mgr.cfg.outer_gap,
+                    mgr.cfg.inner_gap,
+                    idx,
+                    r,
+                );
             }
             retile_monitor(mgr, mi);
         }
@@ -2883,23 +3014,19 @@ fn focus_follow_worker() {
 
 fn manager_loop(cfg: Config) {
     let mut mgr = unsafe {
-        let mut monitors = enumerate_monitors(cfg.workspaces);
+        let mut monitors = enumerate_monitors();
+        // The main monitor (contains the origin 0,0) owns workspace 1 and gets
+        // initial focus.
+        let primary = primary_index(&monitors);
+        distribute_workspaces(&mut monitors, primary, cfg.workspaces, cfg.per_monitor);
         reserve_bar(&mut monitors, &cfg);
         let mut m = Manager {
             monitors,
-            focused_mon: 0,
-            primary: 0,
+            focused_mon: primary,
+            primary,
             tiling: cfg.start_tiled,
             cfg,
         };
-        // The main monitor (contains the origin 0,0) owns workspace 1 and gets
-        // initial focus.
-        let primary =
-            MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTONEAREST).0 as isize;
-        if let Some(i) = m.mon_by_hmon(primary) {
-            m.focused_mon = i;
-            m.primary = i;
-        }
         assign_existing_windows(&mut m);
         if m.tiling {
             retile_all(&m);
@@ -2987,13 +3114,11 @@ unsafe extern "system" fn win_event_proc(
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND => {
             push_cmd(Cmd::Retile);
         }
-        EVENT_SYSTEM_MOVESIZEEND => {
-            // User finished a native (non-Alt) move/resize. Re-integrate the
-            // window into the tiling: master keeps its new width as the ratio,
-            // everything else snaps back so windows never overlap.
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                push_cmd(Cmd::DragResized(hwnd.0 as isize));
-            }
+        // User finished a native (non-Alt) move/resize. Re-integrate the window
+        // into the tiling: master keeps its new width as the ratio, everything
+        // else snaps back so windows never overlap.
+        EVENT_SYSTEM_MOVESIZEEND if !SUPPRESS.load(Ordering::Relaxed) => {
+            push_cmd(Cmd::DragResized(hwnd.0 as isize));
         }
         _ => {}
     }

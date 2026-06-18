@@ -5,7 +5,7 @@ edition = "2021"
 description = "Hyprland-style Alt-drag move/resize + tiling window manager for Windows"
 license = "MIT"
 homepage = "https://suprland.vercel.app"
-repository = "https://github.com/YOUR_USERNAME/suprland"
+repository = "https://github.com/Page011/Suprland"
 keywords = ["windows", "tiling", "window-manager", "alt-drag"]
 categories = ["os::windows-apis"]
 
