@@ -4,7 +4,7 @@ Alt-drag move/resize and master-stack tiling window manager for Windows,
 inspired by Hyprland's mouse bindings.
 
 [![GitHub release](https://img.shields.io/github/v/release/Page011/Suprland)](https://github.com/Page011/Suprland/releases/latest)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 ## Install
 
@@ -62,4 +62,4 @@ Press `Ctrl+C` in the console window. (Or kill the process from Task Manager.)
 
 ## Licence
 
-MIT — see [LICENSE](LICENSE).
+Apache-2.0 — see [LICENSE](LICENSE).
