@@ -1,0 +1,36 @@
+[package]
+name = "suprland"
+version = "0.1.0"
+edition = "2021"
+description = "Hyprland-style Alt-drag move/resize + tiling window manager for Windows"
+license = "MIT"
+homepage = "https://suprland.vercel.app"
+repository = "https://github.com/YOUR_USERNAME/suprland"
+keywords = ["windows", "tiling", "window-manager", "alt-drag"]
+categories = ["os::windows-apis"]
+
+[[bin]]
+name = "suprland"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+]

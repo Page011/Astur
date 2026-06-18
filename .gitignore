@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+
+# Planning / internal docs (not for public repo)
+/public/
+/site/
+
+# Windows
+Thumbs.db
+Desktop.ini
