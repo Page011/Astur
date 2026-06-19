@@ -91,7 +91,7 @@ the same flow on Windows, suprland aims to be the smallest thing that works:
 | Master-stack tiling | Yes | Yes | Yes | No (zones only) |
 | Alt-drag move/resize anywhere | Yes | No | No | No |
 | Single portable exe, no install | Yes | No (needs config) | No (installer) | Part of PowerToys |
-| Virtual workspaces | 9 | Yes | Yes | Via Windows |
+| Virtual workspaces | Yes | Yes | Yes | Via Windows |
 | Config file required to start | No | Yes | Yes | No |
 | Language | Rust | Rust | C++ | C# |
 
@@ -106,7 +106,7 @@ required and adds Hyprland-style Alt-drag move/resize.
 
 **Does it work on Windows 11?** Yes, on Windows 10 and 11, x64.
 
-**Do I need admin rights?** No. It's a portable exe.
+**Do I need admin rights?** No. It's a portable exe. It is reccomended to run as admin to beable to run to its best ability.
 
 ## Licence
 
