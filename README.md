@@ -106,7 +106,7 @@ required and adds Hyprland-style Alt-drag move/resize.
 
 **Does it work on Windows 11?** Yes, on Windows 10 and 11, x64.
 
-**Do I need admin rights?** No. It's a portable exe.
+**Do I need admin rights?** No. It's a portable exe. It is reccomended to run as admin to beable to run to its best ability.
 
 ## Licence
 
