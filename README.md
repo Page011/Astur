@@ -1,10 +1,22 @@
-# suprland
+# suprland — Tiling Window Manager for Windows
 
-Alt-drag move/resize and master-stack tiling window manager for Windows,
-inspired by Hyprland's mouse bindings.
+**suprland** is a fast, free, open-source **tiling window manager for Windows**
+with **Hyprland-style** Alt-drag window movement, nearest-corner resize,
+master-stack tiling, and 9 virtual workspaces — all in a single portable Rust
+`.exe` with no installer. A lightweight alternative to
+[komorebi](https://github.com/LGUG2Z/komorebi),
+[GlazeWM](https://github.com/glzr-io/glazewm), and PowerToys FancyZones for
+keyboard-driven, i3/Hyprland-style window management on Windows 10 and 11.
 
 [![GitHub release](https://img.shields.io/github/v/release/Page011/Suprland)](https://github.com/Page011/Suprland/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Website](https://img.shields.io/badge/website-suprland.vercel.app-366382)](https://suprland.vercel.app)
+[![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
+[![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Suprland/releases/latest)
+
+> **Keywords:** tiling window manager Windows · Hyprland for Windows · komorebi
+> alternative · GlazeWM alternative · FancyZones alternative · i3 for Windows ·
+> Alt-drag windows · master-stack layout · Rust window manager
 
 ## Install
 
@@ -68,6 +80,33 @@ stall on a slow application's `SetWindowPos`.
 ## Quit
 
 Press `Ctrl+C` in the console window. (Or kill the process from Task Manager.)
+
+## How suprland compares
+
+If you've used a tiling window manager on Linux (i3, Hyprland, sway) and want
+the same flow on Windows, suprland aims to be the smallest thing that works:
+
+| | suprland | komorebi | GlazeWM | FancyZones |
+|---|---|---|---|---|
+| Master-stack tiling | Yes | Yes | Yes | No (zones only) |
+| Alt-drag move/resize anywhere | Yes | No | No | No |
+| Single portable exe, no install | Yes | No (needs config) | No (installer) | Part of PowerToys |
+| Virtual workspaces | 9 | Yes | Yes | Via Windows |
+| Config file required to start | No | Yes | Yes | No |
+| Language | Rust | Rust | C++ | C# |
+
+suprland trades configurability for zero-setup speed: run the exe and Alt-drag
+works immediately, tiling is one keypress away.
+
+## FAQ
+
+**Is suprland a komorebi or GlazeWM alternative?** Yes — same master-stack
+tiling and workspace idea, but it runs from a single exe with no config file
+required and adds Hyprland-style Alt-drag move/resize.
+
+**Does it work on Windows 11?** Yes, on Windows 10 and 11, x64.
+
+**Do I need admin rights?** No. It's a portable exe.
 
 ## Licence
 
