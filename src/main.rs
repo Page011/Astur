@@ -18,20 +18,27 @@
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Condvar, Mutex};
+use std::time::Instant;
 
-use windows::core::w;
+mod config;
+mod layout;
+use config::{config_path, load_config, Config};
+use layout::{dwindle_layout, master_stack, resize_dwindle, split_ratio};
+
+use windows::core::{w, PCWSTR};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Foundation::{
     BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CombineRgn, CreateFontW, CreateRectRgn, CreateSolidBrush, DeleteObject, DrawTextW,
-    EndPaint, EnumDisplayMonitors, FillRect, GetMonitorInfoW, GetStockObject, InvalidateRect,
-    MonitorFromPoint, MonitorFromWindow, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
-    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DT_CENTER,
-    DT_END_ELLIPSIS, DT_LEFT, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC, HGDIOBJ,
-    HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT, RGN_OR,
-    TRANSPARENT,
+    BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
+    MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+    SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
+    DT_VCENTER, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
+    PAINTSTRUCT, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
@@ -40,7 +47,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LBUTTON, VK_LMENU, VK_MENU, VK_RBUTTON,
     VK_TAB,
 };
-use windows::Win32::UI::WindowsAndMessaging::{                  
+use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
     GetDesktopWindow, GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, RegisterClassW,
     SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow,
@@ -49,7 +56,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HWND_TOPMOST, KBDLLHOOKSTRUCT,
     LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
     SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
+    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, DestroyWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
@@ -59,8 +66,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use std::collections::{HashMap, VecDeque};
 use core::ffi::c_void;
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
-    DWMWA_EXTENDED_FRAME_BOUNDS,
+    DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail,
+    DwmUpdateThumbnailProperties, DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
+    DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE, DWM_THUMBNAIL_PROPERTIES,
 };
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
@@ -69,7 +77,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows,
     GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowTextLengthW,
     GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
-    IsIconic, IsWindow, IsWindowVisible, PostMessageW, SetWindowLongPtrW, GWLP_USERDATA,
+    IsIconic, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SetWindowLongPtrW, GWLP_USERDATA, PM_REMOVE,
     SetForegroundWindow, SetTimer, SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
     EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
@@ -92,6 +100,8 @@ const MARK_THICK: i32 = 4;
 // Top corners sit on the very top edge; lift the bracket up slightly so it reads
 // as hugging the corner instead of sitting inside the title bar.
 const MARK_TOP_LIFT: i32 = 8;
+// Window class for the transient workspace-slide overlay.
+const SLIDE_CLASS: PCWSTR = w!("suprland_slide");
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -198,6 +208,35 @@ fn position_worker() {
             }
         }
     }
+}
+
+// =========================================================================
+// Tile placement is instant: one SetWindowPos per window. suprland renders no
+// window pixels (DWM does), so the only positional "animation" possible was
+// interpolating SetWindowPos over time — it landed windows unreliably across
+// apps and cost a per-frame cross-process DWM round-trip, so it was removed in
+// favour of going straight to the target. The workspace-switch slide (DWM
+// thumbnails, see run_transition) is a separate GPU-composited effect and is
+// kept; ease_out_cubic below still paces it.
+// =========================================================================
+#[inline]
+fn ease_out_cubic(t: f64) -> f64 {
+    let u = 1.0 - t;
+    1.0 - u * u * u
+}
+
+/// Move a window with no activation/zorder side effects (instant tile placement
+/// and the workspace-slide reveal).
+unsafe fn set_pos_raw(h: isize, r: RECT) {
+    let _ = SetWindowPos(
+        hwnd_from(h),
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+    );
 }
 
 // Set by the keyboard hook while physical Left Alt is held (Alt is blocked from
@@ -611,525 +650,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 // misbehaves, leaving everything un-tiled.
 // =========================================================================
 
-/// Runtime configuration, loaded from suprland.conf at startup.
-#[derive(Clone)]
-struct Config {
-    per_monitor: bool,          // true: Alt+1..9 switches focused monitor only
-    start_tiled: bool,          // tile automatically on launch
-    outer_gap: i32,             // gap between windows and screen edge
-    inner_gap: i32,             // gap between adjacent windows
-    master_ratio: f32,          // fraction of width given to the master window
-    workspaces: usize,          // workspaces per monitor (1..10)
-    workspace_keys: Vec<u32>,   // VK code per workspace; Alt+key switches, +Shift moves
-    layout: String,            // "dwindle" (spiral into a corner) or "master"
-    terminal: String,           // command launched by Alt+Enter
-    browser: String,            // Alt+Shift+Enter; empty = default browser
-    unfocused_opacity: f32,     // 0.0-1.0 alpha for unfocused windows (1.0 = off)
-    border_enabled: bool,       // draw coloured DWM borders (Windows 11)
-    focused_border: u32,        // COLORREF for the focused window border
-    unfocused_border: u32,      // COLORREF for unfocused window borders
-    cursor_follows_focus: bool, // warp the mouse to the focused window
-    focus_follows_mouse: bool,  // hovering a window focuses it (Hyprland follow_mouse)
-    bar_enabled: bool,          // draw the status bar (waybar-style) on every monitor
-    bar_height: i32,            // bar thickness in px (work area is reserved for it)
-    bar_bottom: bool,           // dock the bar at the bottom instead of the top
-    bar_font_size: i32,         // text height in px; 0 = auto from bar_height
-    bar_show_title: bool,       // show the focused window title
-    bar_show_clock: bool,       // show the clock
-    bar_clock_24h: bool,        // 24-hour clock (false = 12-hour with am/pm)
-    bar_show_layout: bool,      // show layout + tiling/floating state on the right
-    bar_bg: u32,                // COLORREF bar background
-    bar_fg: u32,                // COLORREF bar text
-    bar_accent: u32,            // COLORREF active-workspace highlight
-    bar_inactive: u32,          // COLORREF empty-workspace text
-    ignore_classes: Vec<String>, // window classes never tiled/managed
-    float_classes: Vec<String>,  // window classes managed but auto-floated
-    key_focus_next: u32,      // Alt+<key> focus next window in the stack (default J)
-    key_focus_prev: u32,      // Alt+<key> focus previous window in the stack (default K)
-    key_shrink_master: u32,   // Alt+<key> shrink the master area (default H)
-    key_grow_master: u32,     // Alt+<key> grow the master area (default L)
-    key_promote_master: u32,  // Alt+<key> promote focused window to master (default M)
-    key_toggle_tiling: u32,   // Alt+<key> toggle tiling on/off (default T)
-    key_toggle_float: u32,    // Alt+<key> toggle floating for focused window (default F)
-    key_close_window: u32,    // Alt+<key> close the focused window (default W)
-}
-
-impl Config {
-    fn defaults() -> Self {
-        Config {
-            per_monitor: false,
-            start_tiled: true,
-            outer_gap: 8,
-            inner_gap: 8,
-            master_ratio: 0.55,
-            workspaces: 9,
-            workspace_keys: parse_keys("1 2 3 4 5 6 7 8 9 0"),
-            layout: "dwindle".to_string(),
-            terminal: "wt.exe".to_string(),
-            browser: String::new(),
-            unfocused_opacity: 0.8,
-            border_enabled: true,
-            focused_border: parse_color("#66AAFF", 0x00FFAA66),
-            unfocused_border: parse_color("#223A5E", 0x005E3A22),
-            cursor_follows_focus: true,
-            focus_follows_mouse: false,
-            bar_enabled: true,
-            bar_height: 28,
-            bar_bottom: false,
-            bar_font_size: 0,
-            bar_show_title: true,
-            bar_show_clock: true,
-            bar_clock_24h: true,
-            bar_show_layout: true,
-            bar_bg: parse_color("#1A1B26", 0x00261B1A),
-            bar_fg: parse_color("#C0CAF5", 0x00F5CAC0),
-            bar_accent: parse_color("#66AAFF", 0x00FFAA66),
-            bar_inactive: parse_color("#565F89", 0x00895F56),
-            ignore_classes: Vec::new(),
-            float_classes: Vec::new(),
-            key_focus_next: 0x4A,     // J
-            key_focus_prev: 0x4B,     // K
-            key_shrink_master: 0x48,  // H
-            key_grow_master: 0x4C,    // L
-            key_promote_master: 0x4D, // M
-            key_toggle_tiling: 0x54,  // T
-            key_toggle_float: 0x46,   // F
-            key_close_window: 0x57,   // W
-        }
-    }
-}
-
-const DEFAULT_CONFIG: &str = "\
-# ============================================================================
-# suprland configuration  (window manager)
-# ============================================================================
-# Location : %USERPROFILE%\\.suprland\\suprland.conf
-#            (override with the SUPRLAND_CONFIG environment variable)
-# The status bar is configured separately in navbar.conf (same folder).
-# Apply    : edit this file, then restart suprland.
-# Regen    : delete this file and relaunch to get a fresh, fully-commented copy.
-#
-# Syntax   : one  key = value  per line. '#' starts a comment. Blank lines and
-#            surrounding whitespace are ignored. Unknown keys are ignored, so a
-#            typo silently falls back to the default below rather than erroring.
-#
-# Value types:
-#   bool   : true / false   (also accepts yes/no, 1/0, on/off; anything else
-#            counts as false)
-#   int    : whole number; clamped to the stated range
-#   float  : decimal; clamped to the stated range
-#   colour : #RRGGBB hex (e.g. #66AAFF). Malformed values keep the default.
-#   text   : literal string (program name / command line)
-#   keys   : space/comma list of key names: 0-9, A-Z, F1-F24.
-#
-# Every key below is shown set to its built-in DEFAULT.
-# ============================================================================
-
-# ---------------------------------------------------------------------------
-# Workspaces & layout
-# ---------------------------------------------------------------------------
-
-# How workspaces map to monitors.
-#   shared      = workspaces are numbered globally, starting from your MAIN
-#                 (primary) monitor and rotating outward. With 3 monitors,
-#                 ws1 = main monitor, ws2 = next, ws3 = next, ws4 = main (its
-#                 2nd workspace), and so on. The workspace key jumps focus to
-#                 whichever monitor owns that workspace.
-#   per_monitor = each monitor has its own independent workspaces 1..N
-#                 (GlazeWM style). The workspace key switches the workspace on
-#                 the monitor that currently has focus.
-# values: shared | per_monitor
-workspace_mode = shared
-
-# Number of workspaces.  int 1 - 10
-#   shared mode      = TOTAL across all monitors (distributed from the main
-#                      monitor outward).
-#   per_monitor mode = workspaces per monitor.
-workspaces = 10
-
-# Keys (with LEFT ALT) that select workspaces 1, 2, 3, ... in order. Add Shift
-# to MOVE the focused window to that workspace instead. Avoid the fixed binds
-# (J K H L M T F W and arrows/Enter). Example for Alt+Q/W/E = ws 1/2/3:
-#   workspace_keys = Q W E R T Y
-# keys
-workspace_keys = 1 2 3 4 5 6 7 8 9 0
-
-# Tile windows automatically on launch (Alt+T toggles at runtime).  bool
-start_tiled = true
-
-# Tiling layout.
-#   dwindle = each new window splits the remaining space, spiralling into the
-#             bottom corner (Hyprland / omarchy default).
-#   master  = one large master column on the left, the rest stacked on the right.
-# values: dwindle | master
-layout = dwindle
-
-# Fraction of the width given to the master window (master layout, and the
-# master split that Alt+H / Alt+L adjust).  float 0.10 - 0.90
-master_ratio = 0.55
-
-# ---------------------------------------------------------------------------
-# Gaps
-# ---------------------------------------------------------------------------
-
-# Gap in pixels between windows and the screen edge.  int (>= 0)
-outer_gap = 8
-# Gap in pixels between adjacent windows.  int (>= 0)
-inner_gap = 8
-
-# ---------------------------------------------------------------------------
-# Focus & cursor behaviour
-# ---------------------------------------------------------------------------
-
-# Warp the mouse cursor onto the window that gains focus via Alt+arrows and on
-# workspace switches.  bool
-cursor_follows_focus = true
-
-# Focus follows mouse: hovering a window with the cursor focuses it, like
-# Hyprland's follow_mouse. Off by default (Windows focus-steal is more abrupt
-# than on Wayland); set true for the omarchy/Hyprland feel.  bool
-focus_follows_mouse = false
-
-# ---------------------------------------------------------------------------
-# Appearance: window borders & dimming
-# ---------------------------------------------------------------------------
-
-# Dim unfocused windows to this opacity.  float 0.10 - 1.00  (1.0 = disabled)
-unfocused_opacity = 0.8
-
-# Coloured window borders. Requires Windows 11 (no effect on Windows 10).  bool
-border_enabled = true
-# Border colour of the focused window.    colour
-focused_border = #66AAFF
-# Border colour of unfocused windows.     colour
-unfocused_border = #223A5E
-
-# ---------------------------------------------------------------------------
-# Window rules
-# ---------------------------------------------------------------------------
-# Comma-separated lists of window CLASS names (not titles). Use a tool like
-# AutoHotkey's Window Spy, or Spy++, to find a window's class.
-
-# Never tile/manage these (in addition to the built-in shell/tooltip/lock-screen
-# filtering). Example: ignore_classes = TaskManagerWindow, MyOverlayClass
-ignore_classes =
-# Manage but always float these (let the app place them; don't tile).
-# Example: float_classes = #32770, MsiDialogCloseClass
-float_classes =
-
-# ---------------------------------------------------------------------------
-# Launchers
-# ---------------------------------------------------------------------------
-
-# Program launched by Alt+Enter. Resolved via the shell, so PATH and App
-# Execution Aliases (e.g. wt.exe) work.  text
-terminal = wt.exe
-# Program launched by Alt+Shift+Enter. Leave EMPTY to open the system default
-# browser.  text
-browser =
-
-# ============================================================================
-# Hotkeys (LEFT ALT is the modifier)
-# ============================================================================
-#   Alt + left-drag      move window under cursor (drops back into the tiling)
-#   Alt + right-drag     resize nearest corner (red bracket marker)
-#   Alt+T                toggle tiling on/off (floating mode; workspaces kept)
-#   Alt+J / Alt+K        focus next / previous window in the stack
-#   Alt+Shift+J / K      swap window order in the stack
-#   Alt+arrows           focus window by direction (cursor follows)
-#   Alt+Shift+arrows     move window by direction (across monitors)
-#   Alt+M                promote focused window to master
-#   Alt+H / Alt+L        shrink / grow the master area
-#   Alt+F                toggle floating for the focused window
-#   Alt+W                close the focused window
-#   Alt+Enter            launch terminal
-#   Alt+Shift+Enter      launch browser
-#   Alt+<workspace_key>  switch to that workspace (see workspace_keys above)
-#   Alt+Shift+<ws key>   move focused window to that workspace (and follow it)
-#   Alt+Tab              normal task switcher (still works)
-#   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by suprland)
-#
-# The letter keys above (J K H L M T F W) are rebindable. Each takes a single
-# key name (see the 'keys' type at the top of this file). Arrows and Enter
-# are fixed.  key
-key_focus_next = J
-key_focus_prev = K
-key_shrink_master = H
-key_grow_master = L
-key_promote_master = M
-key_toggle_tiling = T
-key_toggle_float = F
-key_close_window = W
-# ============================================================================
-";
-
-const DEFAULT_NAVBAR: &str = "\
-# ============================================================================
-# suprland navbar configuration  (status bar)
-# ============================================================================
-# Location : %USERPROFILE%\\.suprland\\navbar.conf
-#            (override with the SUPRLAND_NAVBAR environment variable)
-# Window-manager settings live separately in suprland.conf (same folder).
-# Apply    : edit this file, then restart suprland.
-#
-# One bar is drawn on EVERY monitor. Each shows that monitor's workspaces and
-# focused window. The tiling work area is reserved so windows never sit under a
-# bar. Click a workspace pill to switch to it.
-#
-# Value types: bool, int, colour (#RRGGBB) -- see suprland.conf for details.
-# ============================================================================
-
-# Show the bars.  bool   (set false to disable entirely)
-enabled = true
-# Bar thickness in pixels.  int 0 - 200  (0 also disables it)
-height = 28
-# Dock the bars at the bottom of each screen instead of the top.  bool
-bottom = false
-# Text height in px. 0 = auto (about half the bar height).  int 0 - 100
-font_size = 0
-# Show the focused window title.  bool
-show_title = true
-# Show the clock.  bool
-show_clock = true
-# 24-hour clock; false = 12-hour with am/pm.  bool
-clock_24h = true
-# Show the layout name + tiling/floating state on the right.  bool
-show_layout = true
-
-# Colours (#RRGGBB).
-bg = #1A1B26
-fg = #C0CAF5
-# Active-workspace pill highlight.
-accent = #66AAFF
-# Empty workspaces / layout text.
-inactive = #565F89
-";
-
-fn parse_bool(v: &str) -> bool {
-    matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1" | "on")
-}
-
-/// Parse a comma/semicolon-separated list of window-class names, trimmed.
-fn parse_list(v: &str) -> Vec<String> {
-    v.split([',', ';'])
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect()
-}
-
-/// Map a key name ("1", "Q", "F3") to its Win32 virtual-key code.
-fn key_to_vk(name: &str) -> Option<u32> {
-    let n = name.trim().to_ascii_uppercase();
-    let b = n.as_bytes();
-    if b.len() == 1 {
-        let c = b[0];
-        if c.is_ascii_digit() || c.is_ascii_uppercase() {
-            return Some(c as u32); // ASCII '0'-'9'/'A'-'Z' == their VK codes
-        }
-    }
-    if let Some(num) = n.strip_prefix('F') {
-        if let Ok(k) = num.parse::<u32>() {
-            if (1..=24).contains(&k) {
-                return Some(0x70 + k - 1); // VK_F1 = 0x70
-            }
-        }
-    }
-    None
-}
-
-/// Parse a space/comma-separated list of key names into VK codes.
-fn parse_keys(v: &str) -> Vec<u32> {
-    v.split([',', ' ', '\t'])
-        .filter_map(|s| {
-            let s = s.trim();
-            if s.is_empty() {
-                None
-            } else {
-                key_to_vk(s)
-            }
-        })
-        .collect()
-}
-
-/// Parse a #RRGGBB hex string into a Win32 COLORREF (0x00BBGGRR). Falls back to
-/// `fallback` on any malformed input.
-fn parse_color(v: &str, fallback: u32) -> u32 {
-    let s = v.trim().trim_start_matches('#');
-    if s.len() == 6 {
-        if let Ok(rgb) = u32::from_str_radix(s, 16) {
-            let r = (rgb >> 16) & 0xFF;
-            let g = (rgb >> 8) & 0xFF;
-            let b = rgb & 0xFF;
-            return (b << 16) | (g << 8) | r;
-        }
-    }
-    fallback
-}
-
-/// Resolve a config file path: env override, else %USERPROFILE%\.suprland\<name>.
-fn config_path(env: &str, name: &str) -> std::path::PathBuf {
-    if let Ok(p) = std::env::var(env) {
-        return std::path::PathBuf::from(p);
-    }
-    let mut dir = std::env::var("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    dir.push(".suprland");
-    dir.push(name);
-    dir
-}
-
-/// Read a config file, writing `default` the first time it is missing.
-fn read_or_create(path: &std::path::Path, default: &str) -> String {
-    match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(path, default);
-            println!("wrote default config: {}", path.display());
-            default.to_string()
-        }
-    }
-}
-
-/// Load settings from suprland.conf (window manager) and navbar.conf (status
-/// bar), creating each with documented defaults when missing.
-fn load_config() -> Config {
-    let mut c = Config::defaults();
-    let wm = config_path("SUPRLAND_CONFIG", "suprland.conf");
-    parse_into(&mut c, &read_or_create(&wm, DEFAULT_CONFIG));
-    let nav = config_path("SUPRLAND_NAVBAR", "navbar.conf");
-    parse_into(&mut c, &read_or_create(&nav, DEFAULT_NAVBAR));
-    c
-}
-
-/// Apply `key = value` lines from `text` onto `c`. Unknown keys are ignored.
-/// Recognises both the window-manager keys (suprland.conf) and the navbar keys
-/// (navbar.conf, unprefixed) so either file may set either, and old configs that
-/// used the `bar_*` names keep working.
-fn parse_into(c: &mut Config, text: &str) {
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let Some((k, v)) = line.split_once('=') else {
-            continue;
-        };
-        let (k, v) = (k.trim(), v.trim());
-        match k {
-            // ---- window manager (suprland.conf) ----
-            "workspace_mode" => c.per_monitor = v.eq_ignore_ascii_case("per_monitor"),
-            "start_tiled" => c.start_tiled = parse_bool(v),
-            "outer_gap" => {
-                if let Ok(n) = v.parse() {
-                    c.outer_gap = n;
-                }
-            }
-            "inner_gap" => {
-                if let Ok(n) = v.parse() {
-                    c.inner_gap = n;
-                }
-            }
-            "master_ratio" => {
-                if let Ok(n) = v.parse::<f32>() {
-                    c.master_ratio = n.clamp(0.1, 0.9);
-                }
-            }
-            "workspaces" => {
-                if let Ok(n) = v.parse::<usize>() {
-                    c.workspaces = n.clamp(1, 10);
-                }
-            }
-            "workspace_keys" => {
-                let keys = parse_keys(v);
-                if !keys.is_empty() {
-                    c.workspace_keys = keys;
-                }
-            }
-            "layout" => c.layout = v.to_ascii_lowercase(),
-            "terminal" => c.terminal = v.to_string(),
-            "browser" => c.browser = v.to_string(),
-            "unfocused_opacity" => {
-                if let Ok(n) = v.parse::<f32>() {
-                    c.unfocused_opacity = n.clamp(0.1, 1.0);
-                }
-            }
-            "border_enabled" => c.border_enabled = parse_bool(v),
-            "focused_border" => c.focused_border = parse_color(v, c.focused_border),
-            "unfocused_border" => c.unfocused_border = parse_color(v, c.unfocused_border),
-            "cursor_follows_focus" => c.cursor_follows_focus = parse_bool(v),
-            "focus_follows_mouse" => c.focus_follows_mouse = parse_bool(v),
-            "ignore_classes" => c.ignore_classes = parse_list(v),
-            "float_classes" => c.float_classes = parse_list(v),
-            "key_focus_next" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_focus_next = k;
-                }
-            }
-            "key_focus_prev" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_focus_prev = k;
-                }
-            }
-            "key_shrink_master" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_shrink_master = k;
-                }
-            }
-            "key_grow_master" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_grow_master = k;
-                }
-            }
-            "key_promote_master" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_promote_master = k;
-                }
-            }
-            "key_toggle_tiling" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_toggle_tiling = k;
-                }
-            }
-            "key_toggle_float" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_toggle_float = k;
-                }
-            }
-            "key_close_window" => {
-                if let Some(k) = key_to_vk(v) {
-                    c.key_close_window = k;
-                }
-            }
-            // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
-            "enabled" | "bar_enabled" => c.bar_enabled = parse_bool(v),
-            "height" | "bar_height" => {
-                if let Ok(n) = v.parse::<i32>() {
-                    c.bar_height = n.clamp(0, 200);
-                }
-            }
-            "bottom" | "bar_bottom" => c.bar_bottom = parse_bool(v),
-            "font_size" | "bar_font_size" => {
-                if let Ok(n) = v.parse::<i32>() {
-                    c.bar_font_size = n.clamp(0, 100);
-                }
-            }
-            "show_title" | "bar_show_title" => c.bar_show_title = parse_bool(v),
-            "show_clock" | "bar_show_clock" => c.bar_show_clock = parse_bool(v),
-            "clock_24h" | "bar_clock_24h" => c.bar_clock_24h = parse_bool(v),
-            "show_layout" | "bar_show_layout" => c.bar_show_layout = parse_bool(v),
-            "bg" | "bar_bg" => c.bar_bg = parse_color(v, c.bar_bg),
-            "fg" | "bar_fg" => c.bar_fg = parse_color(v, c.bar_fg),
-            "accent" | "bar_accent" => c.bar_accent = parse_color(v, c.bar_accent),
-            "inactive" | "bar_inactive" => c.bar_inactive = parse_color(v, c.bar_inactive),
-            _ => {}
-        }
-    }
-}
-
 /// A spatial direction for arrow-key focus/move.
 #[derive(Clone, Copy)]
 enum Dir {
@@ -1230,13 +750,27 @@ static BAR_FONT_SIZE: AtomicIsize = AtomicIsize::new(0); // 0 = auto from height
 static BAR_CELL: AtomicIsize = AtomicIsize::new(34);
 // Shared font handle for all bars (created once).
 static BAR_FONT: AtomicIsize = AtomicIsize::new(0);
+// Font family name, read on the main thread when (re)building the font.
+static BAR_FONT_NAME: Mutex<String> = Mutex::new(String::new());
+// Horizontal padding from each screen edge (px), read at paint time.
+static BAR_PADDING: AtomicIsize = AtomicIsize::new(8);
+// Live system stats (percent 0..100, or -1 = unavailable), filled by stats_worker
+// and read at paint time. Gated by STATS_ON so the worker idles when no stat
+// widget is enabled.
+static STATS_ON: AtomicBool = AtomicBool::new(false);
+static STAT_CPU: AtomicIsize = AtomicIsize::new(-1);
+static STAT_MEM: AtomicIsize = AtomicIsize::new(-1);
+static STAT_BAT: AtomicIsize = AtomicIsize::new(-1);
 
-/// Per-monitor paint data. `labels` are the workspace numbers to print (which
-/// differ between shared and per_monitor modes); `active`/`occupied` index into
-/// that same list, so the click handler can map a pill straight to a workspace.
+/// Per-monitor paint data. One entry per drawn pill: `slots[i]` is the local
+/// workspace index that pill maps to (so a click resolves straight to a
+/// workspace even when empty pills are hidden), `labels[i]` is the number to
+/// print, `occupied` bit i marks a pill whose workspace has windows, and
+/// `active` is the pill index of the shown workspace (usize::MAX if none).
 #[derive(Clone, PartialEq)]
 struct MonBar {
     hmon: isize,
+    slots: Vec<usize>,
     labels: Vec<usize>,
     active: usize,
     occupied: u64,
@@ -1254,6 +788,11 @@ struct BarData {
     show_clock: bool,
     clock_24h: bool,
     show_layout: bool,
+    show_date: bool,
+    date_format: String,
+    show_cpu: bool,
+    show_mem: bool,
+    show_battery: bool,
     layout: String,
     tiling: bool,
     mons: Vec<MonBar>,
@@ -1270,6 +809,11 @@ impl BarData {
             show_clock: true,
             clock_24h: true,
             show_layout: true,
+            show_date: false,
+            date_format: String::new(),
+            show_cpu: false,
+            show_mem: false,
+            show_battery: false,
             layout: String::new(),
             tiling: true,
             mons: Vec::new(),
@@ -1438,6 +982,7 @@ const BLOCK_CLASSES: &[&str] = &[
     "Default IME",
     "hyprwin_marker",
     "suprland_bar",
+    "suprland_slide",
 ];
 
 /// Is this a normal top-level application window we should tile?
@@ -1539,167 +1084,6 @@ unsafe fn adjust_for_border(hwnd: HWND, target: RECT) -> RECT {
         right: target.right + rp,
         bottom: target.bottom + bp,
     }
-}
-
-/// Master-stack layout (Hyprland dwindle-lite): one master column on the left,
-/// the remaining windows stacked vertically on the right.
-fn master_stack(area: RECT, n: usize, ratio: f32, outer: i32, inner: i32) -> Vec<RECT> {
-    let mut out = Vec::with_capacity(n);
-    let x0 = area.left + outer;
-    let y0 = area.top + outer;
-    let w = area.right - area.left - 2 * outer;
-    let h = area.bottom - area.top - 2 * outer;
-    if n == 0 || w <= 0 || h <= 0 {
-        return out;
-    }
-    if n == 1 {
-        out.push(RECT {
-            left: x0,
-            top: y0,
-            right: x0 + w,
-            bottom: y0 + h,
-        });
-        return out;
-    }
-    let master_w = ((w - inner) as f32 * ratio) as i32;
-    let stack_w = (w - inner) - master_w;
-    out.push(RECT {
-        left: x0,
-        top: y0,
-        right: x0 + master_w,
-        bottom: y0 + h,
-    });
-    let sx = x0 + master_w + inner;
-    let sc = (n - 1) as i32;
-    let each = (h - (sc - 1) * inner) / sc;
-    for i in 0..sc {
-        let sy = y0 + i * (each + inner);
-        let bottom = if i == sc - 1 { y0 + h } else { sy + each };
-        out.push(RECT {
-            left: sx,
-            top: sy,
-            right: sx + stack_w,
-            bottom,
-        });
-    }
-    out
-}
-
-/// The split ratio for level `i`, defaulting to 0.5 and clamped to a sane range.
-fn split_ratio(splits: &[f32], i: usize) -> f32 {
-    splits.get(i).copied().unwrap_or(0.5).clamp(0.05, 0.95)
-}
-
-/// Dwindle/spiral layout (Hyprland / omarchy default): each window takes a
-/// fraction (`splits[i]`, default half) of the remaining space, alternating the
-/// split along the longer side, so windows spiral toward the bottom corner.
-/// Resizing a window edits the relevant `splits` entry (see `resize_dwindle`).
-fn dwindle_layout(area: RECT, n: usize, outer: i32, inner: i32, splits: &[f32]) -> Vec<RECT> {
-    let mut out = Vec::with_capacity(n);
-    if n == 0 {
-        return out;
-    }
-    let mut cur = RECT {
-        left: area.left + outer,
-        top: area.top + outer,
-        right: area.right - outer,
-        bottom: area.bottom - outer,
-    };
-    if cur.right <= cur.left || cur.bottom <= cur.top {
-        return out;
-    }
-    for i in 0..n {
-        if i == n - 1 {
-            out.push(cur);
-            break;
-        }
-        let w = cur.right - cur.left;
-        let h = cur.bottom - cur.top;
-        let r = split_ratio(splits, i);
-        if w >= h {
-            let half = ((w - inner) as f32 * r) as i32;
-            out.push(RECT {
-                left: cur.left,
-                top: cur.top,
-                right: cur.left + half,
-                bottom: cur.bottom,
-            });
-            cur.left += half + inner;
-        } else {
-            let half = ((h - inner) as f32 * r) as i32;
-            out.push(RECT {
-                left: cur.left,
-                top: cur.top,
-                right: cur.right,
-                bottom: cur.top + half,
-            });
-            cur.top += half + inner;
-        }
-    }
-    out
-}
-
-/// Update `splits` so the dwindle window at tiled index `idx` matches the size
-/// the user dragged it to (`new`). Replays the cascade to find that window's
-/// split level + axis, then back-computes the ratio. Neighbours reflow to fill.
-fn resize_dwindle(
-    splits: &mut Vec<f32>,
-    area: RECT,
-    n: usize,
-    outer: i32,
-    inner: i32,
-    idx: usize,
-    new: RECT,
-) {
-    if n < 2 {
-        return;
-    }
-    // The window at idx owns split level idx (it takes the first part); the very
-    // last window instead shares level n-2 (it is that split's remainder).
-    let (level, is_remainder) = if idx < n - 1 {
-        (idx, false)
-    } else {
-        (n - 2, true)
-    };
-    if splits.len() < n - 1 {
-        splits.resize(n - 1, 0.5);
-    }
-    // Replay the cascade up to `level` to find that split's available rect.
-    let mut cur = RECT {
-        left: area.left + outer,
-        top: area.top + outer,
-        right: area.right - outer,
-        bottom: area.bottom - outer,
-    };
-    for i in 0..level {
-        let w = cur.right - cur.left;
-        let h = cur.bottom - cur.top;
-        let r = split_ratio(splits, i);
-        if w >= h {
-            let half = ((w - inner) as f32 * r) as i32;
-            cur.left += half + inner;
-        } else {
-            let half = ((h - inner) as f32 * r) as i32;
-            cur.top += half + inner;
-        }
-    }
-    let w = cur.right - cur.left;
-    let h = cur.bottom - cur.top;
-    let vertical = w >= h;
-    let avail = (if vertical { w } else { h } - inner).max(1) as f32;
-    let new_size = if vertical {
-        new.right - new.left
-    } else {
-        new.bottom - new.top
-    } as f32;
-    // First-half window: ratio = its size / available. Remainder window: it gets
-    // (1 - ratio), so ratio = 1 - its size / available.
-    let ratio = if is_remainder {
-        1.0 - new_size / avail
-    } else {
-        new_size / avail
-    };
-    splits[level] = ratio.clamp(0.05, 0.95);
 }
 
 /// Enumerate physical monitors, sorted left-to-right (0 = leftmost), each with
@@ -1846,10 +1230,12 @@ fn launch(cmd: &str) {
 /// Reveal every tracked window (so nothing is left hidden on another workspace)
 /// and undo suprland's styling — but leave every window exactly where it is, so
 /// quitting doesn't disturb the current layout.
-unsafe fn restore_all_windows() {
+/// Reveal + un-style a specific list of window handles. Takes the list by ref so
+/// callers control how they acquire it (the panic path must not re-lock a mutex
+/// it may already hold — see `restore_on_panic`).
+unsafe fn restore_windows(list: &[isize]) {
     SUPPRESS.store(true, Ordering::Relaxed);
-    let list = MANAGED.lock().unwrap().clone();
-    for h in list {
+    for &h in list {
         let hwnd = hwnd_from(h);
         if !IsWindow(hwnd).as_bool() {
             continue;
@@ -1868,6 +1254,21 @@ unsafe fn restore_all_windows() {
     SUPPRESS.store(false, Ordering::Relaxed);
 }
 
+unsafe fn restore_all_windows() {
+    let list = MANAGED.lock().unwrap().clone();
+    restore_windows(&list);
+}
+
+/// Panic-path restore: a thread panic with `panic = "abort"` runs the panic hook
+/// but then aborts, skipping the console handler — so reveal managed windows here
+/// or a window hidden on an inactive workspace is orphaned. Uses `try_lock`: the
+/// panic may have fired while this thread already held MANAGED, and std mutexes
+/// are not reentrant, so a blocking lock would deadlock instead of aborting.
+fn restore_on_panic() {
+    let list = MANAGED.try_lock().map(|g| g.clone()).unwrap_or_default();
+    unsafe { restore_windows(&list) };
+}
+
 /// Console control handler: on Ctrl+C / window-close / logoff, un-hide every
 /// managed window before the process dies so the user never loses them.
 unsafe extern "system" fn console_handler(_ctrl_type: u32) -> BOOL {
@@ -1875,32 +1276,28 @@ unsafe extern "system" fn console_handler(_ctrl_type: u32) -> BOOL {
     BOOL(0) // not fully handled — let the default handler terminate us
 }
 
-/// Move one window to a target rect. Restores minimized/maximized windows first
-/// (they can't be repositioned otherwise) and compensates the DWM shadow border
-/// so the visible edges sit flush. Individual SetWindowPos — robust per komorebi.
-unsafe fn position_window(hwnd: HWND, target: RECT) {
+/// Place a window at `target` immediately. Restores minimised/maximised windows
+/// first and border-corrects the resting rect so the visible edges sit flush.
+/// (Named `animate_to` for historical reasons; placement is now always instant.)
+unsafe fn animate_to(hwnd: HWND, target: RECT) {
     if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
         let _ = ShowWindow(hwnd, SW_RESTORE);
     }
-    let r = adjust_for_border(hwnd, target);
-    let _ = SetWindowPos(
-        hwnd,
-        None,
-        r.left,
-        r.top,
-        r.right - r.left,
-        r.bottom - r.top,
-        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
-    );
+    let to = adjust_for_border(hwnd, target);
+    set_pos_raw(hwnd.0 as isize, to);
 }
 
-/// Tile a single monitor's active workspace on that monitor's work area.
-unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
-    if !mgr.tiling || mi >= mgr.monitors.len() {
-        return;
+/// Compute the tiled (hwnd, screen-rect) targets for one workspace, in tiling
+/// order — shared by retiling and the slide compositor. Rects are raw layout
+/// rects (not yet border-corrected); callers adjust as needed.
+unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, RECT)> {
+    if mi >= mgr.monitors.len() {
+        return Vec::new();
     }
     let mon = &mgr.monitors[mi];
-    let ws = &mon.workspaces[mon.active];
+    let Some(ws) = mon.workspaces.get(wi) else {
+        return Vec::new();
+    };
     let tiled: Vec<isize> = ws
         .windows
         .iter()
@@ -1909,7 +1306,7 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
         .collect();
     let n = tiled.len();
     if n == 0 {
-        return;
+        return Vec::new();
     }
     let rects = if mgr.cfg.layout == "master" {
         master_stack(
@@ -1929,11 +1326,43 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
         )
     };
     if rects.len() < n {
+        return Vec::new();
+    }
+    tiled.into_iter().zip(rects).collect()
+}
+
+/// Tile a single monitor's active workspace on that monitor's work area,
+/// animating windows to their targets (glide) when animations are on.
+unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
+    if !mgr.tiling {
+        return;
+    }
+    let rects = workspace_layout(mgr, mi, mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0));
+    if rects.is_empty() {
         return;
     }
     SUPPRESS.store(true, Ordering::Relaxed);
-    for (i, h) in tiled.iter().enumerate() {
-        position_window(hwnd_from(*h), rects[i]);
+    for (h, target) in rects {
+        animate_to(hwnd_from(h), target);
+    }
+    SUPPRESS.store(false, Ordering::Relaxed);
+}
+
+/// Place the active workspace's windows at their targets INSTANTLY (no glide).
+/// Used on workspace switch: the windows were just revealed from a hidden state,
+/// so gliding them from a stale position would look like a jump.
+unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
+    if !mgr.tiling {
+        return;
+    }
+    let rects = workspace_layout(mgr, mi, mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0));
+    SUPPRESS.store(true, Ordering::Relaxed);
+    for (h, target) in rects {
+        let hwnd = hwnd_from(h);
+        if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
+        set_pos_raw(h, adjust_for_border(hwnd, target));
     }
     SUPPRESS.store(false, Ordering::Relaxed);
 }
@@ -2002,6 +1431,18 @@ unsafe fn style_all(mgr: &Manager) {
     }
 }
 
+/// Style every window of a monitor's active workspace to its final opacity +
+/// border immediately (focused vs dimmed). Called on workspace switch so the
+/// revealed windows are already at their resting opacity — otherwise they pop in
+/// at 100% and visibly dim a frame later.
+unsafe fn style_active(mgr: &Manager, mi: usize) {
+    let a = mgr.monitors[mi].active;
+    let f = mgr.monitors[mi].workspaces[a].focused;
+    for &h in &mgr.monitors[mi].workspaces[a].windows {
+        style_window(hwnd_from(h), h != 0 && h == f, &mgr.cfg);
+    }
+}
+
 /// Keep focus highlighting current. `style_window` makes cross-process DWM
 /// border + layered-alpha calls, so doing it for every window after every
 /// command was the dominant cost. Focus highlight only changes for at most two
@@ -2063,11 +1504,22 @@ fn pick_directional(items: &[(isize, RECT)], from: usize, dir: Dir) -> Option<us
     best
 }
 
-/// Collect the active workspace's windows with their current rectangles.
+/// Collect the active workspace's windows with rectangles for directional nav.
+/// Tiled windows use their LAYOUT TARGET rect (stable even while a glide is in
+/// flight — live GetWindowRect would return transient mid-animation positions
+/// and make Alt+arrow / Alt+Shift+arrow pick the wrong neighbour). Floating /
+/// untiled windows fall back to their live rect.
 unsafe fn active_window_rects(mgr: &Manager, mi: usize) -> Vec<(isize, RECT)> {
     let a = mgr.monitors[mi].active;
-    let mut items = Vec::new();
+    let mut items: Vec<(isize, RECT)> = if mgr.tiling {
+        workspace_layout(mgr, mi, a)
+    } else {
+        Vec::new()
+    };
     for &h in &mgr.monitors[mi].workspaces[a].windows {
+        if items.iter().any(|(w, _)| *w == h) {
+            continue;
+        }
         let mut r = RECT::default();
         if GetWindowRect(hwnd_from(h), &mut r).is_ok() {
             items.push((h, r));
@@ -2134,16 +1586,175 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
     }
 }
 
-/// Switch one monitor to workspace `n`: hide the old set, reveal the new,
-/// retile, then focus. Workspaces are never cleared — only shown/hidden.
-unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
-    if mi >= mgr.monitors.len() {
-        return;
+/// A cosmetic workspace-slide request handed from the manager to the transition
+/// thread. The manager has already performed the real (instant) switch; this is
+/// purely a visual overlay, so losing or dropping it never affects windows.
+struct SlideReq {
+    bmp: isize,             // HBITMAP: frozen image of the outgoing monitor
+    rect: RECT,             // full monitor rect (overlay geometry)
+    wins: Vec<(isize, RECT)>, // (incoming hwnd, on-screen target rect)
+    dir: i32,               // +1 = slide in from the right, -1 from the left
+    dur_ms: u64,
+}
+static SLIDE_REQ: Mutex<Option<SlideReq>> = Mutex::new(None);
+static SLIDE_CV: Condvar = Condvar::new();
+
+/// Hand a slide to the transition thread, replacing (and freeing) any request it
+/// hasn't picked up yet so a burst of switches can't leak frozen bitmaps.
+fn dispatch_slide(req: SlideReq) {
+    {
+        let mut slot = SLIDE_REQ.lock().unwrap();
+        if let Some(old) = slot.take() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(old.bmp as *mut c_void));
+            }
+        }
+        *slot = Some(req);
     }
-    let old = mgr.monitors[mi].active;
-    if n == old || n >= mgr.monitors[mi].workspaces.len() {
-        return;
+    SLIDE_CV.notify_one();
+}
+
+/// Transition thread: owns the slide overlay and pumps its own message loop, so
+/// the overlay is a well-behaved window (never the "not responding" ghost a
+/// pump-less window becomes). Blocks on the condvar when idle.
+fn transition_worker() {
+    loop {
+        let req = {
+            let mut slot = SLIDE_REQ.lock().unwrap();
+            loop {
+                if let Some(r) = slot.take() {
+                    break r;
+                }
+                slot = SLIDE_CV.wait(slot).unwrap();
+            }
+        };
+        unsafe { run_transition(req) };
     }
+}
+
+/// Render one slide: overlay showing the frozen outgoing image, with live DWM
+/// thumbnails of the incoming windows sliding in over it, then tear it down to
+/// reveal the (already-placed) real windows. Frees the request's bitmap.
+unsafe fn run_transition(req: SlideReq) {
+    let full = req.rect;
+    let w = full.right - full.left;
+    let h = full.bottom - full.top;
+    let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+    let overlay = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        SLIDE_CLASS,
+        w!(""),
+        WS_POPUP,
+        full.left,
+        full.top,
+        w,
+        h,
+        None,
+        None,
+        hinst,
+        None,
+    );
+    let Ok(overlay) = overlay else {
+        let _ = DeleteObject(HGDIOBJ(req.bmp as *mut c_void));
+        return;
+    };
+    let _ = ShowWindow(overlay, SW_SHOWNA);
+
+    // Paint the frozen outgoing image onto the overlay surface, then free the
+    // bitmap (its pixels now live in the overlay's surface).
+    let odc = GetDC(overlay);
+    let mem = CreateCompatibleDC(odc);
+    let oldb = SelectObject(mem, HGDIOBJ(req.bmp as *mut c_void));
+    let _ = BitBlt(odc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
+    SelectObject(mem, oldb);
+    let _ = DeleteDC(mem);
+    ReleaseDC(overlay, odc);
+    let _ = DeleteObject(HGDIOBJ(req.bmp as *mut c_void));
+
+    // Live thumbnails of the incoming windows (already placed at their targets).
+    let mut thumbs: Vec<(isize, RECT)> = Vec::with_capacity(req.wins.len());
+    for (hw, t) in &req.wins {
+        if let Ok(id) = DwmRegisterThumbnail(overlay, hwnd_from(*hw)) {
+            thumbs.push((id, *t));
+        }
+    }
+
+    let dx = req.dir * w;
+    let dur = req.dur_ms.max(1) as f64;
+    let frame_dur = std::time::Duration::from_micros(16_667);
+    let start = Instant::now();
+    let mut next = start;
+    let mut msg = MSG::default();
+    loop {
+        // Keep the overlay responsive (it has no other work, but a top-level
+        // window must drain its queue).
+        while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let el = start.elapsed().as_millis() as f64;
+        let off = (dx as f64 * (1.0 - ease_out_cubic((el / dur).min(1.0)))).round() as i32;
+        for (id, t) in &thumbs {
+            let dest = RECT {
+                left: t.left - full.left + off,
+                top: t.top - full.top,
+                right: t.right - full.left + off,
+                bottom: t.bottom - full.top,
+            };
+            let props = DWM_THUMBNAIL_PROPERTIES {
+                dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
+                rcDestination: dest,
+                opacity: 255,
+                fVisible: BOOL(1),
+                ..Default::default()
+            };
+            let _ = DwmUpdateThumbnailProperties(*id, &props);
+        }
+        if el >= dur {
+            break;
+        }
+        next += frame_dur;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else {
+            next = now;
+        }
+    }
+
+    for (id, _) in &thumbs {
+        let _ = DwmUnregisterThumbnail(*id);
+    }
+    let _ = DestroyWindow(overlay);
+}
+
+/// WndProc for the slide overlay: nothing custom (the class brush + GDI blit
+/// paint it; DWM composites the thumbnails over the top).
+unsafe extern "system" fn slide_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    DefWindowProcW(h, msg, w, l)
+}
+
+/// Full bounding rect of a monitor (taskbar included), for the slide overlay.
+unsafe fn monitor_full_rect(hmon: isize) -> RECT {
+    let mut info = MONITORINFO {
+        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if GetMonitorInfoW(HMONITOR(hmon as *mut c_void), &mut info).as_bool() {
+        info.rcMonitor
+    } else {
+        RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        }
+    }
+}
+
+/// Instant workspace switch: hide the old set, reveal + tile the new. Used when
+/// the slide compositor is disabled or not applicable.
+unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     SUPPRESS.store(true, Ordering::Relaxed);
     for h in mgr.monitors[mi].workspaces[old].windows.clone() {
         let _ = ShowWindow(hwnd_from(h), SW_HIDE);
@@ -2153,18 +1764,106 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
         let _ = ShowWindow(hwnd_from(h), SW_SHOW);
     }
     SUPPRESS.store(false, Ordering::Relaxed);
-    retile_monitor(mgr, mi);
-    let f = mgr.monitors[mi].workspaces[n].focused;
-    let f = if f != 0 {
+    // Instant placement — these windows were just unhidden; gliding them from a
+    // stale position would jump.
+    place_active_instant(mgr, mi);
+}
+
+/// Capture a monitor's current pixels into a GPU-backed off-screen bitmap (DDB,
+/// not a DIB — so ~no process RAM). Returns the HBITMAP as an isize, or 0 on
+/// failure. The caller hands it to the transition thread, which frees it.
+unsafe fn capture_monitor(full: RECT) -> isize {
+    let w = full.right - full.left;
+    let h = full.bottom - full.top;
+    if w <= 0 || h <= 0 {
+        return 0;
+    }
+    let screen = GetDC(None);
+    if screen.0.is_null() {
+        return 0;
+    }
+    let mem = CreateCompatibleDC(screen);
+    let bmp = CreateCompatibleBitmap(screen, w, h);
+    if bmp.0.is_null() {
+        let _ = DeleteDC(mem);
+        let _ = ReleaseDC(None, screen);
+        return 0;
+    }
+    let old = SelectObject(mem, HGDIOBJ(bmp.0));
+    let _ = BitBlt(mem, 0, 0, w, h, screen, full.left, full.top, SRCCOPY | CAPTUREBLT);
+    SelectObject(mem, old);
+    let _ = DeleteDC(mem);
+    let _ = ReleaseDC(None, screen);
+    bmp.0 as isize
+}
+
+/// Switch one monitor to workspace `n`, then focus. Workspaces are never cleared
+/// — only shown/hidden. When the slide compositor is enabled the switch is still
+/// done instantly and correctly here (so window management can never break);
+/// only a cosmetic snapshot is handed to the transition thread to slide over it.
+unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
+    if mi >= mgr.monitors.len() {
+        return;
+    }
+    let old = mgr.monitors[mi].active;
+    if n == old || n >= mgr.monitors[mi].workspaces.len() {
+        return;
+    }
+    let want_slide = mgr.cfg.animations
+        && mgr.cfg.workspace_slide
+        && mgr.cfg.animation_ms > 0
+        && mgr.tiling;
+    let dir = if n > old { 1 } else { -1 };
+    let full = monitor_full_rect(mgr.monitors[mi].hmon);
+
+    // Freeze the outgoing image BEFORE the switch, while it's still on screen.
+    let bmp = if want_slide { capture_monitor(full) } else { 0 };
+
+    // The real, correct switch — instant placement, on this thread. Cannot fail.
+    switch_plain(mgr, mi, old, n);
+
+    // Resolve the new workspace's focus, then style every window to its resting
+    // opacity/border NOW. This is what stops the reveal from popping in at 100%
+    // and dimming a frame later, and it happens before the slide thumbnails are
+    // registered, so they capture the final look.
+    let f = {
+        let ws = &mut mgr.monitors[mi].workspaces[n];
+        let f = if ws.focused != 0 {
+            ws.focused
+        } else {
+            ws.windows.first().copied().unwrap_or(0)
+        };
+        ws.focused = f;
         f
-    } else {
-        mgr.monitors[mi].workspaces[n]
-            .windows
-            .first()
-            .copied()
-            .unwrap_or(0)
     };
-    mgr.monitors[mi].workspaces[n].focused = f;
+    style_active(mgr, mi);
+    STYLED_FOCUS.store(f, Ordering::Relaxed);
+
+    // Cosmetic slide over the now-final (placed + styled) windows. Best-effort
+    // and isolated on the transition thread; the windows are already correct.
+    if bmp != 0 {
+        // Destinations are the windows' ACTUAL placed rects, so thumbnails land
+        // exactly on the real windows and the reveal is seamless.
+        let wins: Vec<(isize, RECT)> = workspace_layout(mgr, mi, n)
+            .into_iter()
+            .filter_map(|(hw, _)| {
+                let mut r = RECT::default();
+                GetWindowRect(hwnd_from(hw), &mut r).ok().map(|_| (hw, r))
+            })
+            .collect();
+        if wins.is_empty() {
+            let _ = DeleteObject(HGDIOBJ(bmp as *mut c_void));
+        } else {
+            dispatch_slide(SlideReq {
+                bmp,
+                rect: full,
+                wins,
+                dir,
+                dur_ms: mgr.cfg.animation_ms.max(1) as u64,
+            });
+        }
+    }
+
     if f != 0 {
         focus_window(f);
         if mgr.cfg.cursor_follows_focus {
@@ -2385,8 +2084,43 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             if !mgr.tiling {
                 return;
             }
-            mgr.cfg.master_ratio = (mgr.cfg.master_ratio + delta).clamp(0.15, 0.85);
-            retile_monitor(mgr, mgr.focused_mon);
+            let mi = mgr.focused_mon;
+            if mgr.cfg.layout == "master" {
+                // Master layout: one global master width.
+                mgr.cfg.master_ratio = (mgr.cfg.master_ratio + delta).clamp(0.15, 0.85);
+            } else {
+                // Dwindle: grow/shrink the focused window's own split so H/L do
+                // something useful here too (master_ratio is unused by dwindle).
+                let a = mgr.monitors[mi].active;
+                let ws = &mgr.monitors[mi].workspaces[a];
+                let tiled: Vec<isize> = ws
+                    .windows
+                    .iter()
+                    .copied()
+                    .filter(|h| !ws.floating.contains(h) && !IsIconic(hwnd_from(*h)).as_bool())
+                    .collect();
+                let n = tiled.len();
+                if n >= 2 {
+                    if let Some(idx) = tiled.iter().position(|&h| h == ws.focused) {
+                        // The window at idx owns split level idx (first part); the
+                        // last window is the remainder of level n-2 (gets 1-ratio).
+                        let (level, remainder) = if idx < n - 1 {
+                            (idx, false)
+                        } else {
+                            (n - 2, true)
+                        };
+                        let splits = &mut mgr.monitors[mi].workspaces[a].splits;
+                        if splits.len() < n - 1 {
+                            splits.resize(n - 1, 0.5);
+                        }
+                        let cur = split_ratio(splits, level);
+                        // Positive delta always grows the focused window.
+                        let nr = if remainder { cur - delta } else { cur + delta };
+                        splits[level] = nr.clamp(0.05, 0.95);
+                    }
+                }
+            }
+            retile_monitor(mgr, mi);
         }
         Cmd::Switch(i) => {
             if i >= mgr.cfg.workspaces || mgr.monitors.is_empty() {
@@ -2740,6 +2474,17 @@ unsafe fn make_bar_font(height: i32, font_size: i32) {
         ((height as f32) * 0.5) as i32
     }
     .max(8);
+    // Null-terminated face name; kept alive for the duration of the call.
+    let name = {
+        let n = BAR_FONT_NAME.lock().unwrap().clone();
+        if n.trim().is_empty() {
+            "Segoe UI".to_string()
+        } else {
+            n
+        }
+    };
+    let mut wname: Vec<u16> = name.encode_utf16().collect();
+    wname.push(0);
     let f = CreateFontW(
         -size, // negative = character height (matches point-style sizing)
         0,
@@ -2754,7 +2499,7 @@ unsafe fn make_bar_font(height: i32, font_size: i32) {
         CLIP_DEFAULT_PRECIS.0 as u32,
         CLEARTYPE_QUALITY.0 as u32,
         0, // DEFAULT_PITCH | FF_DONTCARE
-        w!("Segoe UI"),
+        PCWSTR(wname.as_ptr()),
     );
     let prev = BAR_FONT.swap(f.0 as isize, Ordering::Relaxed);
     if prev != 0 {
@@ -2841,6 +2586,104 @@ fn to_12h(h: u16) -> (u16, &'static str) {
     (h12, ap)
 }
 
+/// Render a date from a SYSTEMTIME using a small token language:
+///   yyyy/yy = year, MMM/MM = month (name/number), ddd/dd = weekday/day-of-month.
+/// Any other characters are copied verbatim. Char-based so a non-ASCII format
+/// string can't split a UTF-8 boundary.
+fn format_date(fmt: &str, st: &SYSTEMTIME) -> String {
+    const WD: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MO: [&str; 13] = [
+        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let chars: Vec<char> = fmt.chars().collect();
+    let at = |i: usize, tok: &str| -> bool {
+        let t: Vec<char> = tok.chars().collect();
+        i + t.len() <= chars.len() && chars[i..i + t.len()] == t[..]
+    };
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if at(i, "yyyy") {
+            out.push_str(&format!("{:04}", st.wYear));
+            i += 4;
+        } else if at(i, "yy") {
+            out.push_str(&format!("{:02}", st.wYear % 100));
+            i += 2;
+        } else if at(i, "MMM") {
+            out.push_str(MO.get(st.wMonth as usize).copied().unwrap_or(""));
+            i += 3;
+        } else if at(i, "MM") {
+            out.push_str(&format!("{:02}", st.wMonth));
+            i += 2;
+        } else if at(i, "ddd") {
+            out.push_str(WD.get(st.wDayOfWeek as usize).copied().unwrap_or(""));
+            i += 3;
+        } else if at(i, "dd") {
+            out.push_str(&format!("{:02}", st.wDay));
+            i += 2;
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Poll CPU / RAM / battery into the STAT_* atomics every ~2s for the bar's
+/// stats widgets. Idles cheaply while no stat widget is enabled (STATS_ON). Runs
+/// off the input/manager threads so it can never add latency to either.
+fn stats_worker() {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    use windows::Win32::System::Threading::GetSystemTimes;
+    let ticks = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    let mut prev_idle = 0u64;
+    let mut prev_total = 0u64;
+    loop {
+        if !STATS_ON.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            continue;
+        }
+        unsafe {
+            // CPU: kernel time already includes idle, so total = kernel + user
+            // and busy = total - idle. Percentage is over the interval delta.
+            let mut idle = FILETIME::default();
+            let mut kernel = FILETIME::default();
+            let mut user = FILETIME::default();
+            if GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)).is_ok() {
+                let idle_t = ticks(idle);
+                let total_t = ticks(kernel) + ticks(user);
+                let didle = idle_t.saturating_sub(prev_idle);
+                let dtotal = total_t.saturating_sub(prev_total);
+                if prev_total != 0 && dtotal > 0 {
+                    let used = dtotal.saturating_sub(didle);
+                    let pct = (used as f64 / dtotal as f64 * 100.0).round() as isize;
+                    STAT_CPU.store(pct.clamp(0, 100), Ordering::Relaxed);
+                }
+                prev_idle = idle_t;
+                prev_total = total_t;
+            }
+            // RAM: dwMemoryLoad is already a 0..100 percentage.
+            let mut ms = MEMORYSTATUSEX {
+                dwLength: core::mem::size_of::<MEMORYSTATUSEX>() as u32,
+                ..Default::default()
+            };
+            if GlobalMemoryStatusEx(&mut ms).is_ok() {
+                STAT_MEM.store(ms.dwMemoryLoad as isize, Ordering::Relaxed);
+            }
+            // Battery: 0..100, or 255 = unknown / no battery present.
+            let mut ps = SYSTEM_POWER_STATUS::default();
+            if GetSystemPowerStatus(&mut ps).is_ok() && ps.BatteryLifePercent <= 100 {
+                STAT_BAT.store(ps.BatteryLifePercent as isize, Ordering::Relaxed);
+            } else {
+                STAT_BAT.store(-1, Ordering::Relaxed);
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2000));
+    }
+}
+
 /// Rebuild the per-monitor bar snapshot and repaint only the bars that changed.
 /// The clock is refreshed separately by each bar's 1s timer, so an idle desktop
 /// causes no repaints from here.
@@ -2848,13 +2691,33 @@ unsafe fn update_bar(mgr: &Manager) {
     if BARS.lock().unwrap().is_empty() {
         return;
     }
-    let count = mgr.cfg.workspaces;
+    let hide_empty = mgr.cfg.bar_hide_empty;
     let mut mons = Vec::with_capacity(mgr.monitors.len());
     for (mi, m) in mgr.monitors.iter().enumerate() {
+        // Pills are this monitor's OWN workspaces only. In shared mode each
+        // monitor owns a slice of the global numbering (so labels like 1,4,7,10
+        // on the primary, 2,5,8 on the next), and every label is reachable by a
+        // workspace key. Iterating cfg.workspaces here instead would invent local
+        // indices the monitor doesn't have and balloon shared-mode labels past
+        // the 10 reachable keys (the old "workspace 30" bug).
+        let count = m.workspaces.len();
+        // Which local workspaces get a pill. The active one is always shown;
+        // empties are dropped only when hide_empty_workspaces is set.
+        let mut slots: Vec<usize> = Vec::with_capacity(count);
+        for local in 0..count {
+            let occ = m
+                .workspaces
+                .get(local)
+                .is_some_and(|ws| !ws.windows.is_empty());
+            if !hide_empty || occ || local == m.active {
+                slots.push(local);
+            }
+        }
         // Pill numbers: per_monitor shows 1..count; shared shows this monitor's
         // slice of the global numbering, which starts at the primary monitor.
-        let labels: Vec<usize> = (0..count)
-            .map(|local| {
+        let labels: Vec<usize> = slots
+            .iter()
+            .map(|&local| {
                 if mgr.cfg.per_monitor {
                     local + 1
                 } else {
@@ -2863,16 +2726,19 @@ unsafe fn update_bar(mgr: &Manager) {
             })
             .collect();
         let mut occupied: u64 = 0;
-        for local in 0..count {
+        for (pill, &local) in slots.iter().enumerate().take(64) {
             if m
                 .workspaces
                 .get(local)
                 .is_some_and(|ws| !ws.windows.is_empty())
             {
-                occupied |= 1 << local;
+                occupied |= 1 << pill;
             }
         }
-        let active = m.active.min(count.saturating_sub(1));
+        let active = slots
+            .iter()
+            .position(|&l| l == m.active)
+            .unwrap_or(usize::MAX);
         let fh = m.workspaces.get(m.active).map(|ws| ws.focused).unwrap_or(0);
         let title = if fh != 0 {
             window_title(hwnd_from(fh))
@@ -2881,6 +2747,7 @@ unsafe fn update_bar(mgr: &Manager) {
         };
         mons.push(MonBar {
             hmon: m.hmon,
+            slots,
             labels,
             active,
             occupied,
@@ -2896,6 +2763,11 @@ unsafe fn update_bar(mgr: &Manager) {
         show_clock: mgr.cfg.bar_show_clock,
         clock_24h: mgr.cfg.bar_clock_24h,
         show_layout: mgr.cfg.bar_show_layout,
+        show_date: mgr.cfg.bar_show_date,
+        date_format: mgr.cfg.bar_date_format.clone(),
+        show_cpu: mgr.cfg.bar_show_cpu,
+        show_mem: mgr.cfg.bar_show_mem,
+        show_battery: mgr.cfg.bar_show_battery,
         layout: mgr.cfg.layout.clone(),
         tiling: mgr.tiling,
         mons,
@@ -2913,6 +2785,11 @@ unsafe fn update_bar(mgr: &Manager) {
             || old.show_clock != new.show_clock
             || old.clock_24h != new.clock_24h
             || old.show_layout != new.show_layout
+            || old.show_date != new.show_date
+            || old.date_format != new.date_format
+            || old.show_cpu != new.show_cpu
+            || old.show_mem != new.show_mem
+            || old.show_battery != new.show_battery
             || old.layout != new.layout
             || old.tiling != new.tiling
             || old.mons.len() != new.mons.len();
@@ -2938,9 +2815,53 @@ unsafe fn update_bar(mgr: &Manager) {
     }
 }
 
-/// Paint one monitor's bar: workspace pills (left), focused title (centre),
-/// layout/tiling state + clock (right). The owning monitor's HMONITOR is stored
-/// in GWLP_USERDATA so each bar paints its own data.
+/// Measure the pixel width of a string in the current DC font.
+unsafe fn text_width(hdc: HDC, s: &str) -> i32 {
+    let mut v: Vec<u16> = s.encode_utf16().collect();
+    if v.is_empty() {
+        return 0;
+    }
+    let mut r = RECT::default();
+    DrawTextW(
+        hdc,
+        &mut v,
+        &mut r,
+        DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    r.right - r.left
+}
+
+/// Draw one right-cluster widget flush against the running `right` edge, then
+/// move the edge left by the text width plus a gap. Skips empty strings so a
+/// disabled / unavailable widget leaves no hole.
+const BAR_WIDGET_GAP: i32 = 16;
+unsafe fn draw_right(hdc: HDC, right: &mut i32, h_px: i32, s: &str, color: u32) {
+    let w = text_width(hdc, s);
+    if w <= 0 {
+        return;
+    }
+    let mut r = RECT {
+        left: *right - w,
+        top: 0,
+        right: *right,
+        bottom: h_px,
+    };
+    SetTextColor(hdc, COLORREF(color));
+    let mut v: Vec<u16> = s.encode_utf16().collect();
+    DrawTextW(
+        hdc,
+        &mut v,
+        &mut r,
+        DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+    );
+    *right -= w + BAR_WIDGET_GAP;
+}
+
+/// Paint one monitor's bar in three clusters: workspace pills (left), focused
+/// title (centre), and the widget cluster (right): clock, date, battery, mem,
+/// cpu, layout — drawn right-to-left and measured so each only takes the room it
+/// needs. The owning monitor's HMONITOR is in GWLP_USERDATA so each bar paints
+/// its own data.
 unsafe fn paint_bar(h: HWND) {
     let mut ps = PAINTSTRUCT::default();
     let hdc = BeginPaint(h, &mut ps);
@@ -2964,9 +2885,10 @@ unsafe fn paint_bar(h: HWND) {
     SetBkMode(hdc, TRANSPARENT);
 
     let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
-    let mut right_edge = rc.right;
+    let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
+    let mut right_edge = rc.right - pad;
 
-    // Clock (rightmost).
+    // ---- right cluster (right-to-left): clock, date, battery, mem, cpu, layout
     if data.show_clock {
         let st: SYSTEMTIME = GetLocalTime();
         let clock = if data.clock_24h {
@@ -2975,51 +2897,44 @@ unsafe fn paint_bar(h: HWND) {
             let (h12, ap) = to_12h(st.wHour);
             format!("{}:{:02} {}", h12, st.wMinute, ap)
         };
-        let mut cs: Vec<u16> = clock.encode_utf16().collect();
-        let mut clk = RECT {
-            left: right_edge - 96,
-            top: 0,
-            right: right_edge - 12,
-            bottom: h_px,
-        };
-        SetTextColor(hdc, COLORREF(data.fg));
-        DrawTextW(
-            hdc,
-            &mut cs,
-            &mut clk,
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        right_edge -= 100;
+        draw_right(hdc, &mut right_edge, h_px, &clock, data.fg);
     }
-
-    // Layout / tiling state.
+    if data.show_date {
+        let st: SYSTEMTIME = GetLocalTime();
+        let date = format_date(&data.date_format, &st);
+        draw_right(hdc, &mut right_edge, h_px, &date, data.fg);
+    }
+    if data.show_battery {
+        let b = STAT_BAT.load(Ordering::Relaxed);
+        if b >= 0 {
+            draw_right(hdc, &mut right_edge, h_px, &format!("BAT {}%", b), data.fg);
+        }
+    }
+    if data.show_mem {
+        let v = STAT_MEM.load(Ordering::Relaxed);
+        if v >= 0 {
+            draw_right(hdc, &mut right_edge, h_px, &format!("RAM {}%", v), data.fg);
+        }
+    }
+    if data.show_cpu {
+        let v = STAT_CPU.load(Ordering::Relaxed);
+        if v >= 0 {
+            draw_right(hdc, &mut right_edge, h_px, &format!("CPU {}%", v), data.fg);
+        }
+    }
     if data.show_layout {
         let s = if data.tiling {
             format!("[{}]", data.layout)
         } else {
             "[float]".to_string()
         };
-        let mut sv: Vec<u16> = s.encode_utf16().collect();
-        let mut lr = RECT {
-            left: right_edge - 116,
-            top: 0,
-            right: right_edge - 8,
-            bottom: h_px,
-        };
-        SetTextColor(hdc, COLORREF(data.inactive));
-        DrawTextW(
-            hdc,
-            &mut sv,
-            &mut lr,
-            DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-        );
-        right_edge -= 124;
+        draw_right(hdc, &mut right_edge, h_px, &s, data.inactive);
     }
 
     if let Some(mb) = data.mons.iter().find(|m| m.hmon == hmon) {
-        // Workspace pills.
+        // ---- left cluster: workspace pills, offset by the edge padding.
         for (i, label) in mb.labels.iter().enumerate() {
-            let x0 = i as i32 * cell;
+            let x0 = pad + i as i32 * cell;
             let mut cr = RECT {
                 left: x0,
                 top: 0,
@@ -3029,12 +2944,12 @@ unsafe fn paint_bar(h: HWND) {
             let occ = mb.occupied & (1 << i) != 0;
             if i == mb.active {
                 // Inset fill so the highlight reads as a pill, not a full block.
-                let pad = (h_px / 6).clamp(2, 6);
+                let ipad = (h_px / 6).clamp(2, 6);
                 let pill = RECT {
                     left: x0 + 3,
-                    top: pad,
+                    top: ipad,
                     right: x0 + cell - 3,
-                    bottom: h_px - pad,
+                    bottom: h_px - ipad,
                 };
                 let ab = CreateSolidBrush(COLORREF(data.accent));
                 FillRect(hdc, &pill, ab);
@@ -3052,15 +2967,16 @@ unsafe fn paint_bar(h: HWND) {
             );
         }
 
-        // Focused window title (between pills and the right cluster).
+        // ---- centre cluster: focused window title, centred in the gap between
+        // the pills and the right cluster (ellipsised if it doesn't fit).
         if data.show_title && !mb.title.is_empty() {
-            let tx = mb.labels.len() as i32 * cell + 14;
-            let r = right_edge - 8;
-            if r > tx {
+            let left = pad + mb.labels.len() as i32 * cell + 14;
+            let right = right_edge - 8;
+            if right > left {
                 let mut tr = RECT {
-                    left: tx,
+                    left,
                     top: 0,
-                    right: r,
+                    right,
                     bottom: h_px,
                 };
                 SetTextColor(hdc, COLORREF(data.fg));
@@ -3069,7 +2985,7 @@ unsafe fn paint_bar(h: HWND) {
                     hdc,
                     &mut s,
                     &mut tr,
-                    DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
                 );
             }
         }
@@ -3096,19 +3012,21 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         WM_LBUTTONDOWN => {
             let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
             let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
+            let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
-            if cell > 0 {
-                let i = (x / cell) as usize;
-                let count = BAR
+            if cell > 0 && x >= pad {
+                let pill = ((x - pad) / cell) as usize;
+                // Map the clicked pill back to its real local workspace via slots
+                // (pills and workspaces diverge when empty pills are hidden).
+                let local = BAR
                     .lock()
                     .unwrap()
                     .mons
                     .iter()
                     .find(|m| m.hmon == hmon)
-                    .map(|m| m.labels.len())
-                    .unwrap_or(0);
-                if i < count {
-                    push_cmd(Cmd::BarClick(hmon, i));
+                    .and_then(|m| m.slots.get(pill).copied());
+                if let Some(local) = local {
+                    push_cmd(Cmd::BarClick(hmon, local));
                 }
             }
             LRESULT(0)
@@ -3164,6 +3082,27 @@ fn focus_follow_worker() {
     }
 }
 
+/// Push the config values the bar paint path and stats worker read from atomics
+/// (so they need no Config in hand). Call at startup and on every reload.
+fn apply_bar_statics(cfg: &Config) {
+    BAR_HEIGHT.store(
+        if cfg.bar_enabled {
+            cfg.bar_height as isize
+        } else {
+            0
+        },
+        Ordering::Relaxed,
+    );
+    BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
+    BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
+    BAR_PADDING.store(cfg.bar_padding as isize, Ordering::Relaxed);
+    *BAR_FONT_NAME.lock().unwrap() = cfg.bar_font_name.clone();
+    STATS_ON.store(
+        cfg.bar_show_cpu || cfg.bar_show_mem || cfg.bar_show_battery,
+        Ordering::Relaxed,
+    );
+}
+
 /// Watch the two config files and apply changes live, so editing + saving a
 /// config takes effect without restarting suprland.
 fn config_watcher() {
@@ -3196,16 +3135,7 @@ fn config_watcher() {
             hk.toggle_float = cfg.key_toggle_float;
             hk.close_window = cfg.key_close_window;
         }
-        BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
-        BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
-        BAR_HEIGHT.store(
-            if cfg.bar_enabled {
-                cfg.bar_height as isize
-            } else {
-                0
-            },
-            Ordering::Relaxed,
-        );
+        apply_bar_statics(&cfg);
         // Manager applies the rest; the marker (main thread) rebuilds the bars.
         push_cmd(Cmd::Reload(Box::new(cfg)));
         let marker = MARKER_HWND.load(Ordering::Relaxed);
@@ -3388,7 +3318,19 @@ fn resolve_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
 }
 
 fn main() {
+    // Reveal every managed window if any thread panics. `panic = "abort"` skips
+    // destructors and a process kill skips the console handler, so without this a
+    // window hidden on an inactive workspace would be left invisible. The hook
+    // runs before the abort.
+    std::panic::set_hook(Box::new(|info| {
+        restore_on_panic();
+        eprintln!("suprland: panic — managed windows restored. {info}");
+    }));
     unsafe {
+        // 1ms timer resolution so the animation worker's frame sleeps are precise
+        // (the default ~15.6ms granularity is the main cause of choppy motion).
+        let _ = windows::Win32::Media::timeBeginPeriod(1);
+
         let hmod = GetModuleHandleW(None).expect("GetModuleHandleW failed");
         let hinst = HINSTANCE(hmod.0);
 
@@ -3411,11 +3353,7 @@ fn main() {
             hk.close_window = cfg.key_close_window;
         }
         BAR_HINST.store(hinst.0 as isize, Ordering::Relaxed);
-        if cfg.bar_enabled {
-            BAR_HEIGHT.store(cfg.bar_height as isize, Ordering::Relaxed);
-        }
-        BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
-        BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
+        apply_bar_statics(&cfg);
 
         // Red, click-through, topmost corner-marker overlay.
         let brush = CreateSolidBrush(COLORREF(0x000000FF)); // 0x00BBGGRR -> red
@@ -3427,6 +3365,18 @@ fn main() {
             ..Default::default()
         };
         RegisterClassW(&wc);
+
+        // Workspace-slide overlay class (black background; the slide paints the
+        // captured screen onto it via GDI, DWM thumbnails composite over that).
+        let slide_wc = WNDCLASSW {
+            lpfnWndProc: Some(slide_wndproc),
+            hInstance: hinst,
+            hbrBackground: CreateSolidBrush(COLORREF(0)),
+            lpszClassName: SLIDE_CLASS,
+            ..Default::default()
+        };
+        RegisterClassW(&slide_wc);
+
         let marker = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             w!("hyprwin_marker"),
@@ -3531,6 +3481,11 @@ fn main() {
         std::thread::spawn(position_worker);
         // Focus-follows-mouse poll loop (no-op unless enabled in config).
         std::thread::spawn(focus_follow_worker);
+        // CPU/RAM/battery poll loop (idles unless a stats widget is enabled).
+        std::thread::spawn(stats_worker);
+        // Workspace-slide compositor (owns its overlay + message pump; idle on a
+        // condvar until the manager dispatches a slide).
+        std::thread::spawn(transition_worker);
         // Hot-reload config files on save.
         std::thread::spawn(config_watcher);
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
@@ -3551,8 +3506,8 @@ fn main() {
         println!("  Alt+W          = close focused window");
         println!("  Alt+Enter      = launch terminal");
         println!("  Alt+Shift+Enter= launch default browser");
-        println!("  Alt+1..9       = switch workspace (or click a bar pill)");
-        println!("  Alt+Shift+1..9 = move focused window to workspace");
+        println!("  Alt+1..9,0     = switch workspace (or click a bar pill)");
+        println!("  Alt+Shift+1..0 = move focused window to workspace");
         println!("  Per-monitor status bars, focus-follows-mouse, window rules:");
         println!("  all configurable in suprland.conf (see comments in that file).");
         println!("  Alt+Tab still works. Use RIGHT ALT for normal Alt behavior.");
@@ -3571,5 +3526,6 @@ fn main() {
 
         let _ = UnhookWindowsHookEx(kbd_hook);
         let _ = UnhookWindowsHookEx(mouse_hook);
+        let _ = windows::Win32::Media::timeEndPeriod(1);
     }
 }

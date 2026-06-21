@@ -2,15 +2,16 @@
 
 **suprland** is a fast, free, open-source **tiling window manager for Windows**
 with **Hyprland-style** Alt-drag window movement, nearest-corner resize,
-master-stack tiling, and 9 virtual workspaces — all in a single portable Rust
-`.exe` with no installer. A lightweight alternative to
+dwindle/master tiling, a per-monitor status bar, and up to 10 virtual
+workspaces — all in a single portable Rust `.exe` with no installer. A
+lightweight alternative to
 [komorebi](https://github.com/LGUG2Z/komorebi),
 [GlazeWM](https://github.com/glzr-io/glazewm), and PowerToys FancyZones for
 keyboard-driven, i3/Hyprland-style window management on Windows 10 and 11.
 
 [![GitHub release](https://img.shields.io/github/v/release/Page011/Suprland)](https://github.com/Page011/Suprland/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/website-suprland.vercel.app-366382)](https://suprland.vercel.app)
+[![Website](https://img.shields.io/badge/website-suprland.com-366382)](https://suprland.com)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 [![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Suprland/releases/latest)
 
@@ -27,7 +28,14 @@ No installer. Single `.exe`.
 
 - **Alt + left-drag** — move any window by clicking anywhere on it, no title bar needed
 - **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
-- **Tiling mode** — master-stack layout across 9 virtual workspaces
+- **Tiling mode** — `dwindle` (spiral, default) or `master` layout across up to 10
+  virtual workspaces
+- **Status bar** — a per-monitor bar with workspace pills, focused title, clock,
+  and optional date / CPU / RAM / battery widgets
+- **Animations** — workspace switches slide in; opening / moving / re-tiling
+  glide to place (positional tweens, configurable speed or off)
+- **Extras** — coloured window borders, unfocused-window dimming,
+  focus-follows-mouse, per-app window rules, and live config hot-reload
 
 Left Alt is fully reserved as the suprland modifier — apps never see it.
 Right Alt is untouched for normal use. Alt+Tab still works.
@@ -43,20 +51,58 @@ Right Alt is untouched for normal use. Alt+Tab still works.
 | `Alt` + `Shift+J` / `Shift+K` | Swap window with next / previous |
 | `Alt` + arrows | Focus window by direction (cursor follows) |
 | `Alt` + `Shift` + arrows | Move window by direction (across monitors) |
-| `Alt` + `H` / `L` | Shrink / grow master column |
+| `Alt` + `H` / `L` | Shrink / grow master column (`master` layout) |
 | `Alt` + `M` | Promote focused window to master |
 | `Alt` + `F` | Toggle float for focused window |
 | `Alt` + `W` | Close focused window |
 | `Alt` + `Enter` | Launch terminal |
 | `Alt` + `Shift+Enter` | Launch browser |
-| `Alt` + `1`–`9` | Switch to workspace 1–9 |
-| `Alt` + `Shift+1`–`9` | Move focused window to workspace |
+| `Alt` + `1`–`9`, `0` | Switch to workspace 1–10 |
+| `Alt` + `Shift` + `1`–`9`, `0` | Move focused window to workspace |
 | `Alt` + `Tab` | Switch apps (pass-through preserved) |
+
+In the default `dwindle` layout, resize tiles with **Alt + right-drag** (the
+split reflows); `Alt + H` / `L` adjust the master width in `master` layout.
 
 The letter binds (`J K H L M T F W`) are rebindable in
 `%USERPROFILE%\.suprland\suprland.conf` (`key_focus_next`, `key_close_window`,
-etc.). Workspace keys, gaps, layout, borders, and the status bar are configured
-in the same file. Arrows and `Enter` are fixed.
+etc.), along with workspace keys, gaps, layout, borders, and behaviour. The
+status bar is configured separately in `navbar.conf` (same folder). Arrows and
+`Enter` are fixed. Both config files **hot-reload** on save — no restart needed.
+
+## Configuration
+
+Two files are created in `%USERPROFILE%\.suprland\` on first run, both
+fully commented and **hot-reloaded on save**:
+
+- **`suprland.conf`** — window manager: workspace mode/count, layout, gaps,
+  master ratio, borders, dimming, focus-follows-mouse, cursor warping,
+  animations (`animations`, `animation_ms`), launchers, per-app window rules
+  (`ignore_classes` / `float_classes`), workspace keys, and the rebindable
+  letter hotkeys.
+- **`navbar.conf`** — the status bar (see below).
+
+Workspaces default to **shared** mode: numbered globally from your primary
+monitor outward (ws1 = main monitor, ws2 = next, …). Set
+`workspace_mode = per_monitor` to give each monitor its own independent 1–N.
+
+### Status bar
+
+A bar is drawn on every monitor: workspace pills on the left (click to switch),
+the focused window title in the centre, and a widget cluster on the right.
+`navbar.conf` options:
+
+| Option | Description |
+|---|---|
+| `enabled`, `height`, `bottom`, `padding` | Show/size/dock the bar |
+| `font_name`, `font_size` | Any installed font family + text height |
+| `hide_empty_workspaces` | Show only active + occupied pills (Hyprland-style) |
+| `show_title` | Focused window title (centre) |
+| `show_layout` | Layout + tiling/floating state |
+| `show_clock`, `clock_24h` | Clock (24h or 12h am/pm) |
+| `show_date`, `date_format` | Date with `yyyy MM dd MMM ddd` tokens |
+| `show_cpu`, `show_mem`, `show_battery` | Live CPU / RAM / battery %, polled ~2s |
+| `bg`, `fg`, `accent`, `inactive` | Colours (`#RRGGBB`) |
 
 ## Build from source
 
@@ -106,7 +152,8 @@ required and adds Hyprland-style Alt-drag move/resize.
 
 **Does it work on Windows 11?** Yes, on Windows 10 and 11, x64.
 
-**Do I need admin rights?** No. It's a portable exe. It is reccomended to run as admin to beable to run to its best ability.
+**Do I need admin rights?** No — it's a portable exe. Running as admin is
+recommended so it can manage elevated windows (e.g. Task Manager) too.
 
 ## Licence
 
