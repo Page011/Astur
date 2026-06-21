@@ -10,7 +10,7 @@ keyboard-driven, i3/Hyprland-style window management on Windows 10 and 11.
 
 [![GitHub release](https://img.shields.io/github/v/release/Page011/Suprland)](https://github.com/Page011/Suprland/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/website-suprland.vercel.app-366382)](https://suprland.vercel.app)
+[![Website](https://img.shields.io/badge/website-suprland.vercel.app-366382)](https://suprland.com)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 [![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Suprland/releases/latest)
 
