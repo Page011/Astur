@@ -985,6 +985,15 @@ const BLOCK_CLASSES: &[&str] = &[
     "suprland_slide",
 ];
 
+/// Is an already-tracked handle still worth re-homing on a display change?
+/// Deliberately NOT `is_manageable`: that rejects `SW_HIDE`'d windows (every
+/// window on an inactive workspace), which would silently drop and orphan them
+/// when monitors are added/removed. A tracked window only stops being ours when
+/// its window is actually destroyed.
+unsafe fn tracked_window_alive(hwnd: HWND) -> bool {
+    !hwnd.0.is_null() && IsWindow(hwnd).as_bool()
+}
+
 /// Is this a normal top-level application window we should tile?
 unsafe fn is_manageable(hwnd: HWND) -> bool {
     if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() {
@@ -1880,13 +1889,37 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
 /// monitor's active workspace and re-homes tracked windows, keeping their
 /// workspace index when the monitor still exists.
 unsafe fn refresh_monitors(mgr: &mut Manager) {
-    let mut tracked: Vec<(isize, usize, isize)> = Vec::new(); // (old hmon, wi, hwnd)
+    // Snapshot tracked windows BEFORE the rebuild. Each window remembers the
+    // GLOBAL workspace number it lived on (computed against the OLD layout), so
+    // when a monitor is unplugged its windows keep their workspace identity and
+    // collate onto a surviving monitor instead of all collapsing onto that
+    // monitor's active workspace.
+    let old_n = mgr.monitors.len().max(1);
+    let old_primary = mgr.primary;
+    let per_monitor = mgr.cfg.per_monitor;
+    // Remember which physical monitor was focused — its index shifts when a
+    // monitor to its left is removed, so a bare range-clamp would leave focus
+    // (and the per-monitor gone-window fallback) pointing at the wrong screen.
+    let old_focused_hmon = mgr
+        .monitors
+        .get(mgr.focused_mon)
+        .map(|m| m.hmon)
+        .unwrap_or(0);
+    // (old hmon, old local wi, old global ws, hwnd, floating?)
+    let mut tracked: Vec<(isize, usize, usize, isize, bool)> = Vec::new();
     let mut old_active: Vec<(isize, usize)> = Vec::new();
-    for mon in &mgr.monitors {
+    for (mi, mon) in mgr.monitors.iter().enumerate() {
         old_active.push((mon.hmon, mon.active));
         for (wi, ws) in mon.workspaces.iter().enumerate() {
+            let global = if per_monitor {
+                wi
+            } else {
+                let off = (mi + old_n - old_primary % old_n) % old_n;
+                wi * old_n + off
+            };
             for &h in &ws.windows {
-                tracked.push((mon.hmon, wi, h));
+                let floating = ws.floating.contains(&h);
+                tracked.push((mon.hmon, wi, global, h, floating));
             }
         }
     }
@@ -1903,28 +1936,61 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
     reserve_bar(&mut fresh, &mgr.cfg);
     mgr.monitors = fresh;
     mgr.primary = primary;
-    for (old_hmon, wi, h) in tracked {
-        if !is_manageable(hwnd_from(h)) {
+    // Re-resolve focus to the same physical monitor (its index may have moved);
+    // fall back to primary if that screen is gone. Must run before any
+    // global_to_ml below — it reads focused_mon in per_monitor mode.
+    mgr.focused_mon = mgr
+        .mon_by_hmon(old_focused_hmon)
+        .unwrap_or(primary)
+        .min(mgr.monitors.len().saturating_sub(1));
+    for (old_hmon, wi, global, h, floating) in tracked {
+        if !tracked_window_alive(hwnd_from(h)) {
             continue;
         }
-        let mi = mgr
-            .mon_by_hmon(old_hmon)
-            .unwrap_or_else(|| monitor_index_for_window(mgr, hwnd_from(h)));
-        let target_wi = if old_hmon == mgr.monitors[mi].hmon {
-            wi.min(mgr.monitors[mi].workspaces.len() - 1)
+        let (mi, target_wi) = if per_monitor {
+            // Per-monitor: workspaces are independent per screen. A surviving
+            // monitor keeps its exact local workspace; a window from a gone
+            // monitor falls to the focused monitor's same-numbered workspace.
+            if let Some(mi) = mgr.mon_by_hmon(old_hmon) {
+                (mi, wi.min(mgr.monitors[mi].workspaces.len() - 1))
+            } else {
+                let (mi, local) = mgr.global_to_ml(global);
+                (mi, local.min(mgr.monitors[mi].workspaces.len() - 1))
+            }
         } else {
-            mgr.monitors[mi].active
+            // Shared mode: the global workspace number is the invariant, not the
+            // physical monitor. Re-map EVERY window through its saved global —
+            // when primary/monitor-count changes, a surviving monitor's local
+            // index no longer equals the old global number, so keeping `wi`
+            // would misplace windows.
+            let (mi, local) = mgr.global_to_ml(global);
+            (mi, local.min(mgr.monitors[mi].workspaces.len() - 1))
         };
-        if !mgr.monitors[mi].workspaces[target_wi].windows.contains(&h) {
-            mgr.monitors[mi].workspaces[target_wi].windows.push(h);
-            if mgr.monitors[mi].workspaces[target_wi].focused == 0 {
-                mgr.monitors[mi].workspaces[target_wi].focused = h;
+        let ws = &mut mgr.monitors[mi].workspaces[target_wi];
+        if !ws.windows.contains(&h) {
+            ws.windows.push(h);
+            if floating && !ws.floating.contains(&h) {
+                ws.floating.push(h);
+            }
+            if ws.focused == 0 {
+                ws.focused = h;
             }
         }
     }
-    if mgr.focused_mon >= mgr.monitors.len() {
-        mgr.focused_mon = 0;
+    // Normalize visibility: windows re-homed from a hidden (inactive) workspace
+    // onto a now-active one must be re-shown, and vice versa. Without this they
+    // stay SW_HIDE'd and appear to vanish.
+    SUPPRESS.store(true, Ordering::Relaxed);
+    for mon in &mgr.monitors {
+        let active = mon.active;
+        for (wi, ws) in mon.workspaces.iter().enumerate() {
+            let cmd = if wi == active { SW_SHOWNA } else { SW_HIDE };
+            for &h in &ws.windows {
+                let _ = ShowWindow(hwnd_from(h), cmd);
+            }
+        }
     }
+    SUPPRESS.store(false, Ordering::Relaxed);
     retile_all(mgr);
 }
 

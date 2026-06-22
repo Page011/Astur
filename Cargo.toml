@@ -1,6 +1,6 @@
 [package]
 name = "suprland"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Hyprland-style Alt-drag move/resize + tiling window manager for Windows"
 license = "Apache-2.0"
