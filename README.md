@@ -155,6 +155,15 @@ required and adds Hyprland-style Alt-drag move/resize.
 **Do I need admin rights?** No — it's a portable exe. Running as admin is
 recommended so it can manage elevated windows (e.g. Task Manager) too.
 
+## Disclaimer
+
+suprland is an independent project. It is **not affiliated with, endorsed by, or
+derived from [Hyprland](https://hyprland.org) or its authors.** References to
+"Hyprland-style" describe only the style of window management suprland
+implements; "Hyprland" is the property of its respective owners. suprland is a
+clean-room Rust implementation for Windows and shares no source code with
+Hyprland.
+
 ## Licence
 
 Apache-2.0 — see [LICENSE](LICENSE).
