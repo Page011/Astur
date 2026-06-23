@@ -145,6 +145,8 @@ the same flow on Windows, Astur aims to be the smallest thing that works:
 Astur trades configurability for zero-setup speed: run the exe and Alt-drag
 works immediately, tiling is one keypress away.
 
+See the full [comparison: Astur vs GlazeWM, komorebi & FancyZones](https://astur.app/compare).
+
 ## FAQ
 
 **Is Astur a komorebi or GlazeWM alternative?** Yes — same master-stack
