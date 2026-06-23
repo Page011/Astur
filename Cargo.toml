@@ -1,16 +1,16 @@
 [package]
-name = "suprland"
+name = "astur"
 version = "0.3.2"
 edition = "2021"
-description = "Hyprland-style Alt-drag move/resize + tiling window manager for Windows"
+description = "Alt-drag move/resize + tiling window manager for Windows"
 license = "Apache-2.0"
-homepage = "https://suprland.com"
-repository = "https://github.com/Page011/Suprland"
+homepage = "https://astur.app"
+repository = "https://github.com/Page011/Astur"
 keywords = ["windows", "tiling", "window-manager", "alt-drag"]
 categories = ["os::windows-apis"]
 
 [[bin]]
-name = "suprland"
+name = "astur"
 path = "src/main.rs"
 
 [profile.release]
@@ -35,4 +35,5 @@ features = [
     "Win32_System_SystemInformation",
     "Win32_System_Power",
     "Win32_Media",
+    "Win32_Storage_Xps",
 ]

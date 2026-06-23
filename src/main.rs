@@ -1,11 +1,11 @@
-// hyprwin — Alt-drag move/resize for Windows (Hyprland-style mouse binds)
+// astur — Alt-drag move/resize for Windows
 //
 // Hold LEFT ALT, then:
 //   Left-drag   -> move the window under the cursor
 //   Right-drag  -> resize from the corner nearest the cursor; a red marker
 //                  shows which corner is being dragged
 //
-// LEFT ALT is reserved as suprland's modifier: a low-level keyboard hook blocks
+// LEFT ALT is reserved as Astur's modifier: a low-level keyboard hook blocks
 // it from every application so it never triggers app menus or Alt shortcuts.
 // Alt+Tab is preserved by synthesizing an injected Alt+Tab for the system.
 // RIGHT ALT is untouched, so use it for normal Alt behavior.
@@ -66,24 +66,24 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use std::collections::{HashMap, VecDeque};
 use core::ffi::c_void;
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute, DwmUnregisterThumbnail,
-    DwmUpdateThumbnailProperties, DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
-    DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE, DWM_THUMBNAIL_PROPERTIES,
+    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    DWMWA_EXTENDED_FRAME_BOUNDS,
 };
+use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows,
+    BringWindowToTop, EnumWindows, FindWindowExW, FindWindowW, SendMessageTimeoutW, SMTO_ABORTIFHUNG,
     GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowTextLengthW,
     GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SetWindowLongPtrW, GWLP_USERDATA, PM_REMOVE,
-    SetForegroundWindow, SetTimer, SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
+    KillTimer, PW_RENDERFULLCONTENT, SetForegroundWindow, SetTimer, SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
     EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
     SPI_SETFOREGROUNDLOCKTIMEOUT,
     SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-    WM_CLOSE, WM_DISPLAYCHANGE, WM_PAINT, WM_TIMER, WM_USER, WS_CHILD,
+    WM_CLOSE, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WM_USER, WS_CHILD,
 };
 
 // --- tunables -------------------------------------------------------------
@@ -101,7 +101,7 @@ const MARK_THICK: i32 = 4;
 // as hugging the corner instead of sitting inside the title bar.
 const MARK_TOP_LIFT: i32 = 8;
 // Window class for the transient workspace-slide overlay.
-const SLIDE_CLASS: PCWSTR = w!("suprland_slide");
+const SLIDE_CLASS: PCWSTR = w!("astur_slide");
 
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
@@ -211,18 +211,24 @@ fn position_worker() {
 }
 
 // =========================================================================
-// Tile placement is instant: one SetWindowPos per window. suprland renders no
+// Tile placement is instant: one SetWindowPos per window. Astur renders no
 // window pixels (DWM does), so the only positional "animation" possible was
 // interpolating SetWindowPos over time — it landed windows unreliably across
 // apps and cost a per-frame cross-process DWM round-trip, so it was removed in
 // favour of going straight to the target. The workspace-switch slide (DWM
 // thumbnails, see run_transition) is a separate GPU-composited effect and is
-// kept; ease_out_cubic below still paces it.
+// kept; ease_in_out_cubic below paces it.
 // =========================================================================
+/// Symmetric ease: slow start, fast middle, slow stop. Avoids the big first-frame
+/// leap an ease-OUT gives a slide (which read as "jumpy").
 #[inline]
-fn ease_out_cubic(t: f64) -> f64 {
-    let u = 1.0 - t;
-    1.0 - u * u * u
+fn ease_in_out_cubic(t: f64) -> f64 {
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        let u = -2.0 * t + 2.0;
+        1.0 - (u * u * u) / 2.0
+    }
 }
 
 /// Move a window with no activation/zorder side effects (instant tile placement
@@ -240,7 +246,7 @@ unsafe fn set_pos_raw(h: isize, r: RECT) {
 }
 
 // Set by the keyboard hook while physical Left Alt is held (Alt is blocked from
-// apps and reserved as suprland's modifier).
+// apps and reserved as Astur's modifier).
 static ALT_DOWN: AtomicBool = AtomicBool::new(false);
 // True while we are feeding the system a synthetic Alt so Alt+Tab keeps working
 // despite the physical Alt being blocked from everything.
@@ -311,7 +317,7 @@ unsafe fn inject_key(vk: VIRTUAL_KEY, up: bool) {
     SendInput(&[input], core::mem::size_of::<INPUT>() as i32);
 }
 
-/// Low-level keyboard hook. Left Alt is reserved as suprland's modifier: it is
+/// Low-level keyboard hook. Left Alt is reserved as Astur's modifier: it is
 /// blocked from every application so it never triggers menus or Alt shortcuts.
 /// Alt+Tab is preserved by synthesizing an injected Alt+Tab for the system while
 /// swallowing the physical keys.
@@ -643,7 +649,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 // hooks only push lightweight commands onto a queue and return immediately, so
 // the low-level hooks never block on SetWindowPos/EnumWindows.
 //
-// Each monitor owns its own set of workspaces (GlazeWM / Hyprland style) and is
+// Each monitor owns its own set of workspaces (GlazeWM style) and is
 // tiled independently on its own work area. Windows are positioned with
 // individual SetWindowPos calls (restore-then-place) — a robust approach used
 // by komorebi; a single DeferWindowPos batch can fail wholesale if one window
@@ -762,6 +768,45 @@ static STAT_CPU: AtomicIsize = AtomicIsize::new(-1);
 static STAT_MEM: AtomicIsize = AtomicIsize::new(-1);
 static STAT_BAT: AtomicIsize = AtomicIsize::new(-1);
 
+/// Sliding workspace-pill highlight. While an entry is present for a monitor,
+/// paint_bar draws the accent pill at an interpolated x between the old and new
+/// pill instead of snapping. Keyed by HMONITOR, driven by a fast WM_TIMER on the
+/// bar window.
+struct PillAnim {
+    from_x: i32,
+    to_x: i32,
+    start: Instant,
+}
+static PILL_ANIM: Mutex<Option<HashMap<isize, PillAnim>>> = Mutex::new(None);
+const PILL_ANIM_MS: f64 = 160.0;
+
+fn pill_anim_set(hmon: isize, from_x: i32, to_x: i32) {
+    PILL_ANIM.lock().unwrap().get_or_insert_with(HashMap::new).insert(
+        hmon,
+        PillAnim {
+            from_x,
+            to_x,
+            start: Instant::now(),
+        },
+    );
+}
+
+fn pill_anim_clear(hmon: isize) {
+    if let Some(m) = PILL_ANIM.lock().unwrap().as_mut() {
+        m.remove(&hmon);
+    }
+}
+
+/// Current highlight left-x for a monitor's pill animation and whether it's done.
+/// None = no animation running for this monitor (paint at the static active pill).
+fn pill_anim_x(hmon: isize) -> Option<(i32, bool)> {
+    let g = PILL_ANIM.lock().unwrap();
+    let a = g.as_ref()?.get(&hmon)?;
+    let t = (a.start.elapsed().as_secs_f64() * 1000.0 / PILL_ANIM_MS).min(1.0);
+    let x = (a.from_x as f64 + (a.to_x - a.from_x) as f64 * ease_in_out_cubic(t)).round() as i32;
+    Some((x, t >= 1.0))
+}
+
 /// Per-monitor paint data. One entry per drawn pill: `slots[i]` is the local
 /// workspace index that pill maps to (so a click resolves straight to a
 /// workspace even when empty pills are hidden), `labels[i]` is the number to
@@ -824,6 +869,10 @@ impl BarData {
 static BAR: Mutex<BarData> = Mutex::new(BarData::new());
 // Custom message: manager asks a bar to repaint.
 const WM_BAR_REFRESH: u32 = WM_USER + 1;
+// Custom message: manager seeds a pill-highlight slide (wparam=from_x, lparam=to_x).
+const WM_PILL_ANIM: u32 = WM_USER + 3;
+// SetTimer id for the pill-slide animation (distinct from the clock tick).
+const PILL_TIMER_ID: usize = 2;
 // Custom message (to the marker window): config changed, rebuild bars on the
 // main thread.
 const WM_RELOAD: u32 = WM_USER + 2;
@@ -887,6 +936,9 @@ struct Manager {
     primary: usize, // index of the main monitor; workspace 1 starts here
     tiling: bool,
     cfg: Config,
+    // HMONITOR a launched terminal/browser should land on (the cursor's monitor at
+    // launch time); consumed by the next Add. 0 = none.
+    pending_launch_mon: isize,
 }
 
 impl Manager {
@@ -980,9 +1032,9 @@ const BLOCK_CLASSES: &[&str] = &[
     "IME",
     "MSCTFIME UI",
     "Default IME",
-    "hyprwin_marker",
-    "suprland_bar",
-    "suprland_slide",
+    "astur_marker",
+    "astur_bar",
+    "astur_slide",
 ];
 
 /// Is an already-tracked handle still worth re-homing on a display change?
@@ -1224,6 +1276,16 @@ unsafe fn window_under_point(mgr: &Manager, mi: usize, pt: POINT, exclude: isize
     None
 }
 
+/// HMONITOR currently under the cursor, or 0 if it can't be read. Used to land a
+/// launched terminal/browser on the workspace the cursor is on.
+unsafe fn cursor_hmon() -> isize {
+    let mut pt = POINT::default();
+    if GetCursorPos(&mut pt).is_err() {
+        return 0;
+    }
+    MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST).0 as isize
+}
+
 /// Launch an external program detached. Routed through `cmd /C start` so PATH
 /// and App Execution Aliases (e.g. wt.exe) resolve like they do from the shell.
 fn launch(cmd: &str) {
@@ -1237,7 +1299,7 @@ fn launch(cmd: &str) {
 }
 
 /// Reveal every tracked window (so nothing is left hidden on another workspace)
-/// and undo suprland's styling — but leave every window exactly where it is, so
+/// and undo Astur's styling — but leave every window exactly where it is, so
 /// quitting doesn't disturb the current layout.
 /// Reveal + un-style a specific list of window handles. Takes the list by ref so
 /// callers control how they acquire it (the panic path must not re-lock a mutex
@@ -1599,23 +1661,235 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
 /// thread. The manager has already performed the real (instant) switch; this is
 /// purely a visual overlay, so losing or dropping it never affects windows.
 struct SlideReq {
-    bmp: isize,             // HBITMAP: frozen image of the outgoing monitor
-    rect: RECT,             // full monitor rect (overlay geometry)
-    wins: Vec<(isize, RECT)>, // (incoming hwnd, on-screen target rect)
-    dir: i32,               // +1 = slide in from the right, -1 from the left
+    out_bmp: isize, // HBITMAP: frozen outgoing workspace (worker owns + frees)
+    in_bmp: isize,  // HBITMAP: frozen incoming workspace (worker owns + frees)
+    out_rects: Vec<RECT>, // work-area-local rects of the outgoing windows
+    in_rects: Vec<RECT>,  // work-area-local rects of the incoming windows
+    rect: RECT,     // work-area rect (overlay geometry)
+    dir: i32,       // +1 = new ws came from the right, -1 from the left
     dur_ms: u64,
 }
 static SLIDE_REQ: Mutex<Option<SlideReq>> = Mutex::new(None);
 static SLIDE_CV: Condvar = Condvar::new();
+// Handshake: the worker sets this true once the overlay is up and showing the
+// outgoing image, so the manager can do the (now hidden) switch underneath it
+// without the destination workspace flashing first.
+static SLIDE_READY: Mutex<bool> = Mutex::new(false);
+static SLIDE_READY_CV: Condvar = Condvar::new();
+
+/// Block (bounded) until the transition worker has the overlay up and covering
+/// the monitor, or the timeout elapses (overlay failed — proceed anyway).
+fn wait_slide_overlay_up() {
+    let guard = SLIDE_READY.lock().unwrap();
+    let _ = SLIDE_READY_CV
+        .wait_timeout_while(guard, std::time::Duration::from_millis(250), |up| !*up)
+        .unwrap();
+}
+
+/// Worker → manager: overlay is up.
+fn signal_slide_overlay_up() {
+    *SLIDE_READY.lock().unwrap() = true;
+    SLIDE_READY_CV.notify_one();
+}
+
+/// Per-(monitor, workspace) frozen snapshot of how that workspace last looked
+/// when it was left: the work-area image plus the work-area-local rects of its
+/// tiled windows (so the slide can move only the windows and leave the wallpaper
+/// in the gaps still). Populated for free from the outgoing capture on every
+/// switch. HBITMAPs are GPU-backed DDBs (~no process RAM). Touched only on the
+/// manager thread — the worker gets private copies, so no cross-thread sharing.
+struct Snap {
+    bmp: isize,
+    rects: Vec<RECT>,
+}
+static SNAP: Mutex<Option<HashMap<(isize, usize), Snap>>> = Mutex::new(None);
+
+/// Store the snapshot for (hmon, ws), freeing any previous one.
+unsafe fn snap_store(hmon: isize, ws: usize, bmp: isize, rects: Vec<RECT>) {
+    if bmp == 0 {
+        return;
+    }
+    let mut g = SNAP.lock().unwrap();
+    let map = g.get_or_insert_with(HashMap::new);
+    if let Some(old) = map.insert((hmon, ws), Snap { bmp, rects }) {
+        let _ = DeleteObject(HGDIOBJ(old.bmp as *mut c_void));
+    }
+}
+
+/// Current snapshot (bmp, window rects) for (hmon, ws), or None if not cached.
+fn snap_get(hmon: isize, ws: usize) -> Option<(isize, Vec<RECT>)> {
+    SNAP.lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&(hmon, ws)))
+        .map(|s| (s.bmp, s.rects.clone()))
+}
+
+/// Drop every cached snapshot (resolution/style no longer valid). Call on display
+/// change and config reload.
+unsafe fn snap_clear() {
+    if let Some(map) = SNAP.lock().unwrap().take() {
+        for (_, s) in map {
+            let _ = DeleteObject(HGDIOBJ(s.bmp as *mut c_void));
+        }
+    }
+}
+
+// One-shot guard so the wallpaper-source diagnostic prints once, not every switch.
+static WP_DIAG: AtomicBool = AtomicBool::new(false);
+
+/// Find the desktop window that paints the wallpaper. On Win10/11 it's usually a
+/// WorkerW spawned behind the icon host (SHELLDLL_DefView); on some configs the
+/// wallpaper is on Progman itself, which is the fallback. Returns null if neither.
+unsafe fn wallpaper_window() -> HWND {
+    let progman = FindWindowW(w!("Progman"), PCWSTR::null()).unwrap_or(HWND(std::ptr::null_mut()));
+    if !progman.0.is_null() {
+        // Nudge Progman to spawn the wallpaper WorkerW (no-op if already present).
+        let mut res: usize = 0;
+        let _ = SendMessageTimeoutW(
+            progman,
+            0x052C,
+            WPARAM(0),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG,
+            1000,
+            Some(&mut res as *mut usize),
+        );
+    }
+    let mut found: isize = 0;
+    let _ = EnumWindows(Some(wp_enum), LPARAM(&mut found as *mut isize as isize));
+    if found != 0 {
+        return HWND(found as *mut c_void);
+    }
+    // No separate WorkerW — wallpaper is painted directly on Progman.
+    progman
+}
+
+/// EnumWindows callback: the wallpaper WorkerW is the top-level WorkerW that sits
+/// directly behind the WorkerW hosting SHELLDLL_DefView.
+unsafe extern "system" fn wp_enum(top: HWND, lp: LPARAM) -> BOOL {
+    let out = &mut *(lp.0 as *mut isize);
+    let defview = FindWindowExW(top, None, w!("SHELLDLL_DefView"), PCWSTR::null());
+    if matches!(defview, Ok(dv) if !dv.0.is_null()) {
+        if let Ok(worker) = FindWindowExW(None, top, w!("WorkerW"), PCWSTR::null()) {
+            if !worker.0.is_null() {
+                *out = worker.0 as isize;
+                return BOOL(0); // stop
+            }
+        }
+    }
+    BOOL(1)
+}
+
+/// Capture the wallpaper under `work_area` into a GPU-backed DDB, or 0 on failure
+/// (caller then falls back to a flat slide). Captured fresh every slide (on the
+/// worker thread) so it's always the CURRENT wallpaper — no cache to go stale when
+/// the user changes it.
+unsafe fn capture_wallpaper(work_area: RECT) -> isize {
+    let w = work_area.right - work_area.left;
+    let h = work_area.bottom - work_area.top;
+    if w <= 0 || h <= 0 {
+        return 0;
+    }
+    let src = wallpaper_window();
+    if src.0.is_null() {
+        if !WP_DIAG.swap(true, Ordering::Relaxed) {
+            eprintln!("[Astur] wallpaper: no Progman/WorkerW found -> flat slide");
+        }
+        return 0;
+    }
+    let mut wr = RECT::default();
+    if GetWindowRect(src, &mut wr).is_err() {
+        return 0;
+    }
+    let (ww, wh) = (wr.right - wr.left, wr.bottom - wr.top);
+    if ww <= 0 || wh <= 0 {
+        return 0;
+    }
+    let screen = GetDC(None);
+    if screen.0.is_null() {
+        return 0;
+    }
+    // Render the WHOLE wallpaper window with PrintWindow + PW_RENDERFULLCONTENT
+    // (BitBlt of a DWM-composited desktop window comes back black), then crop the
+    // work-area region out of it.
+    let fulldc = CreateCompatibleDC(screen);
+    let fullbmp = CreateCompatibleBitmap(screen, ww, wh);
+    let resdc = CreateCompatibleDC(screen);
+    let resbmp = CreateCompatibleBitmap(screen, w, h);
+    let ofb = SelectObject(fulldc, HGDIOBJ(fullbmp.0));
+    let orb = SelectObject(resdc, HGDIOBJ(resbmp.0));
+    let printed = PrintWindow(src, fulldc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
+    let ok = printed
+        && BitBlt(
+            resdc,
+            0,
+            0,
+            w,
+            h,
+            fulldc,
+            work_area.left - wr.left,
+            work_area.top - wr.top,
+            SRCCOPY,
+        )
+        .is_ok();
+    SelectObject(fulldc, ofb);
+    SelectObject(resdc, orb);
+    let _ = DeleteObject(HGDIOBJ(fullbmp.0));
+    let _ = DeleteDC(fulldc);
+    let _ = DeleteDC(resdc);
+    let _ = ReleaseDC(None, screen);
+    if !WP_DIAG.swap(true, Ordering::Relaxed) {
+        let mut buf = [0u16; 64];
+        let n = GetClassNameW(src, &mut buf);
+        let class = String::from_utf16_lossy(&buf[..n as usize]);
+        eprintln!("[Astur] wallpaper source class '{class}', PrintWindow={printed}, ok={ok}");
+    }
+    if !ok {
+        let _ = DeleteObject(HGDIOBJ(resbmp.0));
+        return 0;
+    }
+    resbmp.0 as isize
+}
+
+/// Duplicate a DDB into a fresh GPU-backed bitmap the caller owns. Used to hand
+/// the transition worker its own copies so the cache is never touched off-thread.
+unsafe fn dup_ddb(src: isize, w: i32, h: i32) -> isize {
+    if src == 0 || w <= 0 || h <= 0 {
+        return 0;
+    }
+    let screen = GetDC(None);
+    if screen.0.is_null() {
+        return 0;
+    }
+    let dst = CreateCompatibleBitmap(screen, w, h);
+    if dst.0.is_null() {
+        let _ = ReleaseDC(None, screen);
+        return 0;
+    }
+    let sdc = CreateCompatibleDC(screen);
+    let ddc = CreateCompatibleDC(screen);
+    let so = SelectObject(sdc, HGDIOBJ(src as *mut c_void));
+    let do_ = SelectObject(ddc, HGDIOBJ(dst.0));
+    let _ = BitBlt(ddc, 0, 0, w, h, sdc, 0, 0, SRCCOPY);
+    SelectObject(sdc, so);
+    SelectObject(ddc, do_);
+    let _ = DeleteDC(sdc);
+    let _ = DeleteDC(ddc);
+    let _ = ReleaseDC(None, screen);
+    dst.0 as isize
+}
 
 /// Hand a slide to the transition thread, replacing (and freeing) any request it
 /// hasn't picked up yet so a burst of switches can't leak frozen bitmaps.
 fn dispatch_slide(req: SlideReq) {
+    *SLIDE_READY.lock().unwrap() = false;
     {
         let mut slot = SLIDE_REQ.lock().unwrap();
         if let Some(old) = slot.take() {
             unsafe {
-                let _ = DeleteObject(HGDIOBJ(old.bmp as *mut c_void));
+                let _ = DeleteObject(HGDIOBJ(old.out_bmp as *mut c_void));
+                let _ = DeleteObject(HGDIOBJ(old.in_bmp as *mut c_void));
             }
         }
         *slot = Some(req);
@@ -1641,13 +1915,30 @@ fn transition_worker() {
     }
 }
 
-/// Render one slide: overlay showing the frozen outgoing image, with live DWM
-/// thumbnails of the incoming windows sliding in over it, then tear it down to
-/// reveal the (already-placed) real windows. Frees the request's bitmap.
+/// Render one push: a FIXED, monitor-bounded topmost overlay whose surface is a
+/// two-image filmstrip — the frozen OUTGOING workspace and the frozen INCOMING
+/// workspace, side by side — scrolled together so the old slides off one edge as
+/// the new slides in from the other. The overlay never moves, so it cannot bleed
+/// onto an adjacent monitor; everything is GDI blits the eye sees as one motion.
+/// Both snapshots are screen BitBlts (gaps/dimming baked in) so the reveal at the
+/// end is pixel-identical to the real windows already placed underneath. The
+/// worker owns and frees both request bitmaps.
 unsafe fn run_transition(req: SlideReq) {
     let full = req.rect;
     let w = full.right - full.left;
     let h = full.bottom - full.top;
+    let free_in = || {
+        let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
+        let _ = DeleteObject(HGDIOBJ(req.in_bmp as *mut c_void));
+    };
+    if w <= 0 || h <= 0 || req.in_bmp == 0 {
+        free_in();
+        signal_slide_overlay_up(); // unblock the manager (no overlay this time)
+        return;
+    }
+    // Capture the CURRENT wallpaper here on the worker (not cached), so it's always
+    // up to date and the manager isn't blocked by the PrintWindow. 0 = flat slide.
+    let wp = capture_wallpaper(full);
     let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
     let overlay = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -1664,61 +1955,87 @@ unsafe fn run_transition(req: SlideReq) {
         None,
     );
     let Ok(overlay) = overlay else {
-        let _ = DeleteObject(HGDIOBJ(req.bmp as *mut c_void));
+        free_in();
+        signal_slide_overlay_up();
         return;
     };
-    let _ = ShowWindow(overlay, SW_SHOWNA);
 
-    // Paint the frozen outgoing image onto the overlay surface, then free the
-    // bitmap (its pixels now live in the overlay's surface).
+    // One reused back buffer + source DCs; compose into the back buffer then
+    // present in a single blit per frame (no flicker, no per-frame allocation).
     let odc = GetDC(overlay);
-    let mem = CreateCompatibleDC(odc);
-    let oldb = SelectObject(mem, HGDIOBJ(req.bmp as *mut c_void));
-    let _ = BitBlt(odc, 0, 0, w, h, mem, 0, 0, SRCCOPY);
-    SelectObject(mem, oldb);
-    let _ = DeleteDC(mem);
-    ReleaseDC(overlay, odc);
-    let _ = DeleteObject(HGDIOBJ(req.bmp as *mut c_void));
+    let backdc = CreateCompatibleDC(odc);
+    let back = CreateCompatibleBitmap(odc, w, h);
+    let outdc = CreateCompatibleDC(odc);
+    let indc = CreateCompatibleDC(odc);
+    let wpdc = CreateCompatibleDC(odc);
+    let ob = SelectObject(backdc, HGDIOBJ(back.0));
+    let oo = SelectObject(outdc, HGDIOBJ(req.out_bmp as *mut c_void));
+    let oi = SelectObject(indc, HGDIOBJ(req.in_bmp as *mut c_void));
+    let owp = if wp != 0 {
+        Some(SelectObject(wpdc, HGDIOBJ(wp as *mut c_void)))
+    } else {
+        None
+    };
 
-    // Live thumbnails of the incoming windows (already placed at their targets).
-    let mut thumbs: Vec<(isize, RECT)> = Vec::with_capacity(req.wins.len());
-    for (hw, t) in &req.wins {
-        if let Ok(id) = DwmRegisterThumbnail(overlay, hwnd_from(*hw)) {
-            thumbs.push((id, *t));
+    // Compose one frame into the back buffer at horizontal offset `off`. With a
+    // wallpaper backdrop, the still wallpaper is laid down first and only the
+    // window rects are blitted on top (sliding), so the gaps stay put. Without
+    // one (capture failed) it falls back to a flat full-frame filmstrip.
+    let compose = |off: i32| {
+        if wp != 0 {
+            let _ = BitBlt(backdc, 0, 0, w, h, wpdc, 0, 0, SRCCOPY);
+            for r in &req.out_rects {
+                let (rw, rh) = (r.right - r.left, r.bottom - r.top);
+                let _ = BitBlt(backdc, r.left + off, r.top, rw, rh, outdc, r.left, r.top, SRCCOPY);
+            }
+            for r in &req.in_rects {
+                let (rw, rh) = (r.right - r.left, r.bottom - r.top);
+                let _ = BitBlt(
+                    backdc,
+                    r.left + off + req.dir * w,
+                    r.top,
+                    rw,
+                    rh,
+                    indc,
+                    r.left,
+                    r.top,
+                    SRCCOPY,
+                );
+            }
+        } else {
+            let _ = BitBlt(backdc, off, 0, w, h, outdc, 0, 0, SRCCOPY);
+            let _ = BitBlt(backdc, off + req.dir * w, 0, w, h, indc, 0, 0, SRCCOPY);
         }
-    }
+    };
 
-    let dx = req.dir * w;
+    // Paint frame 0 (off = 0: outgoing windows at their current spots over the
+    // still wallpaper, identical to what's on screen) BEFORE showing the overlay,
+    // so raising it causes no flash. Then signal the manager that the monitor is
+    // covered, so it can do the real switch underneath without the destination
+    // workspace flashing first.
+    compose(0);
+    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+    let _ = ShowWindow(overlay, SW_SHOWNA);
+    signal_slide_overlay_up();
+
+    // The new ws came from the `dir` side, so the outgoing leaves the opposite
+    // way; the incoming sits in the adjacent filmstrip slot (off + dir*w) and is
+    // contiguous with it (no seam).
+    let target = -req.dir * w;
     let dur = req.dur_ms.max(1) as f64;
-    let frame_dur = std::time::Duration::from_micros(16_667);
+    let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz back-buffer
     let start = Instant::now();
     let mut next = start;
     let mut msg = MSG::default();
     loop {
-        // Keep the overlay responsive (it has no other work, but a top-level
-        // window must drain its queue).
         while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        let el = start.elapsed().as_millis() as f64;
-        let off = (dx as f64 * (1.0 - ease_out_cubic((el / dur).min(1.0)))).round() as i32;
-        for (id, t) in &thumbs {
-            let dest = RECT {
-                left: t.left - full.left + off,
-                top: t.top - full.top,
-                right: t.right - full.left + off,
-                bottom: t.bottom - full.top,
-            };
-            let props = DWM_THUMBNAIL_PROPERTIES {
-                dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
-                rcDestination: dest,
-                opacity: 255,
-                fVisible: BOOL(1),
-                ..Default::default()
-            };
-            let _ = DwmUpdateThumbnailProperties(*id, &props);
-        }
+        let el = start.elapsed().as_secs_f64() * 1000.0;
+        let off = (target as f64 * ease_in_out_cubic((el / dur).min(1.0))).round() as i32;
+        compose(off);
+        let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
         if el >= dur {
             break;
         }
@@ -1731,34 +2048,31 @@ unsafe fn run_transition(req: SlideReq) {
         }
     }
 
-    for (id, _) in &thumbs {
-        let _ = DwmUnregisterThumbnail(*id);
+    SelectObject(backdc, ob);
+    SelectObject(outdc, oo);
+    SelectObject(indc, oi);
+    if let Some(owp) = owp {
+        SelectObject(wpdc, owp);
     }
+    let _ = DeleteObject(HGDIOBJ(back.0));
+    let _ = DeleteObject(HGDIOBJ(wp as *mut c_void));
+    let _ = DeleteDC(backdc);
+    let _ = DeleteDC(outdc);
+    let _ = DeleteDC(indc);
+    let _ = DeleteDC(wpdc);
+    ReleaseDC(overlay, odc);
+    free_in();
     let _ = DestroyWindow(overlay);
 }
 
-/// WndProc for the slide overlay: nothing custom (the class brush + GDI blit
-/// paint it; DWM composites the thumbnails over the top).
+/// WndProc for the slide overlay: swallow background erase (the GDI blits own
+/// every pixel; letting DefWindowProc erase with the class brush would flash
+/// black before the first frame).
 unsafe extern "system" fn slide_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    DefWindowProcW(h, msg, w, l)
-}
-
-/// Full bounding rect of a monitor (taskbar included), for the slide overlay.
-unsafe fn monitor_full_rect(hmon: isize) -> RECT {
-    let mut info = MONITORINFO {
-        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
-        ..Default::default()
-    };
-    if GetMonitorInfoW(HMONITOR(hmon as *mut c_void), &mut info).as_bool() {
-        info.rcMonitor
-    } else {
-        RECT {
-            left: 0,
-            top: 0,
-            right: 1920,
-            bottom: 1080,
-        }
+    if msg == WM_ERASEBKGND {
+        return LRESULT(1);
     }
+    DefWindowProcW(h, msg, w, l)
 }
 
 /// Instant workspace switch: hide the old set, reveal + tile the new. Used when
@@ -1806,6 +2120,25 @@ unsafe fn capture_monitor(full: RECT) -> isize {
     bmp.0 as isize
 }
 
+/// Work-area-local rects of every window on (mi, wsi), read from their real
+/// positions — so the slide moves floating windows (and float mode) too, not just
+/// the tiled layout.
+unsafe fn ws_window_rects(mgr: &Manager, mi: usize, wsi: usize, origin: RECT) -> Vec<RECT> {
+    mgr.monitors[mi].workspaces[wsi]
+        .windows
+        .iter()
+        .filter_map(|&hwin| {
+            let mut r = RECT::default();
+            GetWindowRect(hwnd_from(hwin), &mut r).ok().map(|_| RECT {
+                left: r.left - origin.left,
+                top: r.top - origin.top,
+                right: r.right - origin.left,
+                bottom: r.bottom - origin.top,
+            })
+        })
+        .collect()
+}
+
 /// Switch one monitor to workspace `n`, then focus. Workspaces are never cleared
 /// — only shown/hidden. When the slide compositor is enabled the switch is still
 /// done instantly and correctly here (so window management can never break);
@@ -1818,23 +2151,61 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     if n == old || n >= mgr.monitors[mi].workspaces.len() {
         return;
     }
-    let want_slide = mgr.cfg.animations
-        && mgr.cfg.workspace_slide
-        && mgr.cfg.animation_ms > 0
-        && mgr.tiling;
+    // Not gated on tiling: the slide is cosmetic and works in float mode too.
+    let want_slide =
+        mgr.cfg.animations && mgr.cfg.workspace_slide && mgr.cfg.animation_ms > 0;
     let dir = if n > old { 1 } else { -1 };
-    let full = monitor_full_rect(mgr.monitors[mi].hmon);
+    let hmon = mgr.monitors[mi].hmon;
+    // Slide region = the tiling work area, NOT the full monitor. This excludes the
+    // navbar, so the bar stays pinned above the slide instead of moving with it.
+    let full = mgr.monitors[mi].work_area;
+    let (w, h) = (full.right - full.left, full.bottom - full.top);
 
-    // Freeze the outgoing image BEFORE the switch, while it's still on screen.
-    let bmp = if want_slide { capture_monitor(full) } else { 0 };
+    // Freeze the outgoing workspace BEFORE the switch, while it's still on screen,
+    // along with the work-area-local rects of its tiled windows (so only the
+    // windows slide and the wallpaper in the gaps stays put).
+    let out = if want_slide { capture_monitor(full) } else { 0 };
+    let out_rects: Vec<RECT> = if out != 0 {
+        ws_window_rects(mgr, mi, old, full)
+    } else {
+        Vec::new()
+    };
+
+    // Push: the worker raises an overlay showing the outgoing image (frame 0 ==
+    // current screen, so no visible change) and signals back once it covers the
+    // monitor. We then do the real switch UNDERNEATH it — that's what stops the
+    // destination workspace flashing before the animation. Incoming image is the
+    // snapshot from the last time we left `n`; the worker gets private copies.
+    let incoming = if out != 0 { snap_get(hmon, n) } else { None };
+    if let Some((in_bmp, in_rects)) = incoming {
+        // Worker captures the still wallpaper backdrop itself (always current).
+        dispatch_slide(SlideReq {
+            out_bmp: dup_ddb(out, w, h),
+            in_bmp: dup_ddb(in_bmp, w, h),
+            out_rects: out_rects.clone(),
+            in_rects,
+            rect: full,
+            dir,
+            // Floor the duration so a full-monitor push is never too steppy.
+            dur_ms: mgr.cfg.animation_ms.max(200) as u64,
+        });
+        wait_slide_overlay_up();
+    }
 
     // The real, correct switch — instant placement, on this thread. Cannot fail.
+    // Now hidden under the overlay (if sliding).
     switch_plain(mgr, mi, old, n);
+
+    // Cache the fresh outgoing as `old`'s snapshot for next time (takes ownership
+    // of `out`, freeing any previous snapshot of that ws). First visit to a ws
+    // has no snapshot, so its first entry is an instant switch.
+    if out != 0 {
+        snap_store(hmon, old, out, out_rects);
+    }
 
     // Resolve the new workspace's focus, then style every window to its resting
     // opacity/border NOW. This is what stops the reveal from popping in at 100%
-    // and dimming a frame later, and it happens before the slide thumbnails are
-    // registered, so they capture the final look.
+    // and dimming a frame later; it happens under the overlay, so it's invisible.
     let f = {
         let ws = &mut mgr.monitors[mi].workspaces[n];
         let f = if ws.focused != 0 {
@@ -1847,31 +2218,6 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     };
     style_active(mgr, mi);
     STYLED_FOCUS.store(f, Ordering::Relaxed);
-
-    // Cosmetic slide over the now-final (placed + styled) windows. Best-effort
-    // and isolated on the transition thread; the windows are already correct.
-    if bmp != 0 {
-        // Destinations are the windows' ACTUAL placed rects, so thumbnails land
-        // exactly on the real windows and the reveal is seamless.
-        let wins: Vec<(isize, RECT)> = workspace_layout(mgr, mi, n)
-            .into_iter()
-            .filter_map(|(hw, _)| {
-                let mut r = RECT::default();
-                GetWindowRect(hwnd_from(hw), &mut r).ok().map(|_| (hw, r))
-            })
-            .collect();
-        if wins.is_empty() {
-            let _ = DeleteObject(HGDIOBJ(bmp as *mut c_void));
-        } else {
-            dispatch_slide(SlideReq {
-                bmp,
-                rect: full,
-                wins,
-                dir,
-                dur_ms: mgr.cfg.animation_ms.max(1) as u64,
-            });
-        }
-    }
 
     if f != 0 {
         focus_window(f);
@@ -1889,6 +2235,9 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
 /// monitor's active workspace and re-homes tracked windows, keeping their
 /// workspace index when the monitor still exists.
 unsafe fn refresh_monitors(mgr: &mut Manager) {
+    // Cached workspace snapshots are tied to the old monitor handles/resolution
+    // and are invalid after a display change — drop them all.
+    snap_clear();
     // Snapshot tracked windows BEFORE the rebuild. Each window remembers the
     // GLOBAL workspace number it lived on (computed against the OLD layout), so
     // when a monitor is unplugged its windows keep their workspace identity and
@@ -2008,7 +2357,12 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
     match cmd {
         Cmd::Add(h) => {
             if mgr.locate(h).is_none() && is_manageable(hwnd_from(h)) {
-                let mi = monitor_index_for_window(mgr, hwnd_from(h));
+                // A terminal/browser we just launched lands on the cursor's monitor
+                // (consumed once); everything else goes by its spawn position.
+                let pending = std::mem::replace(&mut mgr.pending_launch_mon, 0);
+                let mi = mgr
+                    .mon_by_hmon(pending)
+                    .unwrap_or_else(|| monitor_index_for_window(mgr, hwnd_from(h)));
                 let a = mgr.monitors[mi].active;
                 mgr.monitors[mi].workspaces[a].windows.push(h);
                 if should_float(hwnd_from(h)) {
@@ -2070,6 +2424,8 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
         }
         Cmd::Reload(cfg) => {
             mgr.cfg = *cfg;
+            // Gaps/opacity may have changed — cached snapshots are now stale.
+            snap_clear();
             // Apply new workspace counts / mode, then recompute work areas for
             // the (possibly changed) bar height. Bars themselves are recreated
             // on the main thread (WM_RELOAD -> ensure_bars).
@@ -2396,8 +2752,14 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             retile_monitor(mgr, mi);
         }
-        Cmd::LaunchTerminal => launch(&mgr.cfg.terminal),
+        Cmd::LaunchTerminal => {
+            // Land the new window on the workspace the cursor is on, not wherever
+            // the OS opens it (usually the primary monitor).
+            mgr.pending_launch_mon = cursor_hmon();
+            launch(&mgr.cfg.terminal);
+        }
         Cmd::LaunchBrowser => {
+            mgr.pending_launch_mon = cursor_hmon();
             // Empty browser config = open the system default browser via http.
             if mgr.cfg.browser.trim().is_empty() {
                 launch("http://");
@@ -2611,7 +2973,7 @@ unsafe fn ensure_bars() {
         } else {
             let hb = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
-                w!("suprland_bar"),
+                w!("astur_bar"),
                 w!(""),
                 WS_POPUP,
                 x,
@@ -2839,8 +3201,13 @@ unsafe fn update_bar(mgr: &Manager) {
         mons,
     };
 
-    // Diff against the previous snapshot so only changed monitors repaint.
+    // Diff against the previous snapshot so only changed monitors repaint, and
+    // seed a pill-highlight slide on any monitor whose active workspace moved.
+    let animate_pills = mgr.cfg.animations;
+    let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
+    let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
     let mut changed: Vec<isize> = Vec::new();
+    let mut anim_seeds: Vec<(isize, i32, i32)> = Vec::new();
     {
         let old = BAR.lock().unwrap();
         let global_changed = old.bg != new.bg
@@ -2860,23 +3227,49 @@ unsafe fn update_bar(mgr: &Manager) {
             || old.tiling != new.tiling
             || old.mons.len() != new.mons.len();
         for nm in &new.mons {
-            let diff = match old.mons.iter().find(|om| om.hmon == nm.hmon) {
+            let om = old.mons.iter().find(|om| om.hmon == nm.hmon);
+            let diff = match om {
                 Some(om) => om != nm,
                 None => true,
             };
             if global_changed || diff {
                 changed.push(nm.hmon);
             }
+            // Animate only when the pill layout is unchanged (so indices are
+            // comparable) and a different, real pill became active.
+            if animate_pills {
+                if let Some(om) = om {
+                    if om.slots == nm.slots
+                        && om.active != usize::MAX
+                        && nm.active != usize::MAX
+                        && om.active != nm.active
+                    {
+                        anim_seeds.push((
+                            nm.hmon,
+                            pad + om.active as i32 * cell,
+                            pad + nm.active as i32 * cell,
+                        ));
+                    }
+                }
+            }
         }
     }
     *BAR.lock().unwrap() = new;
-    if changed.is_empty() {
+    if changed.is_empty() && anim_seeds.is_empty() {
         return;
     }
     let bars = BARS.lock().unwrap().clone();
     for b in bars {
         if changed.contains(&b.hmon) {
             let _ = PostMessageW(hwnd_from(b.hwnd), WM_BAR_REFRESH, WPARAM(0), LPARAM(0));
+        }
+        if let Some(&(_, fx, tx)) = anim_seeds.iter().find(|s| s.0 == b.hmon) {
+            let _ = PostMessageW(
+                hwnd_from(b.hwnd),
+                WM_PILL_ANIM,
+                WPARAM(fx as usize),
+                LPARAM(tx as isize),
+            );
         }
     }
 }
@@ -2999,6 +3392,7 @@ unsafe fn paint_bar(h: HWND) {
 
     if let Some(mb) = data.mons.iter().find(|m| m.hmon == hmon) {
         // ---- left cluster: workspace pills, offset by the edge padding.
+        // Numbers first, all in their resting colours...
         for (i, label) in mb.labels.iter().enumerate() {
             let x0 = pad + i as i32 * cell;
             let mut cr = RECT {
@@ -3008,23 +3402,44 @@ unsafe fn paint_bar(h: HWND) {
                 bottom: h_px,
             };
             let occ = mb.occupied & (1 << i) != 0;
-            if i == mb.active {
-                // Inset fill so the highlight reads as a pill, not a full block.
-                let ipad = (h_px / 6).clamp(2, 6);
-                let pill = RECT {
-                    left: x0 + 3,
-                    top: ipad,
-                    right: x0 + cell - 3,
-                    bottom: h_px - ipad,
-                };
-                let ab = CreateSolidBrush(COLORREF(data.accent));
-                FillRect(hdc, &pill, ab);
-                let _ = DeleteObject(HGDIOBJ(ab.0));
-                SetTextColor(hdc, COLORREF(data.bg));
-            } else {
-                SetTextColor(hdc, COLORREF(if occ { data.fg } else { data.inactive }));
-            }
+            SetTextColor(hdc, COLORREF(if occ { data.fg } else { data.inactive }));
             let mut s: Vec<u16> = format!("{}", label).encode_utf16().collect();
+            DrawTextW(
+                hdc,
+                &mut s,
+                &mut cr,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+            );
+        }
+        // ...then the accent highlight on top, at the animated x while a slide is
+        // in flight, otherwise snapped to the active pill. The number it sits over
+        // is redrawn in the bg colour so it reads through the fill.
+        let hl = match pill_anim_x(hmon) {
+            Some((x, _)) => Some(x),
+            None if mb.active != usize::MAX => Some(pad + mb.active as i32 * cell),
+            None => None,
+        };
+        if let (Some(x), true) = (hl, !mb.labels.is_empty() && cell > 0) {
+            let ipad = (h_px / 6).clamp(2, 6);
+            let pill = RECT {
+                left: x + 3,
+                top: ipad,
+                right: x + cell - 3,
+                bottom: h_px - ipad,
+            };
+            let ab = CreateSolidBrush(COLORREF(data.accent));
+            FillRect(hdc, &pill, ab);
+            let _ = DeleteObject(HGDIOBJ(ab.0));
+            let nearest = (((x - pad) as f32 / cell as f32).round() as i32)
+                .clamp(0, mb.labels.len() as i32 - 1) as usize;
+            let mut cr = RECT {
+                left: x,
+                top: 0,
+                right: x + cell,
+                bottom: h_px,
+            };
+            SetTextColor(hdc, COLORREF(data.bg));
+            let mut s: Vec<u16> = format!("{}", mb.labels[nearest]).encode_utf16().collect();
             DrawTextW(
                 hdc,
                 &mut s,
@@ -3071,7 +3486,27 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             paint_bar(h);
             LRESULT(0)
         }
-        WM_BAR_REFRESH | WM_TIMER => {
+        WM_PILL_ANIM => {
+            let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
+            pill_anim_set(hmon, w.0 as i32, l.0 as i32);
+            // ~120 Hz repaint while the highlight slides.
+            SetTimer(h, PILL_TIMER_ID, 8, None);
+            let _ = InvalidateRect(h, None, BOOL(0));
+            LRESULT(0)
+        }
+        WM_TIMER => {
+            if w.0 == PILL_TIMER_ID {
+                let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
+                // Stop the fast timer once the slide finishes (or vanished).
+                if pill_anim_x(hmon).map(|(_, done)| done).unwrap_or(true) {
+                    let _ = KillTimer(h, PILL_TIMER_ID);
+                    pill_anim_clear(hmon);
+                }
+            }
+            let _ = InvalidateRect(h, None, BOOL(0));
+            LRESULT(0)
+        }
+        WM_BAR_REFRESH => {
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
         }
@@ -3170,11 +3605,11 @@ fn apply_bar_statics(cfg: &Config) {
 }
 
 /// Watch the two config files and apply changes live, so editing + saving a
-/// config takes effect without restarting suprland.
+/// config takes effect without restarting Astur.
 fn config_watcher() {
     use std::time::SystemTime;
-    let wm = config_path("SUPRLAND_CONFIG", "suprland.conf");
-    let nav = config_path("SUPRLAND_NAVBAR", "navbar.conf");
+    let wm = config_path("ASTUR_CONFIG", "astur.conf");
+    let nav = config_path("ASTUR_NAVBAR", "navbar.conf");
     let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
     let mut last: (Option<SystemTime>, Option<SystemTime>) = (mtime(&wm), mtime(&nav));
     loop {
@@ -3227,6 +3662,7 @@ fn manager_loop(cfg: Config) {
             primary,
             tiling: cfg.start_tiled,
             cfg,
+            pending_launch_mon: 0,
         };
         assign_existing_windows(&mut m);
         if m.tiling {
@@ -3390,7 +3826,7 @@ fn main() {
     // runs before the abort.
     std::panic::set_hook(Box::new(|info| {
         restore_on_panic();
-        eprintln!("suprland: panic — managed windows restored. {info}");
+        eprintln!("Astur: panic — managed windows restored. {info}");
     }));
     unsafe {
         // 1ms timer resolution so the animation worker's frame sleeps are precise
@@ -3427,7 +3863,7 @@ fn main() {
             lpfnWndProc: Some(marker_wndproc),
             hInstance: hinst,
             hbrBackground: brush,
-            lpszClassName: w!("hyprwin_marker"),
+            lpszClassName: w!("astur_marker"),
             ..Default::default()
         };
         RegisterClassW(&wc);
@@ -3445,7 +3881,7 @@ fn main() {
 
         let marker = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            w!("hyprwin_marker"),
+            w!("astur_marker"),
             w!(""),
             WS_POPUP,
             0,
@@ -3469,7 +3905,7 @@ fn main() {
                 lpfnWndProc: Some(bar_wndproc),
                 hInstance: hinst,
                 hbrBackground: bar_brush,
-                lpszClassName: w!("suprland_bar"),
+                lpszClassName: w!("astur_bar"),
                 ..Default::default()
             };
             RegisterClassW(&bwc);
@@ -3483,7 +3919,7 @@ fn main() {
             .expect("keyboard hook failed");
 
         // Reveal all managed windows on Ctrl+C / console close so none are left
-        // hidden on another workspace when suprland exits.
+        // hidden on another workspace when Astur exits.
         let _ = SetConsoleCtrlHandler(Some(console_handler), BOOL(1));
 
         // Reduce the foreground lock so the manager can focus windows reliably.
@@ -3557,7 +3993,7 @@ fn main() {
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
         std::thread::spawn(move || manager_loop(cfg));
 
-        println!("suprland running.");
+        println!("Astur running.");
         println!("  LEFT ALT + left-drag  = move window (drops back into the tiling)");
         println!("  LEFT ALT + right-drag = resize nearest corner (red bracket)");
         println!("  --- tiling (LEFT ALT is the modifier) ---");
@@ -3575,12 +4011,12 @@ fn main() {
         println!("  Alt+1..9,0     = switch workspace (or click a bar pill)");
         println!("  Alt+Shift+1..0 = move focused window to workspace");
         println!("  Per-monitor status bars, focus-follows-mouse, window rules:");
-        println!("  all configurable in suprland.conf (see comments in that file).");
+        println!("  all configurable in astur.conf (see comments in that file).");
         println!("  Alt+Tab still works. Use RIGHT ALT for normal Alt behavior.");
         println!("  --- config ---");
         println!("  Default 'shared' mode spreads workspaces across monitors:");
         println!("  ws1=mon1, ws2=mon2, ws3=mon3, ws4=mon1 (2nd), and so on.");
-        println!("  Edit %USERPROFILE%\\.suprland\\suprland.conf then restart.");
+        println!("  Edit %USERPROFILE%\\.astur\\astur.conf then restart.");
         println!("  workspace_mode = shared | per_monitor; set terminal/browser too.");
         println!("Press Ctrl+C in this window to quit (windows are restored).");
 

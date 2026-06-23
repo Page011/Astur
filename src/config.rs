@@ -1,7 +1,7 @@
 //! Runtime configuration: the `Config` struct, its documented-default file
 //! templates, and the key/value parser. No Win32 — pure data and string work.
 
-/// Runtime configuration, loaded from suprland.conf + navbar.conf at startup.
+/// Runtime configuration, loaded from astur.conf + navbar.conf at startup.
 #[derive(Clone)]
 pub(crate) struct Config {
     pub(crate) per_monitor: bool,          // true: Alt+1..9 switches focused monitor only
@@ -19,7 +19,7 @@ pub(crate) struct Config {
     pub(crate) focused_border: u32,        // COLORREF for the focused window border
     pub(crate) unfocused_border: u32,      // COLORREF for unfocused window borders
     pub(crate) cursor_follows_focus: bool, // warp the mouse to the focused window
-    pub(crate) focus_follows_mouse: bool,  // hovering a window focuses it (Hyprland follow_mouse)
+    pub(crate) focus_follows_mouse: bool,  // hovering a window focuses it (focus follows mouse)
     pub(crate) animations: bool,           // animate tiling moves + workspace slides
     pub(crate) animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
     pub(crate) workspace_slide: bool,      // GPU thumbnail slide transition on workspace switch
@@ -36,7 +36,7 @@ pub(crate) struct Config {
     pub(crate) bar_accent: u32,            // COLORREF active-workspace highlight
     pub(crate) bar_inactive: u32,          // COLORREF empty-workspace text
     pub(crate) bar_font_name: String,      // font family (default "Segoe UI")
-    pub(crate) bar_hide_empty: bool,       // hide empty workspace pills (Hyprland-style)
+    pub(crate) bar_hide_empty: bool,       // hide empty workspace pills
     pub(crate) bar_padding: i32,           // horizontal padding from each screen edge (px)
     pub(crate) bar_show_date: bool,        // show the date widget
     pub(crate) bar_date_format: String,    // date token string, e.g. "ddd dd MMM"
@@ -113,12 +113,12 @@ impl Config {
 
 const DEFAULT_CONFIG: &str = "\
 # ============================================================================
-# suprland configuration  (window manager)
+# Astur configuration  (window manager)
 # ============================================================================
-# Location : %USERPROFILE%\\.suprland\\suprland.conf
-#            (override with the SUPRLAND_CONFIG environment variable)
+# Location : %USERPROFILE%\\.astur\\astur.conf
+#            (override with the ASTUR_CONFIG environment variable)
 # The status bar is configured separately in navbar.conf (same folder).
-# Apply    : edit this file, then restart suprland.
+# Apply    : edit this file, then restart Astur.
 # Regen    : delete this file and relaunch to get a fresh, fully-commented copy.
 #
 # Syntax   : one  key = value  per line. '#' starts a comment. Blank lines and
@@ -171,7 +171,7 @@ start_tiled = true
 
 # Tiling layout.
 #   dwindle = each new window splits the remaining space, spiralling into the
-#             bottom corner (Hyprland / omarchy default).
+#             bottom corner (spiral default).
 #   master  = one large master column on the left, the rest stacked on the right.
 # values: dwindle | master
 layout = dwindle
@@ -198,8 +198,8 @@ inner_gap = 8
 cursor_follows_focus = true
 
 # Focus follows mouse: hovering a window with the cursor focuses it, like
-# Hyprland's follow_mouse. Off by default (Windows focus-steal is more abrupt
-# than on Wayland); set true for the omarchy/Hyprland feel.  bool
+# Focus follows mouse. Off by default (Windows focus-steal is more abrupt
+# than on Linux); set true to enable.  bool
 focus_follows_mouse = false
 
 # ---------------------------------------------------------------------------
@@ -277,7 +277,7 @@ browser =
 #   Alt+<workspace_key>  switch to that workspace (see workspace_keys above)
 #   Alt+Shift+<ws key>   move focused window to that workspace (and follow it)
 #   Alt+Tab              normal task switcher (still works)
-#   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by suprland)
+#   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by Astur)
 #
 # The letter keys above (J K H L M T F W) are rebindable. Each takes a single
 # key name (see the 'keys' type at the top of this file). Arrows and Enter
@@ -295,18 +295,18 @@ key_close_window = W
 
 const DEFAULT_NAVBAR: &str = "\
 # ============================================================================
-# suprland navbar configuration  (status bar)
+# Astur navbar configuration  (status bar)
 # ============================================================================
-# Location : %USERPROFILE%\\.suprland\\navbar.conf
-#            (override with the SUPRLAND_NAVBAR environment variable)
-# Window-manager settings live separately in suprland.conf (same folder).
-# Apply    : edit this file, then restart suprland.
+# Location : %USERPROFILE%\\.astur\\navbar.conf
+#            (override with the ASTUR_NAVBAR environment variable)
+# Window-manager settings live separately in astur.conf (same folder).
+# Apply    : edit this file, then restart Astur.
 #
 # One bar is drawn on EVERY monitor. Each shows that monitor's workspaces and
 # focused window. The tiling work area is reserved so windows never sit under a
 # bar. Click a workspace pill to switch to it.
 #
-# Value types: bool, int, colour (#RRGGBB) -- see suprland.conf for details.
+# Value types: bool, int, colour (#RRGGBB) -- see astur.conf for details.
 # ============================================================================
 
 # Show the bars.  bool   (set false to disable entirely)
@@ -326,7 +326,7 @@ font_size = 0
 # Workspaces
 # ---------------------------------------------------------------------------
 # Hide empty workspace pills, showing only the active one and those with
-# windows (Hyprland / omarchy style). false = show every workspace the monitor
+# windows (spiral style). false = show every workspace the monitor
 # owns.  bool
 hide_empty_workspaces = false
 
@@ -421,7 +421,7 @@ fn parse_color(v: &str, fallback: u32) -> u32 {
     fallback
 }
 
-/// Resolve a config file path: env override, else %USERPROFILE%\.suprland\<name>.
+/// Resolve a config file path: env override, else %USERPROFILE%\.astur\<name>.
 pub(crate) fn config_path(env: &str, name: &str) -> std::path::PathBuf {
     if let Ok(p) = std::env::var(env) {
         return std::path::PathBuf::from(p);
@@ -429,7 +429,7 @@ pub(crate) fn config_path(env: &str, name: &str) -> std::path::PathBuf {
     let mut dir = std::env::var("USERPROFILE")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    dir.push(".suprland");
+    dir.push(".astur");
     dir.push(name);
     dir
 }
@@ -449,19 +449,19 @@ fn read_or_create(path: &std::path::Path, default: &str) -> String {
     }
 }
 
-/// Load settings from suprland.conf (window manager) and navbar.conf (status
+/// Load settings from astur.conf (window manager) and navbar.conf (status
 /// bar), creating each with documented defaults when missing.
 pub(crate) fn load_config() -> Config {
     let mut c = Config::defaults();
-    let wm = config_path("SUPRLAND_CONFIG", "suprland.conf");
+    let wm = config_path("ASTUR_CONFIG", "astur.conf");
     parse_into(&mut c, &read_or_create(&wm, DEFAULT_CONFIG));
-    let nav = config_path("SUPRLAND_NAVBAR", "navbar.conf");
+    let nav = config_path("ASTUR_NAVBAR", "navbar.conf");
     parse_into(&mut c, &read_or_create(&nav, DEFAULT_NAVBAR));
     c
 }
 
 /// Apply `key = value` lines from `text` onto `c`. Unknown keys are ignored.
-/// Recognises both the window-manager keys (suprland.conf) and the navbar keys
+/// Recognises both the window-manager keys (astur.conf) and the navbar keys
 /// (navbar.conf, unprefixed) so either file may set either, and old configs that
 /// used the `bar_*` names keep working.
 fn parse_into(c: &mut Config, text: &str) {
@@ -475,7 +475,7 @@ fn parse_into(c: &mut Config, text: &str) {
         };
         let (k, v) = (k.trim(), v.trim());
         match k {
-            // ---- window manager (suprland.conf) ----
+            // ---- window manager (astur.conf) ----
             "workspace_mode" => c.per_monitor = v.eq_ignore_ascii_case("per_monitor"),
             "start_tiled" => c.start_tiled = parse_bool(v),
             "outer_gap" => {

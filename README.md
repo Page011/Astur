@@ -1,27 +1,27 @@
-# suprland — Tiling Window Manager for Windows
+# Astur — Tiling Window Manager for Windows
 
-**suprland** is a fast, free, open-source **tiling window manager for Windows**
-with **Hyprland-style** Alt-drag window movement, nearest-corner resize,
+**Astur** is a fast, free, open-source **tiling window manager for Windows**
+with **Alt-drag** window movement, nearest-corner resize,
 dwindle/master tiling, a per-monitor status bar, and up to 10 virtual
 workspaces — all in a single portable Rust `.exe` with no installer. A
 lightweight alternative to
 [komorebi](https://github.com/LGUG2Z/komorebi),
 [GlazeWM](https://github.com/glzr-io/glazewm), and PowerToys FancyZones for
-keyboard-driven, i3/Hyprland-style window management on Windows 10 and 11.
+keyboard-driven, i3-style window management on Windows 10 and 11.
 
-[![GitHub release](https://img.shields.io/github/v/release/Page011/Suprland)](https://github.com/Page011/Suprland/releases/latest)
+[![GitHub release](https://img.shields.io/github/v/release/Page011/Astur)](https://github.com/Page011/Astur/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
-[![Website](https://img.shields.io/badge/website-suprland.com-366382)](https://suprland.com)
+[![Website](https://img.shields.io/badge/website-astur.app-366382)](https://astur.app)
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
-[![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Suprland/releases/latest)
+[![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Astur/releases/latest)
 
-> **Keywords:** tiling window manager Windows · Hyprland for Windows · komorebi
+> **Keywords:** tiling window manager Windows · komorebi
 > alternative · GlazeWM alternative · FancyZones alternative · i3 for Windows ·
 > Alt-drag windows · master-stack layout · Rust window manager
 
 ## Install
 
-Download `suprland-windows-x64.exe` from [Releases](../../releases/latest) and run it.
+Download `astur-windows-x64.exe` from [Releases](../../releases/latest) and run it.
 No installer. Single `.exe`.
 
 ## What it does
@@ -37,7 +37,7 @@ No installer. Single `.exe`.
 - **Extras** — coloured window borders, unfocused-window dimming,
   focus-follows-mouse, per-app window rules, and live config hot-reload
 
-Left Alt is fully reserved as the suprland modifier — apps never see it.
+Left Alt is fully reserved as the Astur modifier — apps never see it.
 Right Alt is untouched for normal use. Alt+Tab still works.
 
 ## Hotkeys
@@ -65,17 +65,17 @@ In the default `dwindle` layout, resize tiles with **Alt + right-drag** (the
 split reflows); `Alt + H` / `L` adjust the master width in `master` layout.
 
 The letter binds (`J K H L M T F W`) are rebindable in
-`%USERPROFILE%\.suprland\suprland.conf` (`key_focus_next`, `key_close_window`,
+`%USERPROFILE%\.astur\astur.conf` (`key_focus_next`, `key_close_window`,
 etc.), along with workspace keys, gaps, layout, borders, and behaviour. The
 status bar is configured separately in `navbar.conf` (same folder). Arrows and
 `Enter` are fixed. Both config files **hot-reload** on save — no restart needed.
 
 ## Configuration
 
-Two files are created in `%USERPROFILE%\.suprland\` on first run, both
+Two files are created in `%USERPROFILE%\.astur\` on first run, both
 fully commented and **hot-reloaded on save**:
 
-- **`suprland.conf`** — window manager: workspace mode/count, layout, gaps,
+- **`astur.conf`** — window manager: workspace mode/count, layout, gaps,
   master ratio, borders, dimming, focus-follows-mouse, cursor warping,
   animations (`animations`, `animation_ms`), launchers, per-app window rules
   (`ignore_classes` / `float_classes`), workspace keys, and the rebindable
@@ -96,7 +96,7 @@ the focused window title in the centre, and a widget cluster on the right.
 |---|---|
 | `enabled`, `height`, `bottom`, `padding` | Show/size/dock the bar |
 | `font_name`, `font_size` | Any installed font family + text height |
-| `hide_empty_workspaces` | Show only active + occupied pills (Hyprland-style) |
+| `hide_empty_workspaces` | Show only active + occupied pills |
 | `show_title` | Focused window title (centre) |
 | `show_layout` | Layout + tiling/floating state |
 | `show_clock`, `clock_24h` | Clock (24h or 12h am/pm) |
@@ -109,17 +109,17 @@ the focused window title in the centre, and a widget cluster on the right.
 Requires [Rust stable](https://rustup.rs).
 
 ```bash
-git clone https://github.com/Page011/Suprland
-cd suprland
+git clone https://github.com/Page011/Astur
+cd Astur
 cargo build --release
-# binary at: target/release/suprland.exe
+# binary at: target/release/astur.exe
 ```
 
 ## How it works
 
-suprland installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`)
+Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`)
 that intercept input before it reaches any application. Left Alt is swallowed
-so it never triggers app menus or Alt shortcuts — only suprland sees it. Window
+so it never triggers app menus or Alt shortcuts — only Astur sees it. Window
 moves and resizes are dispatched to a dedicated worker thread so the hooks never
 stall on a slow application's `SetWindowPos`.
 
@@ -127,28 +127,29 @@ stall on a slow application's `SetWindowPos`.
 
 Press `Ctrl+C` in the console window. (Or kill the process from Task Manager.)
 
-## How suprland compares
+## How Astur compares
 
-If you've used a tiling window manager on Linux (i3, Hyprland, sway) and want
-the same flow on Windows, suprland aims to be the smallest thing that works:
+If you've used a tiling window manager on Linux (i3, sway) and want
+the same flow on Windows, Astur aims to be the smallest thing that works:
 
-| | suprland | komorebi | GlazeWM | FancyZones |
+| | Astur | komorebi | GlazeWM | FancyZones |
 |---|---|---|---|---|
 | Master-stack tiling | Yes | Yes | Yes | No (zones only) |
 | Alt-drag move/resize anywhere | Yes | No | No | No |
+| Silky smooth animations | Yes | No | No | No |
 | Single portable exe, no install | Yes | No (needs config) | No (installer) | Part of PowerToys |
 | Virtual workspaces | Yes | Yes | Yes | Via Windows |
 | Config file required to start | No | Yes | Yes | No |
 | Language | Rust | Rust | C++ | C# |
 
-suprland trades configurability for zero-setup speed: run the exe and Alt-drag
+Astur trades configurability for zero-setup speed: run the exe and Alt-drag
 works immediately, tiling is one keypress away.
 
 ## FAQ
 
-**Is suprland a komorebi or GlazeWM alternative?** Yes — same master-stack
+**Is Astur a komorebi or GlazeWM alternative?** Yes — same master-stack
 tiling and workspace idea, but it runs from a single exe with no config file
-required and adds Hyprland-style Alt-drag move/resize.
+required and adds Alt-drag move/resize.
 
 **Does it work on Windows 11?** Yes, on Windows 10 and 11, x64.
 
@@ -157,12 +158,9 @@ recommended so it can manage elevated windows (e.g. Task Manager) too.
 
 ## Disclaimer
 
-suprland is an independent project. It is **not affiliated with, endorsed by, or
-derived from [Hyprland](https://hyprland.org) or its authors.** References to
-"Hyprland-style" describe only the style of window management suprland
-implements; "Hyprland" is the property of its respective owners. suprland is a
-clean-room Rust implementation for Windows and shares no source code with
-Hyprland.
+Astur is an independent project, not affiliated with or endorsed by any other
+window manager. It is a clean-room Rust implementation for Windows. All
+trademarks belong to their respective owners.
 
 ## Licence
 

@@ -3,7 +3,7 @@
 
 use windows::Win32::Foundation::RECT;
 
-/// Master-stack layout (Hyprland dwindle-lite): one master column on the left,
+/// Master-stack layout: one master column on the left,
 /// the remaining windows stacked vertically on the right.
 pub(crate) fn master_stack(area: RECT, n: usize, ratio: f32, outer: i32, inner: i32) -> Vec<RECT> {
     let mut out = Vec::with_capacity(n);
@@ -52,7 +52,7 @@ pub(crate) fn split_ratio(splits: &[f32], i: usize) -> f32 {
     splits.get(i).copied().unwrap_or(0.5).clamp(0.05, 0.95)
 }
 
-/// Dwindle/spiral layout (Hyprland / omarchy default): each window takes a
+/// Dwindle/spiral layout (spiral default): each window takes a
 /// fraction (`splits[i]`, default half) of the remaining space, alternating the
 /// split along the longer side, so windows spiral toward the bottom corner.
 /// Resizing a window edits the relevant `splits` entry (see `resize_dwindle`).
