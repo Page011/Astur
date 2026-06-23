@@ -23,10 +23,10 @@ jobs:
         run: cargo build --release
 
       - name: Stage artifact
-        run: Copy-Item target\release\suprland.exe suprland-windows-x64.exe
+        run: Copy-Item target\release\astur.exe astur-windows-x64.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: suprland-windows-x64.exe
+          files: astur-windows-x64.exe
           generate_release_notes: true
