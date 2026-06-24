@@ -19,6 +19,10 @@ keyboard-driven, i3-style window management on Windows 10 and 11.
 > alternative · GlazeWM alternative · FancyZones alternative · i3 for Windows ·
 > Alt-drag windows · master-stack layout · Rust window manager
 
+![Astur tiling windows with a status bar on a live Windows desktop](https://astur.app/in-use-screenshot-1.png)
+
+> See it in motion: [watch the demo clip](https://astur.app/#showcase) on the website.
+
 ## Install
 
 Download `astur-windows-x64.exe` from [Releases](../../releases/latest) and run it.
