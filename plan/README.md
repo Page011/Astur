@@ -17,6 +17,7 @@ history (note the supersede).
 | `mods.md` | Extensibility design: declarative mods + out-of-process IPC mods + security. |
 | `system-menu.md` | Alt+Shift+Space power menu (shipped) + wallpaper/category backlog. |
 | `roadmap-v2.md` | Strategy: GUI config (egui), installer, v1/v2 framing, MFT search, Tab columns. |
+| `editions.md` | Astur Lite (`lite` branch) vs Astur Full (`main`): feature matrix, branch/backport model, tray. |
 | `win32-reference.md` | Win32 APIs in use, official doc links, known-slow / known-buggy calls. |
 | `competitors.md` | komorebi, GlazeWM, Seelen UI, FancyZones — features + links. |
 | `known-issues.md` | Bugs, doc/reality mismatches, code to use / avoid. |

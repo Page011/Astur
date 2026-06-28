@@ -2,6 +2,11 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-06-28 — Editions split: Lite changed from frozen tag → **maintained `lite`
+  branch** (created at `cc7e441`/v1.0.0). Lite = minimal console exe, core-only
+  efficiency/quality updates; `main` = full app (tray + GUI + launcher + search +
+  installer). Shared-core fixes backport manually between branches. Matrix +
+  messaging in `plan/editions.md`. (supersedes the 2026-06-27 "frozen v1.0.0" pick)
 - 2026-06-28 — Repo restructured into a **Cargo workspace** for v2: `crates/astur`
   (WM, moved from `src/`), `crates/astur-config` (config extracted to a shared lib,
   `pub`, Win32-free — the GUI will parse the same model; aliased `config` in the WM),
