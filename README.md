@@ -36,8 +36,11 @@ No installer. Single `.exe`.
   virtual workspaces
 - **Status bar** — a per-monitor bar with workspace pills, focused title, clock,
   and optional date / CPU / RAM / battery widgets
-- **Animations** — workspace switches slide in; opening / moving / re-tiling
-  glide to place (positional tweens, configurable speed or off)
+- **Animations** — workspace switches animate with a composited overlay:
+  `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`
+  (`workspace_anim`). Windows also **glide** to their tile slot on open / move /
+  resize / re-tile (`window_anim`), composited over a brief overlay so the real
+  windows are placed instantly underneath — smooth even with heavy apps.
 - **Extras** — coloured window borders, unfocused-window dimming,
   focus-follows-mouse, per-app window rules, and live config hot-reload
 
@@ -81,7 +84,8 @@ fully commented and **hot-reloaded on save**:
 
 - **`astur.conf`** — window manager: workspace mode/count, layout, gaps,
   master ratio, borders, dimming, focus-follows-mouse, cursor warping,
-  animations (`animations`, `animation_ms`), launchers, per-app window rules
+  animations (`animations`, `animation_ms`, `workspace_anim` =
+  off/slide/spring/fade, `window_anim` = off/glide), launchers, per-app rules
   (`ignore_classes` / `float_classes`), workspace keys, and the rebindable
   letter hotkeys.
 - **`navbar.conf`** — the status bar (see below).

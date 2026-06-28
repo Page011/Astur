@@ -16,8 +16,8 @@
 // Uncomment to run without a console window (release builds):
 // #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
-use std::sync::{Condvar, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
 mod config;
@@ -28,11 +28,23 @@ use layout::{dwindle_layout, master_stack, resize_dwindle, split_ratio};
 use windows::core::{w, PCWSTR};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Foundation::{
-    BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
+    BOOL, BOOLEAN, CloseHandle, COLORREF, HANDLE, HINSTANCE, HWND, LPARAM, LRESULT, LUID, POINT,
+    RECT, SIZE, SYSTEMTIME, WPARAM,
+};
+use windows::Win32::System::Shutdown::{
+    ExitWindowsEx, LockWorkStation, EWX_FORCEIFHUNG, EWX_LOGOFF, EWX_REBOOT, EWX_SHUTDOWN,
+    SHUTDOWN_REASON,
+};
+use windows::Win32::System::Power::SetSuspendState;
+use windows::Win32::Security::{
+    AdjustTokenPrivileges, LookupPrivilegeValueW, LUID_AND_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
+    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Graphics::Gdi::{
+    AlphaBlend, BITMAP, BLENDFUNCTION, StretchBlt, SetStretchBltMode, HALFTONE,
     BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
-    CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    CreateRectRgn, CreateSolidBrush, CreatePen, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    GetObjectW, RoundRect, PS_SOLID, UpdateWindow,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
     SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
@@ -43,10 +55,25 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LBUTTON, VK_LMENU, VK_MENU, VK_RBUTTON,
-    VK_TAB,
+    GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_CHAR, VIRTUAL_KEY, VK_BACK, VK_DOWN, VK_ESCAPE,
+    VK_LBUTTON, VK_LEFT, VK_LMENU, VK_MENU, VK_RBUTTON, VK_RETURN, VK_SPACE, VK_TAB, VK_UP,
 };
+use windows::Win32::UI::Shell::{
+    ShellExecuteW, SHCreateItemFromParsingName, IShellItem, IEnumShellItems,
+    IShellItemImageFactory, BHID_EnumItems, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
+    SIIGBF_ICONONLY,
+};
+use windows::Win32::System::Com::{
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+};
+use windows::Win32::System::Search::{
+    IDataInitialize, IDBInitialize, IDBCreateSession, IDBCreateCommand, ICommandText, ICommand,
+    IRowset, IAccessor, DBBINDING, HACCESSOR, MSDAINITIALIZE, DBPART_VALUE, DBPART_STATUS,
+    DBMEMOWNER_PROVIDEROWNED, DBPARAMIO_NOTPARAM, DBTYPE_WSTR, DBTYPE_BYREF, DBTYPE_I8, DBTYPE_DATE,
+    DBACCESSOR_ROWDATA, DBSTATUS_S_OK,
+};
+use windows::core::{GUID, IUnknown, Interface};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
     GetDesktopWindow, GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, RegisterClassW,
@@ -66,11 +93,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use std::collections::{HashMap, VecDeque};
 use core::ffi::c_void;
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
-    DWMWA_EXTENDED_FRAME_BOUNDS,
+    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcessToken,
+};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -231,6 +260,55 @@ fn ease_in_out_cubic(t: f64) -> f64 {
     }
 }
 
+/// Overshoot ease: passes the target then settles back to it — the "spring"
+/// feel. The back-ease is front-loaded (fast throw) and already lands with zero
+/// velocity at t=1 (its derivative there is 0), so the settle is inherently
+/// soft — no extra smoothing needed. `C1` sets overshoot strength (1.70158 =
+/// classic back-ease; 1.10 was too timid to read as a spring). Lands EXACTLY on
+/// the target at t=1 — required, or the final frame misaligns with the real
+/// windows and the reveal pops. Returns values >1.0 around the tail, so callers
+/// must have headroom past the target (the wallpaper backdrop covers the sliver
+/// exposed past the edge at peak overshoot).
+#[inline]
+fn ease_out_back(t: f64) -> f64 {
+    const C1: f64 = 1.40; // ~13% overshoot — a confident spring, not cartoonish
+    const C3: f64 = C1 + 1.0;
+    let u = t - 1.0;
+    1.0 + C3 * u * u * u + C1 * u * u
+}
+
+/// Fade alpha ramp: 0→1, fast-out so the incoming workspace reads quickly.
+#[inline]
+fn ease_out_cubic(t: f64) -> f64 {
+    let u = 1.0 - t;
+    1.0 - u * u * u
+}
+
+/// Workspace-switch animation style. Parsed once per switch from the config
+/// string; cheap enough not to cache.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WsAnim {
+    Off,
+    Slide,
+    Spring,
+    Fade,
+}
+
+impl WsAnim {
+    fn from_cfg(cfg: &Config) -> WsAnim {
+        // Back-compat: workspace_slide = false forces off regardless of the style.
+        if !cfg.workspace_slide {
+            return WsAnim::Off;
+        }
+        match cfg.workspace_anim.as_str() {
+            "off" => WsAnim::Off,
+            "spring" => WsAnim::Spring,
+            "fade" => WsAnim::Fade,
+            _ => WsAnim::Slide,
+        }
+    }
+}
+
 /// Move a window with no activation/zorder side effects (instant tile placement
 /// and the workspace-slide reveal).
 unsafe fn set_pos_raw(h: isize, r: RECT) {
@@ -334,7 +412,87 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
             // Clear the auto-repeat guard on release.
             if up && (kb.vkCode as usize) < 256 {
-                PRESSED.lock().unwrap()[kb.vkCode as usize] = false;
+                PRESSED[kb.vkCode as usize].store(false, Ordering::Relaxed);
+            }
+
+            // System-menu capture mode: route nav keys to the power menu while open.
+            if SYSMENU_OPEN.load(Ordering::Relaxed) {
+                let vk = kb.vkCode;
+                let is_mod = vk == VK_LMENU.0 as u32
+                    || vk == VK_MENU.0 as u32
+                    || vk == VK_SHIFT.0 as u32;
+                if !is_mod {
+                    if down {
+                        let hs = SYSMENU_HWND.load(Ordering::Relaxed);
+                        if hs != 0 {
+                            let hwnd = hwnd_from(hs);
+                            let post = |a: usize| {
+                                let _ = PostMessageW(hwnd, WM_SYSMENU, WPARAM(a), LPARAM(0));
+                            };
+                            if vk == VK_ESCAPE.0 as u32 {
+                                post(SM_CLOSE);
+                            } else if vk == VK_RETURN.0 as u32 {
+                                post(SM_ACTIVATE);
+                            } else if vk == VK_UP.0 as u32 {
+                                post(SM_UP);
+                            } else if vk == VK_DOWN.0 as u32 {
+                                post(SM_DOWN);
+                            } else if vk == VK_LEFT.0 as u32 || vk == VK_BACK.0 as u32 {
+                                post(SM_BACK);
+                            }
+                        }
+                    }
+                    return LRESULT(1); // swallow all non-modifier keys while open
+                }
+            }
+
+            // Launcher capture mode: while the picker is open, route keys to it
+            // and swallow them from the system. Modifiers fall through so Left
+            // Alt's own bookkeeping (ALT_DOWN / FAKE_ALT) still runs.
+            if LAUNCHER_OPEN.load(Ordering::Relaxed) {
+                let vk = kb.vkCode;
+                let is_mod = vk == VK_LMENU.0 as u32
+                    || vk == VK_MENU.0 as u32
+                    || vk == VK_SHIFT.0 as u32;
+                if !is_mod {
+                    if down {
+                        let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
+                        if hl != 0 {
+                            let hwnd = hwnd_from(hl);
+                            let post = |a: usize, d: isize| {
+                                let _ = PostMessageW(hwnd, WM_LAUNCHER, WPARAM(a), LPARAM(d));
+                            };
+                            if vk == VK_ESCAPE.0 as u32 {
+                                post(LA_CLOSE, 0);
+                            } else if vk == VK_RETURN.0 as u32 {
+                                // Shift+Enter on a file opens its containing folder.
+                                if vk_down(VK_SHIFT) {
+                                    post(LA_ACTIVATE_ALT, 0);
+                                } else {
+                                    post(LA_ACTIVATE, 0);
+                                }
+                            } else if vk == VK_TAB.0 as u32 {
+                                post(LA_TAB, 0); // toggle the file detail footer
+                            } else if vk == VK_BACK.0 as u32 {
+                                post(LA_BACK, 0);
+                            } else if vk == VK_UP.0 as u32 {
+                                post(LA_UP, 0);
+                            } else if vk == VK_DOWN.0 as u32 {
+                                post(LA_DOWN, 0);
+                            } else if vk == VK_SPACE.0 as u32 {
+                                post(LA_CHAR, ' ' as isize);
+                            } else {
+                                let c = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7FFF;
+                                if c >= 0x20 {
+                                    if let Some(ch) = char::from_u32(c) {
+                                        post(LA_CHAR, ch.to_ascii_lowercase() as isize);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return LRESULT(1); // swallow all non-modifier keys while open
+                }
             }
 
             if kb.vkCode == VK_LMENU.0 as u32 {
@@ -363,15 +521,50 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 return LRESULT(1);
             }
 
+            // Alt+Shift+Space: system/power menu. Checked BEFORE the launcher so the
+            // shift variant doesn't open the app picker.
+            if down
+                && ALT_DOWN.load(Ordering::Relaxed)
+                && kb.vkCode == VK_SPACE.0 as u32
+                && vk_down(VK_SHIFT)
+                && !SYSMENU_OPEN.load(Ordering::Relaxed)
+                && !LAUNCHER_OPEN.load(Ordering::Relaxed)
+            {
+                SYSMENU_OPEN.store(true, Ordering::Relaxed);
+                let hs = SYSMENU_HWND.load(Ordering::Relaxed);
+                if hs != 0 {
+                    let _ = PostMessageW(hwnd_from(hs), WM_SYSMENU, WPARAM(SM_OPEN), LPARAM(0));
+                }
+                return LRESULT(1);
+            }
+
+            // Alt+Space: open the app launcher (no Shift — Shift is the system menu).
+            // Not Win+Space — that's the system layout toggle. Left Alt is already
+            // Astur's reserved modifier, so this never reaches apps.
+            if down
+                && ALT_DOWN.load(Ordering::Relaxed)
+                && kb.vkCode == VK_SPACE.0 as u32
+                && !vk_down(VK_SHIFT)
+                && !LAUNCHER_OPEN.load(Ordering::Relaxed)
+                && !SYSMENU_OPEN.load(Ordering::Relaxed)
+            {
+                LAUNCHER_OPEN.store(true, Ordering::Relaxed);
+                let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
+                if hl != 0 {
+                    let _ =
+                        PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_OPEN), LPARAM(0));
+                }
+                return LRESULT(1);
+            }
+
             // Tiling hotkeys: Alt + key. Swallowed from apps (Alt is reserved).
             if down && ALT_DOWN.load(Ordering::Relaxed) {
                 let shift = vk_down(VK_SHIFT);
                 if let Some(cmd) = resolve_hotkey(kb.vkCode, shift) {
                     let vk = kb.vkCode as usize;
-                    let mut p = PRESSED.lock().unwrap();
-                    if vk < 256 && !p[vk] {
-                        p[vk] = true;
-                        drop(p);
+                    // swap(true): push only on the first down (debounce auto-repeat),
+                    // re-armed by the key-up store above. Lockless on the hot path.
+                    if vk < 256 && !PRESSED[vk].swap(true, Ordering::Relaxed) {
                         push_cmd(cmd);
                     }
                     return LRESULT(1);
@@ -475,6 +668,24 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let pt = info.pt;
     let msg = wparam.0 as u32;
     let suppress = LRESULT(1);
+
+    // Click outside the open launcher dismisses it. The picker is NOACTIVATE (never
+    // focused), so the global hook is the only place that sees the click. Cheap: one
+    // atomic when the launcher's closed (the common case), a rect compare only while
+    // it's open AND the event is a button-down.
+    if LAUNCHER_OPEN.load(Ordering::Relaxed) && matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+        let inside = pt.x >= LAUNCHER_RECT_L.load(Ordering::Relaxed)
+            && pt.x < LAUNCHER_RECT_R.load(Ordering::Relaxed)
+            && pt.y >= LAUNCHER_RECT_T.load(Ordering::Relaxed)
+            && pt.y < LAUNCHER_RECT_B.load(Ordering::Relaxed);
+        if !inside {
+            let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
+            if hl != 0 {
+                let _ = PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_CLOSE), LPARAM(0));
+            }
+            return suppress; // eat the dismissing click so it doesn't also act
+        }
+    }
 
     match msg {
         WM_LBUTTONDOWN if left_alt_down() && !drag_active() => {
@@ -697,7 +908,9 @@ static CMDCV: Condvar = Condvar::new();
 // While true, programmatic show/hide must not be mistaken for app events.
 static SUPPRESS: AtomicBool = AtomicBool::new(false);
 // De-duplicates auto-repeat key-downs for our hotkeys.
-static PRESSED: Mutex<[bool; 256]> = Mutex::new([false; 256]);
+// Per-VK auto-repeat guard. Atomic (not a Mutex) so the keyboard hook — on the
+// OS-wide input path — never takes a lock to debounce a held hotkey.
+static PRESSED: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 // Every window the manager currently tracks (across all monitors/workspaces).
 // Kept in sync by the manager so the shutdown handler can reveal them all.
 static MANAGED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
@@ -1412,6 +1625,75 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
     if rects.is_empty() {
         return;
     }
+
+    // Glide path: animate windows from their current position to the new tile
+    // slot via a cosmetic overlay (the real placement is still instant, done
+    // underneath). Only when enabled, idle, and the layout actually changed —
+    // a no-op retile (e.g. refocus) must not raise an overlay.
+    let want_glide = mgr.cfg.animations
+        && mgr.cfg.animation_ms > 0
+        && mgr.cfg.window_anim == "glide"
+        && !GLIDE_BUSY.load(Ordering::Relaxed);
+    if want_glide {
+        let full = mgr.monitors[mi].work_area;
+        let mut items = Vec::with_capacity(rects.len());
+        let mut changed = false;
+        let mut ok = true;
+        for (h, target) in &rects {
+            let hwnd = hwnd_from(*h);
+            let mut cur = RECT::default();
+            if GetWindowRect(hwnd, &mut cur).is_err() {
+                ok = false;
+                break;
+            }
+            let to = adjust_for_border(hwnd, *target);
+            let old = RECT {
+                left: cur.left - full.left,
+                top: cur.top - full.top,
+                right: cur.right - full.left,
+                bottom: cur.bottom - full.top,
+            };
+            let new = RECT {
+                left: to.left - full.left,
+                top: to.top - full.top,
+                right: to.right - full.left,
+                bottom: to.bottom - full.top,
+            };
+            // Treat a few-px difference as unchanged so DWM shadow/rounding jitter
+            // doesn't trigger a glide on an effectively-static window.
+            if (old.left - new.left).abs() > 2
+                || (old.top - new.top).abs() > 2
+                || (old.right - new.right).abs() > 2
+                || (old.bottom - new.bottom).abs() > 2
+            {
+                changed = true;
+            }
+            items.push(GlideItem { old, new });
+        }
+        if ok && changed {
+            let out = capture_monitor(full);
+            if out != 0 {
+                GLIDE_BUSY.store(true, Ordering::Relaxed);
+                dispatch_glide(GlideReq {
+                    out_bmp: out,
+                    rect: full,
+                    items,
+                    dur_ms: mgr.cfg.animation_ms.max(1) as u64,
+                });
+                // Wait until the overlay covers the monitor, then place the real
+                // windows underneath it (hidden), exactly like the workspace slide.
+                wait_glide_overlay_up();
+                SUPPRESS.store(true, Ordering::Relaxed);
+                for (h, target) in rects {
+                    animate_to(hwnd_from(h), target);
+                }
+                SUPPRESS.store(false, Ordering::Relaxed);
+                return;
+            }
+        }
+    }
+
+    // Instant path (glide off, busy, capture failed, or nothing moved).
     SUPPRESS.store(true, Ordering::Relaxed);
     for (h, target) in rects {
         animate_to(hwnd_from(h), target);
@@ -1477,6 +1759,28 @@ unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
 /// The window currently styled as focused, so a focus change only has to touch
 /// the two windows whose state actually flipped instead of every window.
 static STYLED_FOCUS: AtomicIsize = AtomicIsize::new(0);
+
+/// Monotonic millisecond clock anchored at first use. Used for short-lived
+/// timing guards (e.g. the focus-follow settle window) where a stored deadline
+/// is needed and `Instant` can't live in an atomic.
+fn now_ms() -> u64 {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    EPOCH.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// Deadline (in `now_ms()`) before which focus-follows-mouse stays quiet. Set
+/// whenever the manager moves focus programmatically (keyboard focus, workspace
+/// switch) so the fast hover poll can't immediately yank focus back to whatever
+/// window the cursor happens to be sitting over. A genuine cursor move after the
+/// window expires still focuses normally.
+static FOLLOW_SETTLE_MS: AtomicU64 = AtomicU64::new(0);
+const FOLLOW_SETTLE_GUARD_MS: u64 = 200;
+
+/// Suppress focus-follows-mouse for a short settle window after a programmatic
+/// focus change. Cheap; called from the manager thread only.
+fn bump_follow_settle() {
+    FOLLOW_SETTLE_MS.store(now_ms() + FOLLOW_SETTLE_GUARD_MS, Ordering::Relaxed);
+}
 
 /// Compute the globally-focused window handle (0 if none).
 fn global_focus(mgr: &Manager) -> isize {
@@ -1662,12 +1966,14 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
 /// purely a visual overlay, so losing or dropping it never affects windows.
 struct SlideReq {
     out_bmp: isize, // HBITMAP: frozen outgoing workspace (worker owns + frees)
-    in_bmp: isize,  // HBITMAP: frozen incoming workspace (worker owns + frees)
+    in_bmp: isize,  // HBITMAP: frozen incoming workspace (worker owns + frees); 0 = first
+                    // visit, no snapshot — worker holds the outgoing frame then reveals
     out_rects: Vec<RECT>, // work-area-local rects of the outgoing windows
     in_rects: Vec<RECT>,  // work-area-local rects of the incoming windows
     rect: RECT,     // work-area rect (overlay geometry)
     dir: i32,       // +1 = new ws came from the right, -1 from the left
     dur_ms: u64,
+    mode: WsAnim,   // slide / spring / fade (off never reaches the worker)
 }
 static SLIDE_REQ: Mutex<Option<SlideReq>> = Mutex::new(None);
 static SLIDE_CV: Condvar = Condvar::new();
@@ -1897,6 +2203,216 @@ fn dispatch_slide(req: SlideReq) {
     SLIDE_CV.notify_one();
 }
 
+// =========================================================================
+// Per-window glide: window move / open / close / re-tile animation.
+//
+// Reuses the workspace-overlay trick instead of the (removed, jittery)
+// per-frame real-window SetWindowPos. On a layout change the manager freezes
+// the work area to one bitmap, the worker raises a topmost overlay showing
+// frame 0 (== current screen, no flash) and signals back; the manager then
+// places the REAL windows at their targets instantly UNDER the overlay; the
+// worker glides each window's frozen image from its old rect to its new rect
+// over a wallpaper backdrop, then tears the overlay down to reveal the already
+// correct windows. A black/failed wallpaper capture degrades to instant.
+// =========================================================================
+
+/// One window's travel for a glide, in work-area-local coordinates.
+struct GlideItem {
+    old: RECT,
+    new: RECT,
+}
+
+/// A cosmetic window-glide request handed from the manager to the glide worker.
+/// The worker owns and frees `out_bmp`.
+struct GlideReq {
+    out_bmp: isize,    // HBITMAP: frozen work area before placement (worker frees)
+    rect: RECT,        // work area (overlay geometry)
+    items: Vec<GlideItem>, // per-window old->new travel, work-area-local
+    dur_ms: u64,
+}
+static GLIDE_REQ: Mutex<Option<GlideReq>> = Mutex::new(None);
+static GLIDE_CV: Condvar = Condvar::new();
+static GLIDE_READY: Mutex<bool> = Mutex::new(false);
+static GLIDE_READY_CV: Condvar = Condvar::new();
+// True from dispatch until the overlay tears down. Lets the manager skip
+// stacking a second glide over a running one (it places instantly instead).
+static GLIDE_BUSY: AtomicBool = AtomicBool::new(false);
+
+fn wait_glide_overlay_up() {
+    let guard = GLIDE_READY.lock().unwrap();
+    let _ = GLIDE_READY_CV
+        .wait_timeout_while(guard, std::time::Duration::from_millis(250), |up| !*up)
+        .unwrap();
+}
+
+fn signal_glide_overlay_up() {
+    *GLIDE_READY.lock().unwrap() = true;
+    GLIDE_READY_CV.notify_one();
+}
+
+/// Hand a glide to its worker, freeing any request it hasn't picked up yet.
+fn dispatch_glide(req: GlideReq) {
+    *GLIDE_READY.lock().unwrap() = false;
+    {
+        let mut slot = GLIDE_REQ.lock().unwrap();
+        if let Some(old) = slot.take() {
+            unsafe {
+                let _ = DeleteObject(HGDIOBJ(old.out_bmp as *mut c_void));
+            }
+        }
+        *slot = Some(req);
+    }
+    GLIDE_CV.notify_one();
+}
+
+/// Glide thread: owns its own overlay + message pump, idles on the condvar.
+fn glide_worker() {
+    loop {
+        let req = {
+            let mut slot = GLIDE_REQ.lock().unwrap();
+            loop {
+                if let Some(r) = slot.take() {
+                    break r;
+                }
+                slot = GLIDE_CV.wait(slot).unwrap();
+            }
+        };
+        unsafe { run_window_glide(req) };
+        GLIDE_BUSY.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Composite a window glide: wallpaper backdrop + each window's frozen image
+/// blitted from its old rect to an eased-interpolated rect (StretchBlt covers
+/// resizes). Worker owns and frees `out_bmp`.
+unsafe fn run_window_glide(req: GlideReq) {
+    let full = req.rect;
+    let w = full.right - full.left;
+    let h = full.bottom - full.top;
+    let free_out = || {
+        let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
+    };
+    if w <= 0 || h <= 0 || req.out_bmp == 0 || req.items.is_empty() {
+        free_out();
+        signal_glide_overlay_up();
+        return;
+    }
+    // Need the still wallpaper to fill vacated areas. If we can't get it, degrade
+    // to an instant switch (no overlay): signal and bail, the manager places the
+    // real windows with no animation.
+    let wp = capture_wallpaper(full);
+    if wp == 0 {
+        free_out();
+        signal_glide_overlay_up();
+        return;
+    }
+    let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+    let overlay = CreateWindowExW(
+        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        SLIDE_CLASS,
+        w!(""),
+        WS_POPUP,
+        full.left,
+        full.top,
+        w,
+        h,
+        None,
+        None,
+        hinst,
+        None,
+    );
+    let Ok(overlay) = overlay else {
+        let _ = DeleteObject(HGDIOBJ(wp as *mut c_void));
+        free_out();
+        signal_glide_overlay_up();
+        return;
+    };
+
+    let odc = GetDC(overlay);
+    let backdc = CreateCompatibleDC(odc);
+    let back = CreateCompatibleBitmap(odc, w, h);
+    let srcdc = CreateCompatibleDC(odc); // frozen before-frame
+    let wpdc = CreateCompatibleDC(odc); // wallpaper backdrop
+    let ob = SelectObject(backdc, HGDIOBJ(back.0));
+    let os = SelectObject(srcdc, HGDIOBJ(req.out_bmp as *mut c_void));
+    let owp = SelectObject(wpdc, HGDIOBJ(wp as *mut c_void));
+    // Smooth scaling for the resize case (HALFTONE), harmless for pure moves.
+    SetStretchBltMode(backdc, HALFTONE);
+
+    // Compose one frame at eased progress `e` (0..=1). At e=0 every window sits
+    // at its old rect over the still wallpaper == current screen (no flash). At
+    // e=1 every window is at its new rect, pixel-aligned with the real windows
+    // placed underneath, so the reveal is seamless.
+    let compose = |e: f64| {
+        let _ = BitBlt(backdc, 0, 0, w, h, wpdc, 0, 0, SRCCOPY);
+        for it in &req.items {
+            let lerp = |a: i32, b: i32| (a as f64 + (b - a) as f64 * e).round() as i32;
+            let dl = lerp(it.old.left, it.new.left);
+            let dt = lerp(it.old.top, it.new.top);
+            let dw = lerp(it.old.right, it.new.right) - dl;
+            let dh = lerp(it.old.bottom, it.new.bottom) - dt;
+            let (sw, sh) = (it.old.right - it.old.left, it.old.bottom - it.old.top);
+            if dw > 0 && dh > 0 && sw > 0 && sh > 0 {
+                let _ = StretchBlt(
+                    backdc, dl, dt, dw, dh, srcdc, it.old.left, it.old.top, sw, sh, SRCCOPY,
+                );
+            }
+        }
+    };
+
+    // Frame 0 must be pixel-identical to the live screen (exact capture via srcdc,
+    // not the wallpaper-composited compose(0.0)). CRITICAL ORDER: show the overlay
+    // FIRST, THEN present — a blit to a still-hidden window's DC is clipped away and
+    // lost, leaving the overlay empty so the wallpaper flashes through (see the full
+    // note in run_transition). Show, present, settle, flush, then signal.
+    let _ = BitBlt(backdc, 0, 0, w, h, srcdc, 0, 0, SRCCOPY);
+    let _ = ShowWindow(overlay, SW_SHOWNA);
+    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+    let _ = UpdateWindow(overlay);
+    let _ = DwmFlush();
+    signal_glide_overlay_up();
+
+    let dur = req.dur_ms.max(1) as f64;
+    let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz
+    let start = Instant::now();
+    let mut next = start;
+    let mut msg = MSG::default();
+    loop {
+        while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        let el = start.elapsed().as_secs_f64() * 1000.0;
+        compose(ease_out_cubic((el / dur).min(1.0)));
+        let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+        if el >= dur {
+            break;
+        }
+        next += frame_dur;
+        let now = Instant::now();
+        if next > now {
+            std::thread::sleep(next - now);
+        } else {
+            next = now;
+        }
+    }
+
+    SelectObject(backdc, ob);
+    SelectObject(srcdc, os);
+    SelectObject(wpdc, owp);
+    let _ = DeleteObject(HGDIOBJ(back.0));
+    let _ = DeleteObject(HGDIOBJ(wp as *mut c_void));
+    let _ = DeleteDC(backdc);
+    let _ = DeleteDC(srcdc);
+    let _ = DeleteDC(wpdc);
+    ReleaseDC(overlay, odc);
+    free_out();
+    // Sync teardown to the next DWM frame so the real (already-placed) windows
+    // are composited before the overlay disappears — no flash on the reveal.
+    let _ = DwmFlush();
+    let _ = DestroyWindow(overlay);
+}
+
 /// Transition thread: owns the slide overlay and pumps its own message loop, so
 /// the overlay is a well-behaved window (never the "not responding" ghost a
 /// pump-less window becomes). Blocks on the condvar when idle.
@@ -1915,6 +2431,13 @@ fn transition_worker() {
     }
 }
 
+/// How long the switch overlay holds the outgoing frame on a FIRST visit (no
+/// cached incoming snapshot) before revealing — long enough for the destination's
+/// first paint to land underneath, short enough to read as instant. Without this
+/// hold a freshly-shown window (whose DWM surface was discarded by SW_HIDE) would
+/// flash its background through before it repaints.
+const COVER_HOLD_MS: u64 = 48;
+
 /// Render one push: a FIXED, monitor-bounded topmost overlay whose surface is a
 /// two-image filmstrip — the frozen OUTGOING workspace and the frozen INCOMING
 /// workspace, side by side — scrolled together so the old slides off one edge as
@@ -1922,7 +2445,9 @@ fn transition_worker() {
 /// onto an adjacent monitor; everything is GDI blits the eye sees as one motion.
 /// Both snapshots are screen BitBlts (gaps/dimming baked in) so the reveal at the
 /// end is pixel-identical to the real windows already placed underneath. The
-/// worker owns and frees both request bitmaps.
+/// worker owns and frees both request bitmaps. When `in_bmp == 0` (first visit to
+/// the destination, no cached snapshot) the overlay instead HOLDS the outgoing
+/// frame for `COVER_HOLD_MS` to cover the switch + first paint, then reveals.
 unsafe fn run_transition(req: SlideReq) {
     let full = req.rect;
     let w = full.right - full.left;
@@ -1931,11 +2456,17 @@ unsafe fn run_transition(req: SlideReq) {
         let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
         let _ = DeleteObject(HGDIOBJ(req.in_bmp as *mut c_void));
     };
-    if w <= 0 || h <= 0 || req.in_bmp == 0 {
+    if w <= 0 || h <= 0 || req.out_bmp == 0 {
         free_in();
         signal_slide_overlay_up(); // unblock the manager (no overlay this time)
         return;
     }
+    // No incoming image == first visit to the destination workspace (no cached
+    // snapshot). We still raise the overlay and HOLD the outgoing frame so the real
+    // switch + the destination's first paint happen underneath it, hidden, then
+    // reveal — killing the "background flashes through the windows" pop a
+    // freshly-shown (surface-discarded) window makes before it repaints.
+    let have_incoming = req.in_bmp != 0;
     // Capture the CURRENT wallpaper here on the worker (not cached), so it's always
     // up to date and the manager isn't blocked by the PrintWindow. 0 = flat slide.
     let wp = capture_wallpaper(full);
@@ -1970,7 +2501,11 @@ unsafe fn run_transition(req: SlideReq) {
     let wpdc = CreateCompatibleDC(odc);
     let ob = SelectObject(backdc, HGDIOBJ(back.0));
     let oo = SelectObject(outdc, HGDIOBJ(req.out_bmp as *mut c_void));
-    let oi = SelectObject(indc, HGDIOBJ(req.in_bmp as *mut c_void));
+    let oi = if req.in_bmp != 0 {
+        SelectObject(indc, HGDIOBJ(req.in_bmp as *mut c_void))
+    } else {
+        HGDIOBJ::default()
+    };
     let owp = if wp != 0 {
         Some(SelectObject(wpdc, HGDIOBJ(wp as *mut c_void)))
     } else {
@@ -2008,14 +2543,32 @@ unsafe fn run_transition(req: SlideReq) {
         }
     };
 
-    // Paint frame 0 (off = 0: outgoing windows at their current spots over the
-    // still wallpaper, identical to what's on screen) BEFORE showing the overlay,
-    // so raising it causes no flash. Then signal the manager that the monitor is
-    // covered, so it can do the real switch underneath without the destination
-    // workspace flashing first.
-    compose(0);
-    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+    // Paint frame 0 BEFORE showing the overlay so raising it causes no flash.
+    // CRITICAL: frame 0 must be pixel-identical to what's already on screen, or
+    // the instant the overlay is raised it pops (the "flash before the slide").
+    // `compose(0)` rebuilds the frame from the PrintWindow wallpaper capture +
+    // window rects; if that wallpaper differs even slightly from the live
+    // DWM-composited desktop (acrylic/transparency, sub-pixel crop), the gaps
+    // flash on raise. So for frame 0 we blit the EXACT live screen capture
+    // (`out_bmp`, grabbed by `capture_monitor` a moment ago) straight through —
+    // a guaranteed match. The wallpaper-composited path only kicks in once the
+    // windows actually start moving (off != 0), where a sub-pixel gap diff is
+    // invisible under motion.
+    let _ = BitBlt(backdc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
+    // CRITICAL ORDER — show the overlay FIRST, then present frame 0 to its DC.
+    // Blitting to the window DC while the overlay is still HIDDEN is clipped to its
+    // (empty) visible region and silently lost; the overlay then comes up empty and
+    // DWM shows the wallpaper underneath until the animation loop's first frame
+    // lands a few ms later. That is exactly the "windows flash hidden (wallpaper),
+    // then reappear and slide" the user reported. Showing first makes the present
+    // land on the now-visible window; `UpdateWindow` settles any pending paint onto
+    // our pixels (erase is suppressed in `slide_wndproc`); `DwmFlush` blocks until
+    // frame 0 is genuinely on the glass. Only THEN signal the manager to do the
+    // real switch underneath the (now actually covering) overlay.
     let _ = ShowWindow(overlay, SW_SHOWNA);
+    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+    let _ = UpdateWindow(overlay);
+    let _ = DwmFlush();
     signal_slide_overlay_up();
 
     // The new ws came from the `dir` side, so the outgoing leaves the opposite
@@ -2023,18 +2576,68 @@ unsafe fn run_transition(req: SlideReq) {
     // contiguous with it (no seam).
     let target = -req.dir * w;
     let dur = req.dur_ms.max(1) as f64;
+    let has_wp = wp != 0;
     let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz back-buffer
     let start = Instant::now();
     let mut next = start;
     let mut msg = MSG::default();
+    // Whole-frame constant-alpha blend descriptor, reused for the fade mode.
+    // BlendOp 0 == AC_SRC_OVER; AlphaFormat 0 == ignore per-pixel alpha (the
+    // captured DDBs have no alpha channel), so SourceConstantAlpha drives it.
+    let mut blend = BLENDFUNCTION {
+        BlendOp: 0,
+        BlendFlags: 0,
+        SourceConstantAlpha: 0,
+        AlphaFormat: 0,
+    };
     loop {
         while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if !have_incoming {
+            // First visit: hold frame 0 (already on screen) for the cover window,
+            // then break to the synced reveal. Deliberately NO recompose — blitting
+            // the (window-less) incoming would slide the outgoing off to bare
+            // wallpaper. We just wait while the switch + first paint land beneath.
+            if start.elapsed() >= std::time::Duration::from_millis(COVER_HOLD_MS) {
+                break;
+            }
+            next += frame_dur;
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else {
+                next = now;
+            }
+            continue;
+        }
         let el = start.elapsed().as_secs_f64() * 1000.0;
-        let off = (target as f64 * ease_in_out_cubic((el / dur).min(1.0))).round() as i32;
-        compose(off);
+        let t = (el / dur).min(1.0);
+        match req.mode {
+            WsAnim::Fade => {
+                // Crossfade whole frames: outgoing underneath, incoming alpha
+                // ramped on top. Both DDBs already bake in wallpaper + gaps, so
+                // the still regions stay rock-steady and only the windows fade.
+                let _ = BitBlt(backdc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
+                blend.SourceConstantAlpha =
+                    (255.0 * ease_out_cubic(t)).round().clamp(0.0, 255.0) as u8;
+                let _ = AlphaBlend(backdc, 0, 0, w, h, indc, 0, 0, w, h, blend);
+            }
+            WsAnim::Spring if has_wp => {
+                // Overshoot past the target then settle. Needs a wallpaper
+                // backdrop: at peak overshoot a thin band past the edge is
+                // exposed and must show the still wallpaper, not black.
+                let off = (target as f64 * ease_out_back(t)).round() as i32;
+                compose(off);
+            }
+            _ => {
+                // Slide (and spring with no wallpaper backdrop — fall back to the
+                // symmetric ease so the overshoot can't expose a black sliver).
+                let off = (target as f64 * ease_in_out_cubic(t)).round() as i32;
+                compose(off);
+            }
+        }
         let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
         if el >= dur {
             break;
@@ -2062,6 +2665,13 @@ unsafe fn run_transition(req: SlideReq) {
     let _ = DeleteDC(wpdc);
     ReleaseDC(overlay, odc);
     free_in();
+    // Sync the reveal to a DWM composition pass. The real windows were placed
+    // (and styled) under the overlay long ago, but tearing the overlay down
+    // off-vblank can expose a frame before DWM has recomposited them — the
+    // "flash" where the snapshot vanishes a beat before the live window paints.
+    // Block until the next composed frame so the overlay's last (target-aligned)
+    // pixels and the live windows hand off on the same vblank: a clean reveal.
+    let _ = DwmFlush();
     let _ = DestroyWindow(overlay);
 }
 
@@ -2079,12 +2689,20 @@ unsafe extern "system" fn slide_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM)
 /// the slide compositor is disabled or not applicable.
 unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     SUPPRESS.store(true, Ordering::Relaxed);
-    for h in mgr.monitors[mi].workspaces[old].windows.clone() {
-        let _ = ShowWindow(hwnd_from(h), SW_HIDE);
+    // Iterate by index (no Vec clone per switch): the manager owns `mgr` on this
+    // thread and ShowWindow touches no Astur state, so the borrow is safe to hold.
+    {
+        let ws = &mgr.monitors[mi].workspaces[old].windows;
+        for i in 0..ws.len() {
+            let _ = ShowWindow(hwnd_from(ws[i]), SW_HIDE);
+        }
     }
     mgr.monitors[mi].active = n;
-    for h in mgr.monitors[mi].workspaces[n].windows.clone() {
-        let _ = ShowWindow(hwnd_from(h), SW_SHOW);
+    {
+        let ws = &mgr.monitors[mi].workspaces[n].windows;
+        for i in 0..ws.len() {
+            let _ = ShowWindow(hwnd_from(ws[i]), SW_SHOW);
+        }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
     // Instant placement — these windows were just unhidden; gliding them from a
@@ -2151,9 +2769,9 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     if n == old || n >= mgr.monitors[mi].workspaces.len() {
         return;
     }
-    // Not gated on tiling: the slide is cosmetic and works in float mode too.
-    let want_slide =
-        mgr.cfg.animations && mgr.cfg.workspace_slide && mgr.cfg.animation_ms > 0;
+    // Not gated on tiling: the transition is cosmetic and works in float mode too.
+    let mode = WsAnim::from_cfg(&mgr.cfg);
+    let want_slide = mgr.cfg.animations && mgr.cfg.animation_ms > 0 && mode != WsAnim::Off;
     let dir = if n > old { 1 } else { -1 };
     let hmon = mgr.monitors[mi].hmon;
     // Slide region = the tiling work area, NOT the full monitor. This excludes the
@@ -2176,18 +2794,32 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     // monitor. We then do the real switch UNDERNEATH it — that's what stops the
     // destination workspace flashing before the animation. Incoming image is the
     // snapshot from the last time we left `n`; the worker gets private copies.
-    let incoming = if out != 0 { snap_get(hmon, n) } else { None };
-    if let Some((in_bmp, in_rects)) = incoming {
+    // Always raise the overlay when we have an outgoing capture — even on the FIRST
+    // visit to `n`, where there's no cached snapshot to slide in. With an incoming
+    // image the worker animates (slide/spring/fade); without one it briefly holds
+    // the outgoing frame to cover the switch + first paint, then reveals. Either
+    // way the destination never flashes its background before it repaints.
+    if out != 0 {
+        let (in_bmp, in_rects) = match snap_get(hmon, n) {
+            Some((b, r)) => (dup_ddb(b, w, h), r),
+            None => (0, Vec::new()), // first visit: cover-and-reveal, no slide image
+        };
         // Worker captures the still wallpaper backdrop itself (always current).
         dispatch_slide(SlideReq {
             out_bmp: dup_ddb(out, w, h),
-            in_bmp: dup_ddb(in_bmp, w, h),
+            in_bmp,
             out_rects: out_rects.clone(),
             in_rects,
             rect: full,
             dir,
-            // Floor the duration so a full-monitor push is never too steppy.
-            dur_ms: mgr.cfg.animation_ms.max(200) as u64,
+            // Floor the duration so a full-monitor push is never too steppy. Fade
+            // has no positional steppiness, so it can use the raw configured ms.
+            dur_ms: if mode == WsAnim::Fade {
+                mgr.cfg.animation_ms.max(1) as u64
+            } else {
+                mgr.cfg.animation_ms.max(200) as u64
+            },
+            mode,
         });
         wait_slide_overlay_up();
     }
@@ -2229,6 +2861,10 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
         let wa = mgr.monitors[mi].work_area;
         let _ = SetCursorPos((wa.left + wa.right) / 2, (wa.top + wa.bottom) / 2);
     }
+    // Hold focus-follows-mouse off for a beat: the cursor may still be sitting
+    // over a window on another monitor, and the fast hover poll would otherwise
+    // yank focus straight back off the workspace we just switched to.
+    bump_follow_settle();
 }
 
 /// Re-enumerate monitors after a display change. Preserves each surviving
@@ -2472,6 +3108,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 let target = ws.windows[ni];
                 mgr.monitors[mi].workspaces[a].focused = target;
                 focus_window(target);
+                bump_follow_settle();
             }
         }
         Cmd::SwapDir(d) => {
@@ -2810,6 +3447,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     }
                 }
             }
+            bump_follow_settle();
         }
         Cmd::MoveGeo(dir) => {
             if !mgr.tiling || mgr.monitors.is_empty() {
@@ -3545,8 +4183,12 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
 /// active while `focus_follows_mouse` is enabled and no drag/Alt/button is busy.
 fn focus_follow_worker() {
     let mut last: isize = 0;
+    // Last cursor position we evaluated. Poll fast (~1 frame) for a snappy hover,
+    // but only run the expensive WindowFromPoint + MANAGED lock when the cursor
+    // actually moved — a still cursor costs one GetCursorPos per tick and bails.
+    let mut last_pt = POINT { x: i32::MIN, y: i32::MIN };
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(80));
+        std::thread::sleep(std::time::Duration::from_millis(16));
         if !FOLLOW_MOUSE.load(Ordering::Relaxed) {
             last = 0;
             continue;
@@ -3563,6 +4205,18 @@ fn focus_follow_worker() {
             if GetCursorPos(&mut pt).is_err() {
                 continue;
             }
+            // Inside the post-switch / post-keyboard-focus settle window: don't
+            // fight the programmatic focus. Sync last_pt so that once the guard
+            // expires only a genuine cursor move (not this stale position) fires.
+            if now_ms() < FOLLOW_SETTLE_MS.load(Ordering::Relaxed) {
+                last_pt = pt;
+                continue;
+            }
+            // Cursor hasn't moved since the last tick — nothing to resolve.
+            if pt.x == last_pt.x && pt.y == last_pt.y {
+                continue;
+            }
+            last_pt = pt;
             let Some(hwnd) = root_window_at(pt) else {
                 continue;
             };
@@ -3819,6 +4473,1591 @@ fn resolve_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
     None
 }
 
+// =========================================================================
+// App launcher (Alt+Space): omarchy/rofi-style centered picker.
+//
+// Driven entirely through the LL keyboard hook, so it never needs foreground
+// focus (no foreground-lock dance): the hook posts intents to the launcher
+// window, whose wndproc owns all state and repaints. v1 source is Start Menu
+// .lnk/.url shortcuts; file search (Windows Search index) is planned — see
+// plan/launcher.md.
+// =========================================================================
+
+// Custom message: wParam = action (LA_*), lParam = char (for LA_CHAR).
+const WM_LAUNCHER: u32 = WM_USER + 10;
+const LA_OPEN: usize = 0;
+const LA_CHAR: usize = 1;
+const LA_BACK: usize = 2;
+const LA_UP: usize = 3;
+const LA_DOWN: usize = 4;
+const LA_ACTIVATE: usize = 5;
+const LA_CLOSE: usize = 6;
+const LA_TAB: usize = 7; // toggle the file detail footer
+const LA_ACTIVATE_ALT: usize = 8; // Shift+Enter: open a file's containing folder
+
+// Theme (COLORREF is 0x00BBGGRR). Forte blue #366382 accent on a dark surface;
+// minimal chrome (thin frame, subtle divider) for a clean omarchy/rofi look.
+const LAUNCHER_BG: u32 = 0x0016_1616;
+const LAUNCHER_FG: u32 = 0x00E6_E6E6;
+const LAUNCHER_DIM: u32 = 0x0089_8989;
+const LAUNCHER_SELBG: u32 = 0x0082_6333; // #366382
+const LAUNCHER_SELFG: u32 = 0x00FF_FFFF;
+const LAUNCHER_FRAME: u32 = 0x0033_2A26; // subtle blue-tinted 1px frame
+const LAUNCHER_DIVIDER: u32 = 0x0029_2929; // muted divider under the query row
+const LAUNCHER_W: i32 = 660;
+const LAUNCHER_H: i32 = 452;
+const LAUNCHER_ROW_H: i32 = 40;
+const LAUNCHER_PAD: i32 = 16;
+const LAUNCHER_HEADER: i32 = 54; // query row height
+const LAUNCHER_ICON_PX: i32 = 28; // per-row app icon box
+const LAUNCHER_SEL_RADIUS: i32 = 12; // rounded selection pill
+
+static LAUNCHER_OPEN: AtomicBool = AtomicBool::new(false);
+static LAUNCHER_HWND: AtomicIsize = AtomicIsize::new(0);
+static LAUNCHER_FONT: AtomicIsize = AtomicIsize::new(0);
+
+// Launcher window bounds (screen coords), published on show so the global mouse
+// hook can detect a click OUTSIDE the picker and dismiss it without a focus grab.
+static LAUNCHER_RECT_L: AtomicI32 = AtomicI32::new(0);
+static LAUNCHER_RECT_T: AtomicI32 = AtomicI32::new(0);
+static LAUNCHER_RECT_R: AtomicI32 = AtomicI32::new(0);
+static LAUNCHER_RECT_B: AtomicI32 = AtomicI32::new(0);
+
+// Lazy icon loader: paint enqueues visible app indices needing an icon; the icon
+// worker resolves the shell icon to an HBITMAP off the UI thread and repaints.
+static ICON_QUEUE: Mutex<VecDeque<usize>> = Mutex::new(VecDeque::new());
+static ICON_CV: Condvar = Condvar::new();
+
+struct AppEntry {
+    name: String,
+    name_lc: String,
+    path: String,    // .lnk/.url file path, or `shell:AppsFolder\<id>` for UWP/system apps
+    icon: isize,     // 0 = not yet loaded, -1 = none/failed, else an HBITMAP (32bpp ARGB)
+}
+/// One file/folder result from the Windows Search index (Phase 3).
+struct FileHit {
+    name: String,
+    path: String,
+    size: i64,  // bytes (-1 = unknown / folder)
+    date: f64,  // OLE automation date (days since 1899-12-30); 0 = unknown
+}
+/// A visible result row: an app (index into `all`) or a file (index into `files`).
+#[derive(Clone, Copy)]
+enum Hit {
+    App(usize),
+    File(usize),
+}
+struct LauncherState {
+    query: String,
+    all: Vec<AppEntry>,
+    files: Vec<FileHit>,   // current file-search results (top-N, replaced per query)
+    filtered: Vec<Hit>,    // merged app + file rows, best first
+    sel: usize,
+    loaded: bool,
+    detail: bool,          // Tab: show the expanded detail footer for a file row
+    search_gen: u64,       // generation of `files` (drops stale async results)
+}
+static LAUNCHER_STATE: Mutex<LauncherState> = Mutex::new(LauncherState {
+    query: String::new(),
+    all: Vec::new(),
+    files: Vec::new(),
+    filtered: Vec::new(),
+    sel: 0,
+    loaded: false,
+    detail: false,
+    search_gen: 0,
+});
+
+// File-search request hand-off to `filesearch_worker` (debounced + cancellable).
+static SEARCH_REQ: Mutex<Option<(u64, String)>> = Mutex::new(None);
+static SEARCH_CV: Condvar = Condvar::new();
+static SEARCH_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// Recursively collect `*.lnk` / `*.url` under a Start Menu root into `out`,
+/// keyed by lowercased display name so per-user shadows all-users duplicates.
+fn collect_shortcuts(dir: &std::path::Path, out: &mut std::collections::HashMap<String, AppEntry>) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for ent in rd.flatten() {
+        let p = ent.path();
+        if p.is_dir() {
+            collect_shortcuts(&p, out);
+        } else if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+            let ext = ext.to_ascii_lowercase();
+            if ext == "lnk" || ext == "url" {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    let name = stem.to_string();
+                    let key = name.to_ascii_lowercase();
+                    out.entry(key.clone()).or_insert(AppEntry {
+                        name,
+                        name_lc: key,
+                        path: p.to_string_lossy().into_owned(),
+                        icon: 0,
+                    });
+                }
+            }
+        }
+    }
+}
+
+/// Read one `SIGDN` display string from a shell item, freeing the COM buffer.
+unsafe fn sigdn(item: &IShellItem, kind: windows::Win32::UI::Shell::SIGDN) -> String {
+    match item.GetDisplayName(kind) {
+        Ok(p) => {
+            let s = p.to_string().unwrap_or_default();
+            CoTaskMemFree(Some(p.0 as *const c_void));
+            s
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// Enumerate the shell `AppsFolder` — the "All apps" list Start shows — into `out`,
+/// keyed by lowercased display name. This is what pulls in UWP/system apps that
+/// have no Start Menu `.lnk` (Notepad, Calculator, Settings, Store apps, …), so the
+/// picker can replace pressing Start and typing an app name. Each entry launches
+/// via `shell:AppsFolder\<id>` (works for Win32 and UWP through `ShellExecuteW`).
+/// `.lnk` entries are inserted first and win the dedup (their launch is rock-solid),
+/// so AppsFolder only fills the gaps. Requires COM initialised on this thread.
+unsafe fn enumerate_appsfolder(out: &mut std::collections::HashMap<String, AppEntry>) {
+    let parsing: Vec<u16> = "shell:AppsFolder"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let folder: windows::core::Result<IShellItem> =
+        SHCreateItemFromParsingName(PCWSTR(parsing.as_ptr()), None);
+    let Ok(folder) = folder else { return };
+    let en: windows::core::Result<IEnumShellItems> = folder.BindToHandler(None, &BHID_EnumItems);
+    let Ok(en) = en else { return };
+    loop {
+        let mut arr: [Option<IShellItem>; 1] = [None];
+        let mut fetched = 0u32;
+        if en.Next(&mut arr, Some(&mut fetched)).is_err() || fetched == 0 {
+            break;
+        }
+        let Some(item) = arr[0].take() else { break };
+        let name = sigdn(&item, SIGDN_NORMALDISPLAY);
+        if name.is_empty() {
+            continue;
+        }
+        let child = sigdn(&item, SIGDN_PARENTRELATIVEPARSING);
+        if child.is_empty() {
+            continue;
+        }
+        let key = name.to_ascii_lowercase();
+        if !out.contains_key(&key) {
+            // The AppsFolder id is usually an AUMID (UWP, e.g. `Microsoft.Windows
+            // Notepad_...!App`) — launch via `shell:AppsFolder\<aumid>`. Some Win32
+            // entries expose a real exe path as their id instead; launch that
+            // directly (ShellExecute on the file is the robust path).
+            let path = if child.contains(":\\") && std::path::Path::new(&child).exists() {
+                child.clone()
+            } else {
+                format!(r"shell:AppsFolder\{child}")
+            };
+            out.insert(
+                key.clone(),
+                AppEntry {
+                    name,
+                    name_lc: key,
+                    path,
+                    icon: 0,
+                },
+            );
+        }
+    }
+}
+
+/// Enumerate installed apps: Start Menu `.lnk`/`.url` first (reliable launch), then
+/// the AppsFolder for everything else (UWP/system apps). Sorted by display name.
+fn launcher_enumerate() -> Vec<AppEntry> {
+    let mut map = std::collections::HashMap::new();
+    // Per-user first so it wins the dedup, then all-users.
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        let mut p = std::path::PathBuf::from(appdata);
+        p.push(r"Microsoft\Windows\Start Menu\Programs");
+        collect_shortcuts(&p, &mut map);
+    }
+    if let Ok(pd) = std::env::var("ProgramData") {
+        let mut p = std::path::PathBuf::from(pd);
+        p.push(r"Microsoft\Windows\Start Menu\Programs");
+        collect_shortcuts(&p, &mut map);
+    }
+    unsafe { enumerate_appsfolder(&mut map) };
+    let mut v: Vec<AppEntry> = map.into_values().collect();
+    v.sort_by(|a, b| a.name_lc.cmp(&b.name_lc));
+    v
+}
+
+/// Resolve a shell item's icon to a 32bpp ARGB HBITMAP at `px` square. Returns the
+/// HBITMAP as an isize, or -1 on failure. Runs on the icon worker (slow shell call
+/// off the UI thread). Requires COM initialised on the calling thread.
+unsafe fn load_icon(path: &str, px: i32) -> isize {
+    let mut w: Vec<u16> = path.encode_utf16().collect();
+    w.push(0);
+    let factory: windows::core::Result<IShellItemImageFactory> =
+        SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None);
+    let Ok(factory) = factory else { return -1 };
+    match factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY) {
+        Ok(hb) => hb.0 as isize,
+        Err(_) => -1,
+    }
+}
+
+/// Icon worker: drains `ICON_QUEUE`, resolves each app's shell icon to an HBITMAP,
+/// stores it on the entry, and repaints. Off the UI thread so a slow icon (UWP
+/// logo, network path) never stalls typing. One apartment for its lifetime.
+fn icon_worker() {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        loop {
+            let idx = {
+                let mut q = ICON_QUEUE.lock().unwrap();
+                loop {
+                    if let Some(i) = q.pop_front() {
+                        break i;
+                    }
+                    q = ICON_CV.wait(q).unwrap();
+                }
+            };
+            // Short lock: grab the path only if this entry still needs an icon.
+            let path = {
+                let st = LAUNCHER_STATE.lock().unwrap();
+                match st.all.get(idx) {
+                    Some(e) if e.icon == 0 => e.path.clone(),
+                    _ => continue,
+                }
+            };
+            let hbmp = load_icon(&path, LAUNCHER_ICON_PX);
+            {
+                let mut st = LAUNCHER_STATE.lock().unwrap();
+                if let Some(e) = st.all.get_mut(idx) {
+                    e.icon = hbmp;
+                }
+            }
+            let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
+            if hl != 0 {
+                let _ = InvalidateRect(hwnd_from(hl), None, BOOL(0));
+            }
+        }
+    }
+}
+
+/// Fuzzy subsequence score for `query` against `cand` (both lowercase). None if
+/// not all query chars appear in order. Higher = better: contiguous runs,
+/// word-boundary starts, and earlier/shorter matches score up.
+fn fuzzy_score(query: &str, cand: &str) -> Option<i32> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let cb = cand.as_bytes();
+    let mut qi = query.chars();
+    let mut want = qi.next();
+    let mut score = 0i32;
+    let mut run = 0i32;
+    let mut matched_first = false;
+    for (i, &c) in cb.iter().enumerate() {
+        let Some(w) = want else { break };
+        let is_boundary = i == 0 || cb[i - 1] == b' ' || cb[i - 1] == b'-' || cb[i - 1] == b'_';
+        if (c as char).eq_ignore_ascii_case(&w) {
+            if i == 0 {
+                matched_first = true;
+            }
+            run += 1;
+            score += 8 + run * 4; // reward contiguous runs
+            if is_boundary {
+                score += 12; // reward start-of-word matches
+            }
+            score -= (i as i32) / 4; // earlier matches slightly better
+            want = qi.next();
+        } else {
+            run = 0;
+        }
+    }
+    if want.is_some() {
+        return None; // ran out of candidate before matching all query chars
+    }
+    score -= cand.len() as i32 / 8; // shorter targets slightly better
+    if matched_first {
+        score += 10;
+    }
+    Some(score)
+}
+
+/// Recompute `filtered` (and clamp `sel`) for the current query.
+fn launcher_refilter(st: &mut LauncherState) {
+    let q = st.query.to_ascii_lowercase();
+    let mut scored: Vec<(i32, usize)> = st
+        .all
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| fuzzy_score(&q, &e.name_lc).map(|s| (s, i)))
+        .collect();
+    // Best score first; ties keep alphabetical order (all is pre-sorted, stable).
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut filtered: Vec<Hit> = scored.into_iter().map(|(_, i)| Hit::App(i)).collect();
+    // File results (from the async index worker, already query-filtered) after apps —
+    // apps are instant and the common case, so they never wait on the index.
+    for i in 0..st.files.len() {
+        filtered.push(Hit::File(i));
+    }
+    st.filtered = filtered;
+    if st.sel >= st.filtered.len() {
+        st.sel = st.filtered.len().saturating_sub(1);
+    }
+}
+
+/// Bump the search generation and hand the current query to `filesearch_worker`.
+/// Cheap; the worker debounces + drops stale generations.
+fn launcher_dispatch_search(query: &str) {
+    let gen = SEARCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    *SEARCH_REQ.lock().unwrap() = Some((gen, query.to_string()));
+    SEARCH_CV.notify_one();
+}
+
+// ----- file search (Windows Search index via OLE DB Search.CollatorDSO) --------
+
+/// Mixed-type OLE DB row buffer: path (WSTR|BYREF provider ptr), size (I8), date
+/// (automation DATE f64), each with a DBSTATUS. `repr(C)` so the binding offsets
+/// below are exact.
+#[repr(C)]
+struct SearchRow {
+    s_path: u32,
+    _p0: u32,
+    path: *mut u16, // @8
+    s_size: u32,
+    _p1: u32,
+    size: i64, // @24
+    s_date: u32,
+    _p2: u32,
+    date: f64, // @40
+}
+
+unsafe fn read_wide(p: *const u16) -> String {
+    if p.is_null() {
+        return String::new();
+    }
+    let mut len = 0;
+    while *p.add(len) != 0 {
+        len += 1;
+    }
+    String::from_utf16_lossy(std::slice::from_raw_parts(p, len))
+}
+
+/// Keep only real filesystem paths (`X:\…` or UNC). The index also returns Outlook
+/// items as `/account@dom/Folder/Subject` — not launchable as files.
+fn is_fs_path(p: &str) -> bool {
+    let b = p.as_bytes();
+    (b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && b[2] == b'\\')
+        || p.starts_with("\\\\")
+}
+
+/// Build a full-text `CONTAINS` argument from the query — each ≥2-char word becomes a
+/// prefix term (`"word*"`) and they're AND-ed, so "annual report" matches files whose
+/// name contains words starting "annual" AND "report". `CONTAINS` hits the full-text
+/// index (~100ms) vs a leading-wildcard `LIKE '%q%'` which scans the whole index
+/// (~900ms). Returns None if there's no usable term. Words are stripped of `"`/`'`
+/// (phrase/SQL hazards) so the resulting `'…'` literal is safe.
+fn build_contains(query: &str) -> Option<String> {
+    let words: Vec<String> = query
+        .split_whitespace()
+        .map(|w| w.chars().filter(|c| *c != '"' && *c != '\'').collect::<String>())
+        .filter(|w| w.chars().count() >= 2)
+        .map(|w| format!("\"{w}*\""))
+        .collect();
+    if words.is_empty() {
+        None
+    } else {
+        Some(words.join(" AND "))
+    }
+}
+
+fn fmt_size(bytes: i64) -> String {
+    if bytes < 0 {
+        return String::new();
+    }
+    let b = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", b / 1024.0)
+    } else if bytes < 1024 * 1024 * 1024 {
+        format!("{:.1} MB", b / (1024.0 * 1024.0))
+    } else {
+        format!("{:.2} GB", b / (1024.0 * 1024.0 * 1024.0))
+    }
+}
+
+/// Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719468;
+    let era = (if z >= 0 { z } else { z - 146096 }) / 146097;
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = (if mp < 10 { mp + 3 } else { mp - 9 }) as u32;
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+/// OLE automation date (days since 1899-12-30) → `YYYY-MM-DD HH:MM`.
+fn fmt_oadate(d: f64) -> String {
+    if d <= 0.0 {
+        return String::new();
+    }
+    let unix_days = d.trunc() as i64 - 25569; // 1899-12-30 → 1970-01-01 offset
+    let frac = d - d.trunc();
+    let secs = (frac * 86400.0).round() as i64;
+    let (y, m, day) = civil_from_days(unix_days);
+    format!("{y:04}-{m:02}-{day:02} {:02}:{:02}", secs / 3600, (secs % 3600) / 60)
+}
+
+/// A live connection to the Windows Search index. Created once on the worker
+/// thread; each query reuses the session (a fresh command per query).
+struct FileSearch {
+    _dbinit: IDBInitialize, // held to keep the data source initialised
+    create_cmd: IDBCreateCommand,
+}
+impl FileSearch {
+    unsafe fn new() -> Option<FileSearch> {
+        let connstr = "Provider=Search.CollatorDSO;Extended Properties='Application=Windows'";
+        let mut cs: Vec<u16> = connstr.encode_utf16().chain(std::iter::once(0)).collect();
+        let init: IDataInitialize =
+            CoCreateInstance(&MSDAINITIALIZE, None, CLSCTX_INPROC_SERVER).ok()?;
+        let mut ds: Option<IUnknown> = None;
+        init.GetDataSource(
+            None,
+            CLSCTX_INPROC_SERVER.0 as u32,
+            PCWSTR(cs.as_mut_ptr()),
+            &IDBInitialize::IID,
+            &mut ds,
+        )
+        .ok()?;
+        let dbinit: IDBInitialize = ds?.cast().ok()?;
+        dbinit.Initialize().ok()?;
+        let session: IDBCreateSession = dbinit.cast().ok()?;
+        let sess_unk: IUnknown = session.CreateSession(None, &IDBCreateCommand::IID).ok()?;
+        let create_cmd: IDBCreateCommand = sess_unk.cast().ok()?;
+        Some(FileSearch {
+            _dbinit: dbinit,
+            create_cmd,
+        })
+    }
+
+    unsafe fn run(&self, query: &str) -> Vec<FileHit> {
+        let mut out = Vec::new();
+        let Some(contains) = build_contains(query) else {
+            return out; // no ≥2-char term — would match almost everything
+        };
+        // CONTAINS = full-text index (fast). LIKE '%q%' scans the index (~900ms, too
+        // slow). Word-prefix match, not pure substring — see plan/launcher.md / the
+        // MFT path for true Everything-style substring.
+        let sql = format!(
+            "SELECT TOP 40 System.ItemPathDisplay, System.Size, System.DateModified \
+             FROM SYSTEMINDEX WHERE CONTAINS(System.FileName, '{contains}') \
+             ORDER BY System.DateModified DESC"
+        );
+        let _ = self.exec(&sql, &mut out);
+        out
+    }
+
+    unsafe fn exec(&self, sql: &str, out: &mut Vec<FileHit>) -> windows::core::Result<()> {
+        let cmd_unk: IUnknown = self.create_cmd.CreateCommand(None, &ICommandText::IID)?;
+        let cmd_text: ICommandText = cmd_unk.cast()?;
+        let dbguid_default = GUID::from_u128(0xC8B521FB_5CF3_11CE_ADE5_00AA0044773D);
+        let mut sqlw: Vec<u16> = sql.encode_utf16().chain(std::iter::once(0)).collect();
+        cmd_text.SetCommandText(&dbguid_default, PCWSTR(sqlw.as_mut_ptr()))?;
+        let cmd: ICommand = cmd_text.cast()?;
+        let mut rowset_unk: Option<IUnknown> = None;
+        cmd.Execute(None, &IRowset::IID, None, None, Some(&mut rowset_unk))?;
+        let rowset: IRowset = rowset_unk.unwrap().cast()?;
+        let accessor: IAccessor = rowset.cast()?;
+
+        let mk = |ord: usize, obs: usize, obv: usize, wt: u16, mo: u32, cb: usize| DBBINDING {
+            iOrdinal: ord,
+            obValue: obv,
+            obLength: 0,
+            obStatus: obs,
+            pTypeInfo: core::mem::ManuallyDrop::new(None),
+            pObject: std::ptr::null_mut(),
+            pBindExt: std::ptr::null_mut(),
+            dwPart: (DBPART_VALUE.0 | DBPART_STATUS.0) as u32,
+            dwMemOwner: mo,
+            eParamIO: DBPARAMIO_NOTPARAM.0 as u32,
+            cbMaxLen: cb,
+            dwFlags: 0,
+            wType: wt,
+            bPrecision: 0,
+            bScale: 0,
+        };
+        let prov = DBMEMOWNER_PROVIDEROWNED.0 as u32;
+        let bindings = [
+            mk(1, 0, 8, (DBTYPE_WSTR.0 | DBTYPE_BYREF.0) as u16, prov, 0),
+            mk(2, 16, 24, DBTYPE_I8.0 as u16, 0, 8),
+            mk(3, 32, 40, DBTYPE_DATE.0 as u16, 0, 8),
+        ];
+        let mut hacc = HACCESSOR::default();
+        accessor.CreateAccessor(
+            DBACCESSOR_ROWDATA.0 as u32,
+            bindings.len(),
+            bindings.as_ptr(),
+            std::mem::size_of::<SearchRow>(),
+            &mut hacc,
+            None,
+        )?;
+
+        loop {
+            let mut rows: [*mut usize; 1] = [std::ptr::null_mut()];
+            let mut obtained: usize = 0;
+            if rowset.GetNextRows(0, 0, &mut obtained, &mut rows).is_err() || obtained == 0 {
+                break;
+            }
+            let hrow_arr = rows[0];
+            let hrow = *hrow_arr;
+            let mut row = SearchRow {
+                s_path: 0, _p0: 0, path: std::ptr::null_mut(),
+                s_size: 0, _p1: 0, size: 0,
+                s_date: 0, _p2: 0, date: 0.0,
+            };
+            if rowset
+                .GetData(hrow, hacc, &mut row as *mut SearchRow as *mut c_void)
+                .is_ok()
+            {
+                let ok = DBSTATUS_S_OK.0 as u32;
+                let path = if row.s_path == ok { read_wide(row.path) } else { String::new() };
+                if is_fs_path(&path) {
+                    let size = if row.s_size == ok { row.size } else { -1 };
+                    let date = if row.s_date == ok { row.date } else { 0.0 };
+                    let name = std::path::Path::new(&path)
+                        .file_name()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or(&path)
+                        .to_string();
+                    out.push(FileHit { name, path, size, date });
+                }
+            }
+            let _ = rowset.ReleaseRows(obtained, hrow_arr as *const usize, std::ptr::null(), std::ptr::null_mut(), std::ptr::null_mut());
+            CoTaskMemFree(Some(hrow_arr as *const c_void));
+            if out.len() >= 40 {
+                break;
+            }
+        }
+        let _ = accessor.ReleaseAccessor(hacc, None);
+        Ok(())
+    }
+}
+
+/// File-search worker: own COM STA + one persistent index connection. Drains the
+/// debounced request slot, drops stale generations, writes results + repaints.
+/// If the index can't be opened, file search is silently disabled (apps still work).
+fn filesearch_worker() {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        let search = FileSearch::new();
+        loop {
+            let (gen, q) = {
+                let mut slot = SEARCH_REQ.lock().unwrap();
+                loop {
+                    if let Some(r) = slot.take() {
+                        break r;
+                    }
+                    slot = SEARCH_CV.wait(slot).unwrap();
+                }
+            };
+            // Short debounce to coalesce bursts; CONTAINS is fast (~100ms) so this can
+            // be tight without spamming the index.
+            std::thread::sleep(std::time::Duration::from_millis(45));
+            if SEARCH_GEN.load(Ordering::Relaxed) != gen {
+                continue;
+            }
+            let Some(search) = search.as_ref() else { continue };
+            let hits = search.run(&q);
+            if SEARCH_GEN.load(Ordering::Relaxed) != gen {
+                continue; // superseded while the index query ran
+            }
+            {
+                let mut st = LAUNCHER_STATE.lock().unwrap();
+                st.files = hits;
+                st.search_gen = gen;
+                launcher_refilter(&mut st);
+            }
+            let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
+            if hl != 0 {
+                let _ = InvalidateRect(hwnd_from(hl), None, BOOL(0));
+            }
+        }
+    }
+}
+
+/// Build the launcher font once (semibold, ~18px).
+unsafe fn make_launcher_font() {
+    if LAUNCHER_FONT.load(Ordering::Relaxed) != 0 {
+        return;
+    }
+    let mut wname: Vec<u16> = "Segoe UI".encode_utf16().collect();
+    wname.push(0);
+    let f = CreateFontW(
+        -19,
+        0,
+        0,
+        0,
+        600,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET.0 as u32,
+        OUT_DEFAULT_PRECIS.0 as u32,
+        CLIP_DEFAULT_PRECIS.0 as u32,
+        CLEARTYPE_QUALITY.0 as u32,
+        0,
+        PCWSTR(wname.as_ptr()),
+    );
+    LAUNCHER_FONT.store(f.0 as isize, Ordering::Relaxed);
+}
+
+/// Center the launcher on the monitor under the cursor and show it (no-activate
+/// — we drive it via the keyboard hook, so it must not steal focus).
+unsafe fn launcher_show(h: HWND) {
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let wa = work_area_at(pt);
+    let x = (wa.left + wa.right) / 2 - LAUNCHER_W / 2;
+    let y = (wa.top + wa.bottom) / 2 - LAUNCHER_H / 2;
+    let _ = SetWindowPos(h, HWND_TOPMOST, x, y, LAUNCHER_W, LAUNCHER_H, SWP_NOACTIVATE);
+    // Publish bounds for the mouse hook's click-outside-to-dismiss check.
+    LAUNCHER_RECT_L.store(x, Ordering::Relaxed);
+    LAUNCHER_RECT_T.store(y, Ordering::Relaxed);
+    LAUNCHER_RECT_R.store(x + LAUNCHER_W, Ordering::Relaxed);
+    LAUNCHER_RECT_B.store(y + LAUNCHER_H, Ordering::Relaxed);
+    let _ = ShowWindow(h, SW_SHOWNA);
+    let _ = InvalidateRect(h, None, BOOL(0));
+}
+
+/// Hide the launcher and reset transient state.
+unsafe fn launcher_close(h: HWND) {
+    let _ = ShowWindow(h, SW_HIDE);
+    LAUNCHER_OPEN.store(false, Ordering::Relaxed);
+    let mut st = LAUNCHER_STATE.lock().unwrap();
+    st.query.clear();
+    st.sel = 0;
+    st.files.clear();
+    st.detail = false;
+}
+
+/// Launch the selected shortcut/app/file via the shell (resolves target/args/dir).
+unsafe fn launcher_launch(path: &str) {
+    let mut wpath: Vec<u16> = path.encode_utf16().collect();
+    wpath.push(0);
+    let mut op: Vec<u16> = "open".encode_utf16().collect();
+    op.push(0);
+    ShellExecuteW(
+        HWND(std::ptr::null_mut()),
+        PCWSTR(op.as_ptr()),
+        PCWSTR(wpath.as_ptr()),
+        PCWSTR::null(),
+        PCWSTR::null(),
+        SW_SHOW,
+    );
+}
+
+/// Open Explorer with the file selected (Shift+Enter on a file result).
+unsafe fn launcher_reveal_in_folder(path: &str) {
+    let file: Vec<u16> = "explorer.exe".encode_utf16().chain(std::iter::once(0)).collect();
+    let params = format!("/select,\"{path}\"");
+    let pw: Vec<u16> = params.encode_utf16().chain(std::iter::once(0)).collect();
+    let op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    ShellExecuteW(
+        HWND(std::ptr::null_mut()),
+        PCWSTR(op.as_ptr()),
+        PCWSTR(file.as_ptr()),
+        PCWSTR(pw.as_ptr()),
+        PCWSTR::null(),
+        SW_SHOW,
+    );
+}
+
+unsafe fn launcher_paint(h: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = BeginPaint(h, &mut ps);
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
+    let w = rc.right - rc.left;
+    let ht = rc.bottom - rc.top;
+
+    // Thin 1px frame, then the dark surface inset inside it (DWM rounds the outer
+    // corners, so this reads as a clean bordered card).
+    let frame = CreateSolidBrush(COLORREF(LAUNCHER_FRAME));
+    FillRect(hdc, &rc, frame);
+    let _ = DeleteObject(HGDIOBJ(frame.0));
+    let inner = RECT {
+        left: rc.left + 1,
+        top: rc.top + 1,
+        right: rc.right - 1,
+        bottom: rc.bottom - 1,
+    };
+    let bg = CreateSolidBrush(COLORREF(LAUNCHER_BG));
+    FillRect(hdc, &inner, bg);
+    let _ = DeleteObject(HGDIOBJ(bg.0));
+
+    let font_raw = LAUNCHER_FONT.load(Ordering::Relaxed);
+    let old_font = if font_raw != 0 {
+        Some(SelectObject(hdc, HGDIOBJ(font_raw as *mut c_void)))
+    } else {
+        Some(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)))
+    };
+    SetBkMode(hdc, TRANSPARENT);
+
+    let st = LAUNCHER_STATE.lock().unwrap();
+
+    // Query row.
+    let mut qr = RECT {
+        left: LAUNCHER_PAD,
+        top: 0,
+        right: w - LAUNCHER_PAD,
+        bottom: LAUNCHER_HEADER,
+    };
+    if st.query.is_empty() {
+        SetTextColor(hdc, COLORREF(LAUNCHER_DIM));
+        let mut v: Vec<u16> = "Search apps and files…".encode_utf16().collect();
+        DrawTextW(hdc, &mut v, &mut qr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    } else {
+        SetTextColor(hdc, COLORREF(LAUNCHER_FG));
+        // Trailing caret marks the input (the picker is owner-drawn, no edit ctrl).
+        let mut v: Vec<u16> = format!("{}\u{258f}", st.query).encode_utf16().collect();
+        DrawTextW(hdc, &mut v, &mut qr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    }
+    // Divider under the query row.
+    let div = RECT {
+        left: LAUNCHER_PAD,
+        top: LAUNCHER_HEADER,
+        right: w - LAUNCHER_PAD,
+        bottom: LAUNCHER_HEADER + 1,
+    };
+    let dbrush = CreateSolidBrush(COLORREF(LAUNCHER_DIVIDER));
+    FillRect(hdc, &div, dbrush);
+    let _ = DeleteObject(HGDIOBJ(dbrush.0));
+
+    // Result rows, scrolled so the selection is always visible.
+    let list_top = LAUNCHER_HEADER + 6;
+    // Tab detail footer: when on and the selection is a file, reserve a panel at the
+    // bottom (path / modified / size) and shrink the list to fit.
+    let sel_file = match st.filtered.get(st.sel) {
+        Some(Hit::File(i)) => st.files.get(*i),
+        _ => None,
+    };
+    let footer_h = if st.detail && sel_file.is_some() { 80 } else { 0 };
+    let list_bottom = ht - footer_h - 4;
+    let rows = ((list_bottom - list_top) / LAUNCHER_ROW_H).max(1) as usize;
+    let scroll = if st.sel >= rows { st.sel - rows + 1 } else { 0 };
+    let icon_dc = CreateCompatibleDC(hdc);
+    // AC_SRC_OVER + AC_SRC_ALPHA: blend the 32bpp icon by its own per-pixel alpha.
+    let icon_blend = BLENDFUNCTION {
+        BlendOp: 0,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: 1,
+    };
+    let text_left = LAUNCHER_PAD + 6 + LAUNCHER_ICON_PX + 10;
+    let mut want: Vec<usize> = Vec::new(); // app indices whose icon isn't loaded yet
+    for vis in 0..rows {
+        let idx = scroll + vis;
+        if idx >= st.filtered.len() {
+            break;
+        }
+        let hit = st.filtered[idx];
+        let top = list_top + vis as i32 * LAUNCHER_ROW_H;
+        let row = RECT {
+            left: LAUNCHER_PAD,
+            top,
+            right: w - LAUNCHER_PAD,
+            bottom: top + LAUNCHER_ROW_H,
+        };
+        if idx == st.sel {
+            // Rounded accent pill, inset from the row edges (omarchy-style).
+            let sel = CreateSolidBrush(COLORREF(LAUNCHER_SELBG));
+            let pen = CreatePen(PS_SOLID, 1, COLORREF(LAUNCHER_SELBG));
+            let ob = SelectObject(hdc, HGDIOBJ(sel.0));
+            let op = SelectObject(hdc, HGDIOBJ(pen.0));
+            let _ = RoundRect(
+                hdc,
+                row.left + 4,
+                top + 3,
+                row.right - 4,
+                top + LAUNCHER_ROW_H - 3,
+                LAUNCHER_SEL_RADIUS,
+                LAUNCHER_SEL_RADIUS,
+            );
+            SelectObject(hdc, ob);
+            SelectObject(hdc, op);
+            let _ = DeleteObject(HGDIOBJ(sel.0));
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+            SetTextColor(hdc, COLORREF(LAUNCHER_SELFG));
+        } else {
+            SetTextColor(hdc, COLORREF(LAUNCHER_FG));
+        }
+        // Resolve name + (apps only) lazy icon.
+        let name: &str = match hit {
+            Hit::App(i) => {
+                let e = &st.all[i];
+                // App icon, loaded lazily off the UI thread; missing ones queue + pop in.
+                if e.icon > 1 {
+                    let hb = e.icon as *mut c_void;
+                    let prev = SelectObject(icon_dc, HGDIOBJ(hb));
+                    let mut bm = BITMAP::default();
+                    GetObjectW(
+                        HGDIOBJ(hb),
+                        std::mem::size_of::<BITMAP>() as i32,
+                        Some(&mut bm as *mut _ as *mut c_void),
+                    );
+                    let iy = top + (LAUNCHER_ROW_H - LAUNCHER_ICON_PX) / 2;
+                    let _ = AlphaBlend(
+                        hdc, row.left + 6, iy, LAUNCHER_ICON_PX, LAUNCHER_ICON_PX, icon_dc, 0, 0,
+                        bm.bmWidth.max(1), bm.bmHeight.max(1), icon_blend,
+                    );
+                    SelectObject(icon_dc, prev);
+                } else if e.icon == 0 {
+                    want.push(i);
+                }
+                e.name.as_str()
+            }
+            Hit::File(i) => {
+                // File rows: a small dim square marks them (no shell icon yet); the
+                // Tab footer shows path/size/date.
+                if idx != st.sel {
+                    let mk = CreateSolidBrush(COLORREF(LAUNCHER_DIM));
+                    let g = RECT {
+                        left: row.left + 6 + (LAUNCHER_ICON_PX - 14) / 2,
+                        top: top + (LAUNCHER_ROW_H - 14) / 2,
+                        right: row.left + 6 + (LAUNCHER_ICON_PX - 14) / 2 + 14,
+                        bottom: top + (LAUNCHER_ROW_H - 14) / 2 + 14,
+                    };
+                    FillRect(hdc, &g, mk);
+                    let _ = DeleteObject(HGDIOBJ(mk.0));
+                }
+                st.files[i].name.as_str()
+            }
+        };
+        let mut tr = RECT {
+            left: text_left,
+            ..row
+        };
+        let mut v: Vec<u16> = name.encode_utf16().collect();
+        DrawTextW(
+            hdc,
+            &mut v,
+            &mut tr,
+            DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+        );
+    }
+    let _ = DeleteDC(icon_dc);
+
+    // Detail footer for the selected file (Tab toggles it).
+    if footer_h > 0 {
+        if let Some(f) = sel_file {
+            let fy = ht - footer_h;
+            let divf = RECT { left: LAUNCHER_PAD, top: fy, right: w - LAUNCHER_PAD, bottom: fy + 1 };
+            let db = CreateSolidBrush(COLORREF(LAUNCHER_DIVIDER));
+            FillRect(hdc, &divf, db);
+            let _ = DeleteObject(HGDIOBJ(db.0));
+            let line = |n: i32, label: &str, color: u32| {
+                SetTextColor(hdc, COLORREF(color));
+                let mut r = RECT {
+                    left: LAUNCHER_PAD + 2,
+                    top: fy + 8 + n * 22,
+                    right: w - LAUNCHER_PAD,
+                    bottom: fy + 8 + n * 22 + 22,
+                };
+                let mut v: Vec<u16> = label.encode_utf16().collect();
+                DrawTextW(hdc, &mut v, &mut r, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+            };
+            line(0, &f.path, LAUNCHER_FG);
+            let meta = format!("Modified {}    Size {}", fmt_oadate(f.date), fmt_size(f.size));
+            line(1, &meta, LAUNCHER_DIM);
+            line(2, "Enter: open    Shift+Enter: open folder", LAUNCHER_DIM);
+        }
+    }
+
+    if let Some(of) = old_font {
+        SelectObject(hdc, of);
+    }
+    drop(st);
+    // Queue any visible rows still missing an icon; the icon worker resolves them.
+    if !want.is_empty() {
+        let mut q = ICON_QUEUE.lock().unwrap();
+        for idx in want {
+            if !q.contains(&idx) {
+                q.push_back(idx);
+            }
+        }
+        drop(q);
+        ICON_CV.notify_all();
+    }
+    let _ = EndPaint(h, &ps);
+}
+
+unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    match msg {
+        WM_LAUNCHER => {
+            match w.0 {
+                LA_OPEN => {
+                    {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        if !st.loaded {
+                            st.all = launcher_enumerate();
+                            st.loaded = true;
+                        }
+                        st.query.clear();
+                        st.sel = 0;
+                        st.files.clear();
+                        st.detail = false;
+                        launcher_refilter(&mut st);
+                    }
+                    launcher_show(h);
+                }
+                LA_CHAR => {
+                    let q = {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        if let Some(c) = char::from_u32(l.0 as u32) {
+                            st.query.push(c);
+                        }
+                        st.sel = 0;
+                        st.files.clear(); // stale results vanish until the new query returns
+                        launcher_refilter(&mut st);
+                        st.query.clone()
+                    };
+                    launcher_dispatch_search(&q);
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                LA_BACK => {
+                    let q = {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        st.query.pop();
+                        st.sel = 0;
+                        st.files.clear();
+                        launcher_refilter(&mut st);
+                        st.query.clone()
+                    };
+                    launcher_dispatch_search(&q);
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                LA_UP => {
+                    {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        if st.sel > 0 {
+                            st.sel -= 1;
+                        }
+                    }
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                LA_DOWN => {
+                    {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        if st.sel + 1 < st.filtered.len() {
+                            st.sel += 1;
+                        }
+                    }
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                LA_ACTIVATE => {
+                    // Enter: launch the selected app, or open the selected file.
+                    let action = {
+                        let st = LAUNCHER_STATE.lock().unwrap();
+                        match st.filtered.get(st.sel) {
+                            Some(Hit::App(i)) => st.all.get(*i).map(|e| e.path.clone()),
+                            Some(Hit::File(i)) => st.files.get(*i).map(|f| f.path.clone()),
+                            None => None,
+                        }
+                    };
+                    launcher_close(h);
+                    if let Some(p) = action {
+                        launcher_launch(&p);
+                    }
+                }
+                LA_ACTIVATE_ALT => {
+                    // Shift+Enter on a file: open its containing folder (file selected).
+                    let path = {
+                        let st = LAUNCHER_STATE.lock().unwrap();
+                        match st.filtered.get(st.sel) {
+                            Some(Hit::File(i)) => st.files.get(*i).map(|f| f.path.clone()),
+                            _ => None,
+                        }
+                    };
+                    if let Some(p) = path {
+                        launcher_close(h);
+                        launcher_reveal_in_folder(&p);
+                    }
+                }
+                LA_TAB => {
+                    {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        st.detail = !st.detail;
+                    }
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                LA_CLOSE => launcher_close(h),
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            launcher_paint(h);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(h, msg, w, l),
+    }
+}
+
+/// Launcher thread: registers its class, creates the (hidden) picker window, and
+/// pumps its own message loop. Idle until the hook posts `WM_LAUNCHER`.
+fn launcher_thread() {
+    unsafe {
+        let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(launcher_wndproc),
+            hInstance: hinst,
+            hbrBackground: CreateSolidBrush(COLORREF(LAUNCHER_BG)),
+            lpszClassName: w!("astur_launcher"),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            w!("astur_launcher"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            LAUNCHER_W,
+            LAUNCHER_H,
+            None,
+            None,
+            hinst,
+            None,
+        );
+        let Ok(hwnd) = hwnd else {
+            return;
+        };
+        make_launcher_font();
+        LAUNCHER_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        // Modern rounded corners on the picker card (Win11; no-op pre-22000).
+        let pref = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const c_void,
+            std::mem::size_of_val(&pref) as u32,
+        );
+        // COM for the shell enumeration + icon resolution this thread does.
+        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+        // Enumerate apps now, in the idle window before the first Alt+Space, so the
+        // first open is instant (AppsFolder enumeration can take a beat).
+        {
+            let apps = launcher_enumerate();
+            let n = apps.len();
+            {
+                let mut st = LAUNCHER_STATE.lock().unwrap();
+                st.all = apps;
+                st.loaded = true;
+                launcher_refilter(&mut st);
+            }
+            // Preload every app's icon in the background so the list is fully
+            // iconned before the picker is opened (the parallel icon workers chew
+            // through these while Astur sits idle).
+            let mut q = ICON_QUEUE.lock().unwrap();
+            for i in 0..n {
+                q.push_back(i);
+            }
+            drop(q);
+            ICON_CV.notify_all();
+        }
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+// =========================================================================
+// System / power menu (Alt+Shift+Space): omarchy-style power actions, same
+// hook-driven no-focus model as the launcher. See plan/system-menu.md.
+// =========================================================================
+
+const WM_SYSMENU: u32 = WM_USER + 11;
+const SM_OPEN: usize = 0;
+const SM_UP: usize = 1;
+const SM_DOWN: usize = 2;
+const SM_ACTIVATE: usize = 3;
+const SM_CLOSE: usize = 4;
+const SM_BACK: usize = 5; // up one level (submenu -> root), or close from root
+
+const SYSMENU_W: i32 = 380;
+const SYSMENU_HEADER: i32 = 44;
+const SYSMENU_FOOTER: i32 = 34; // hint / confirm banner
+
+static SYSMENU_OPEN: AtomicBool = AtomicBool::new(false);
+static SYSMENU_HWND: AtomicIsize = AtomicIsize::new(0);
+
+#[derive(Clone, Copy, PartialEq)]
+enum SysAct {
+    Lock,
+    Sleep,
+    SignOut,
+    Restart,
+    Shutdown,
+    OpenConfig,
+}
+
+// A row is either a category (drills into a submenu) or an action (the bool = needs a
+// confirm press). omarchy-style categorised menu; data-driven so mods can add rows.
+enum SysKind {
+    Category(&'static [SysItem]),
+    Action(SysAct, bool),
+}
+struct SysItem {
+    label: &'static str,
+    kind: SysKind,
+}
+
+const POWER: &[SysItem] = &[
+    SysItem { label: "Lock", kind: SysKind::Action(SysAct::Lock, false) },
+    SysItem { label: "Sleep", kind: SysKind::Action(SysAct::Sleep, false) },
+    SysItem { label: "Sign out", kind: SysKind::Action(SysAct::SignOut, true) },
+    SysItem { label: "Restart", kind: SysKind::Action(SysAct::Restart, true) },
+    SysItem { label: "Shut down", kind: SysKind::Action(SysAct::Shutdown, true) },
+];
+const SETUP: &[SysItem] = &[
+    SysItem { label: "Open config folder", kind: SysKind::Action(SysAct::OpenConfig, false) },
+];
+const SYS_ROOT: &[SysItem] = &[
+    SysItem { label: "Power", kind: SysKind::Category(POWER) },
+    SysItem { label: "Setup", kind: SysKind::Category(SETUP) },
+    // Theme / Appearance lands here once theming + wallpaper exist (see roadmap-v2.md).
+];
+
+struct SysMenuState {
+    items: &'static [SysItem], // current level
+    title: &'static str,
+    sel: usize,
+    confirm: bool,
+    at_root: bool,
+}
+static SYSMENU_STATE: Mutex<SysMenuState> = Mutex::new(SysMenuState {
+    items: SYS_ROOT,
+    title: "System",
+    sel: 0,
+    confirm: false,
+    at_root: true,
+});
+
+/// Enable SeShutdownPrivilege on our token (required by ExitWindowsEx for reboot/
+/// shutdown). Lazy — only when a power action fires, never at startup.
+unsafe fn enable_shutdown_priv() {
+    let mut tok = HANDLE::default();
+    if OpenProcessToken(
+        GetCurrentProcess(),
+        TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY,
+        &mut tok,
+    )
+    .is_err()
+    {
+        return;
+    }
+    let mut luid = LUID::default();
+    if LookupPrivilegeValueW(PCWSTR::null(), SE_SHUTDOWN_NAME, &mut luid).is_ok() {
+        let tp = TOKEN_PRIVILEGES {
+            PrivilegeCount: 1,
+            Privileges: [LUID_AND_ATTRIBUTES {
+                Luid: luid,
+                Attributes: SE_PRIVILEGE_ENABLED,
+            }],
+        };
+        let _ = AdjustTokenPrivileges(tok, BOOL(0), Some(&tp), 0, None, None);
+    }
+    let _ = CloseHandle(tok);
+}
+
+unsafe fn sysmenu_exec(act: SysAct) {
+    match act {
+        SysAct::Lock => {
+            let _ = LockWorkStation();
+        }
+        SysAct::Sleep => {
+            let _ = SetSuspendState(BOOLEAN(0), BOOLEAN(0), BOOLEAN(0));
+        }
+        SysAct::SignOut => {
+            let _ = ExitWindowsEx(EWX_LOGOFF | EWX_FORCEIFHUNG, SHUTDOWN_REASON(0));
+        }
+        SysAct::Restart => {
+            enable_shutdown_priv();
+            let _ = ExitWindowsEx(EWX_REBOOT | EWX_FORCEIFHUNG, SHUTDOWN_REASON(0));
+        }
+        SysAct::Shutdown => {
+            enable_shutdown_priv();
+            let _ = ExitWindowsEx(EWX_SHUTDOWN | EWX_FORCEIFHUNG, SHUTDOWN_REASON(0));
+        }
+        SysAct::OpenConfig => {
+            if let Ok(home) = std::env::var("USERPROFILE") {
+                let dir = format!(r"{home}\.astur");
+                let wp: Vec<u16> = dir.encode_utf16().chain(std::iter::once(0)).collect();
+                let op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+                ShellExecuteW(
+                    HWND(std::ptr::null_mut()),
+                    PCWSTR(op.as_ptr()),
+                    PCWSTR(wp.as_ptr()),
+                    PCWSTR::null(),
+                    PCWSTR::null(),
+                    SW_SHOW,
+                );
+            }
+        }
+    }
+}
+
+/// Size + center the menu to the current level's row count, then repaint.
+unsafe fn sysmenu_layout(h: HWND) {
+    let n = SYSMENU_STATE.lock().unwrap().items.len() as i32;
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let wa = work_area_at(pt);
+    let hgt = SYSMENU_HEADER + 6 + n * LAUNCHER_ROW_H + SYSMENU_FOOTER + 6;
+    let x = (wa.left + wa.right) / 2 - SYSMENU_W / 2;
+    let y = (wa.top + wa.bottom) / 2 - hgt / 2;
+    let _ = SetWindowPos(h, HWND_TOPMOST, x, y, SYSMENU_W, hgt, SWP_NOACTIVATE);
+    let _ = InvalidateRect(h, None, BOOL(0));
+}
+
+unsafe fn sysmenu_show(h: HWND) {
+    {
+        let mut st = SYSMENU_STATE.lock().unwrap();
+        st.items = SYS_ROOT;
+        st.title = "System";
+        st.sel = 0;
+        st.confirm = false;
+        st.at_root = true;
+    }
+    sysmenu_layout(h);
+    let _ = ShowWindow(h, SW_SHOWNA);
+}
+
+unsafe fn sysmenu_close(h: HWND) {
+    let _ = ShowWindow(h, SW_HIDE);
+    SYSMENU_OPEN.store(false, Ordering::Relaxed);
+    let mut st = SYSMENU_STATE.lock().unwrap();
+    st.items = SYS_ROOT;
+    st.title = "System";
+    st.sel = 0;
+    st.confirm = false;
+    st.at_root = true;
+}
+
+unsafe fn sysmenu_paint(h: HWND) {
+    let mut ps = PAINTSTRUCT::default();
+    let hdc = BeginPaint(h, &mut ps);
+    let mut rc = RECT::default();
+    let _ = GetClientRect(h, &mut rc);
+    let w = rc.right - rc.left;
+
+    let frame = CreateSolidBrush(COLORREF(LAUNCHER_FRAME));
+    FillRect(hdc, &rc, frame);
+    let _ = DeleteObject(HGDIOBJ(frame.0));
+    let inner = RECT {
+        left: rc.left + 1,
+        top: rc.top + 1,
+        right: rc.right - 1,
+        bottom: rc.bottom - 1,
+    };
+    let bg = CreateSolidBrush(COLORREF(LAUNCHER_BG));
+    FillRect(hdc, &inner, bg);
+    let _ = DeleteObject(HGDIOBJ(bg.0));
+
+    let font_raw = LAUNCHER_FONT.load(Ordering::Relaxed);
+    let old_font = if font_raw != 0 {
+        Some(SelectObject(hdc, HGDIOBJ(font_raw as *mut c_void)))
+    } else {
+        None
+    };
+    SetBkMode(hdc, TRANSPARENT);
+
+    let st = SYSMENU_STATE.lock().unwrap();
+    SetTextColor(hdc, COLORREF(LAUNCHER_DIM));
+    let mut tr = RECT {
+        left: LAUNCHER_PAD,
+        top: 0,
+        right: w - LAUNCHER_PAD,
+        bottom: SYSMENU_HEADER,
+    };
+    let mut tv: Vec<u16> = st.title.encode_utf16().collect();
+    DrawTextW(hdc, &mut tv, &mut tr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    let div = RECT {
+        left: LAUNCHER_PAD,
+        top: SYSMENU_HEADER,
+        right: w - LAUNCHER_PAD,
+        bottom: SYSMENU_HEADER + 1,
+    };
+    let db = CreateSolidBrush(COLORREF(LAUNCHER_DIVIDER));
+    FillRect(hdc, &div, db);
+    let _ = DeleteObject(HGDIOBJ(db.0));
+
+    for (i, item) in st.items.iter().enumerate() {
+        let top = SYSMENU_HEADER + 6 + i as i32 * LAUNCHER_ROW_H;
+        let row = RECT {
+            left: LAUNCHER_PAD,
+            top,
+            right: w - LAUNCHER_PAD,
+            bottom: top + LAUNCHER_ROW_H,
+        };
+        if i == st.sel {
+            let sel = CreateSolidBrush(COLORREF(LAUNCHER_SELBG));
+            let pen = CreatePen(PS_SOLID, 1, COLORREF(LAUNCHER_SELBG));
+            let ob = SelectObject(hdc, HGDIOBJ(sel.0));
+            let op = SelectObject(hdc, HGDIOBJ(pen.0));
+            let _ = RoundRect(
+                hdc,
+                row.left + 4,
+                top + 3,
+                row.right - 4,
+                top + LAUNCHER_ROW_H - 3,
+                LAUNCHER_SEL_RADIUS,
+                LAUNCHER_SEL_RADIUS,
+            );
+            SelectObject(hdc, ob);
+            SelectObject(hdc, op);
+            let _ = DeleteObject(HGDIOBJ(sel.0));
+            let _ = DeleteObject(HGDIOBJ(pen.0));
+            SetTextColor(hdc, COLORREF(LAUNCHER_SELFG));
+        } else {
+            SetTextColor(hdc, COLORREF(LAUNCHER_FG));
+        }
+        let mut r = RECT {
+            left: row.left + 14,
+            ..row
+        };
+        let mut v: Vec<u16> = item.label.encode_utf16().collect();
+        DrawTextW(hdc, &mut v, &mut r, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        // Chevron marks a category (drills into a submenu).
+        if let SysKind::Category(_) = item.kind {
+            let mut cr = RECT {
+                left: row.left,
+                top,
+                right: row.right - 12,
+                bottom: top + LAUNCHER_ROW_H,
+            };
+            let mut cv: Vec<u16> = "\u{203a}".encode_utf16().collect();
+            DrawTextW(hdc, &mut cv, &mut cr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_RIGHT);
+        }
+    }
+
+    let fy = rc.bottom - SYSMENU_FOOTER;
+    let label = if st.confirm {
+        format!(
+            "Press Enter again to {}  \u{2022}  Esc cancels",
+            st.items[st.sel].label.to_ascii_lowercase()
+        )
+    } else if st.at_root {
+        "Up/Down  \u{2022}  Enter open  \u{2022}  Esc close".to_string()
+    } else {
+        "Up/Down  \u{2022}  Enter run  \u{2022}  \u{2190}/Esc back".to_string()
+    };
+    SetTextColor(hdc, COLORREF(if st.confirm { LAUNCHER_SELBG } else { LAUNCHER_DIM }));
+    let mut fr = RECT {
+        left: LAUNCHER_PAD,
+        top: fy,
+        right: w - LAUNCHER_PAD,
+        bottom: rc.bottom,
+    };
+    let mut fv: Vec<u16> = label.encode_utf16().collect();
+    DrawTextW(hdc, &mut fv, &mut fr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+
+    if let Some(of) = old_font {
+        SelectObject(hdc, of);
+    }
+    drop(st);
+    let _ = EndPaint(h, &ps);
+}
+
+unsafe extern "system" fn sysmenu_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    match msg {
+        WM_SYSMENU => {
+            match w.0 {
+                SM_OPEN => sysmenu_show(h),
+                SM_UP => {
+                    {
+                        let mut st = SYSMENU_STATE.lock().unwrap();
+                        st.confirm = false;
+                        if st.sel > 0 {
+                            st.sel -= 1;
+                        }
+                    }
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                SM_DOWN => {
+                    {
+                        let mut st = SYSMENU_STATE.lock().unwrap();
+                        st.confirm = false;
+                        let n = st.items.len();
+                        if st.sel + 1 < n {
+                            st.sel += 1;
+                        }
+                    }
+                    let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                SM_ACTIVATE => {
+                    // Category drills into its submenu; an action runs (confirm-gated
+                    // ones arm on the first Enter, run on the second).
+                    enum Nav {
+                        Drill,
+                        Confirm,
+                        Run(SysAct),
+                    }
+                    let nav = {
+                        let mut st = SYSMENU_STATE.lock().unwrap();
+                        let sel = st.sel;
+                        let (sub_opt, label, act_opt): (
+                            Option<&'static [SysItem]>,
+                            &'static str,
+                            Option<(SysAct, bool)>,
+                        ) = match &st.items[sel].kind {
+                            SysKind::Category(sub) => (Some(*sub), st.items[sel].label, None),
+                            SysKind::Action(a, n) => (None, st.items[sel].label, Some((*a, *n))),
+                        };
+                        if let Some(sub) = sub_opt {
+                            st.items = sub;
+                            st.title = label;
+                            st.sel = 0;
+                            st.confirm = false;
+                            st.at_root = false;
+                            Nav::Drill
+                        } else {
+                            let (act, needs) = act_opt.unwrap();
+                            if needs && !st.confirm {
+                                st.confirm = true;
+                                Nav::Confirm
+                            } else {
+                                Nav::Run(act)
+                            }
+                        }
+                    };
+                    match nav {
+                        Nav::Drill => sysmenu_layout(h),
+                        Nav::Confirm => {
+                            let _ = InvalidateRect(h, None, BOOL(0));
+                        }
+                        Nav::Run(a) => {
+                            sysmenu_close(h);
+                            sysmenu_exec(a);
+                        }
+                    }
+                }
+                SM_BACK => {
+                    enum B {
+                        Repaint,
+                        Layout,
+                        Close,
+                    }
+                    let b = {
+                        let mut st = SYSMENU_STATE.lock().unwrap();
+                        if st.confirm {
+                            st.confirm = false;
+                            B::Repaint
+                        } else if !st.at_root {
+                            st.items = SYS_ROOT;
+                            st.title = "System";
+                            st.sel = 0;
+                            st.at_root = true;
+                            B::Layout
+                        } else {
+                            B::Close
+                        }
+                    };
+                    match b {
+                        B::Repaint => {
+                            let _ = InvalidateRect(h, None, BOOL(0));
+                        }
+                        B::Layout => sysmenu_layout(h),
+                        B::Close => sysmenu_close(h),
+                    }
+                }
+                SM_CLOSE => {
+                    let cancel_only = {
+                        let mut st = SYSMENU_STATE.lock().unwrap();
+                        if st.confirm {
+                            st.confirm = false;
+                            true
+                        } else {
+                            false
+                        }
+                    };
+                    if cancel_only {
+                        let _ = InvalidateRect(h, None, BOOL(0));
+                    } else {
+                        sysmenu_close(h);
+                    }
+                }
+                _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_PAINT => {
+            sysmenu_paint(h);
+            LRESULT(0)
+        }
+        WM_ERASEBKGND => LRESULT(1),
+        _ => DefWindowProcW(h, msg, w, l),
+    }
+}
+
+/// System-menu thread: registers its class, creates the hidden popup, pumps its own
+/// message loop. Idle until the keyboard hook posts `WM_SYSMENU`.
+fn sysmenu_thread() {
+    unsafe {
+        let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(sysmenu_wndproc),
+            hInstance: hinst,
+            hbrBackground: CreateSolidBrush(COLORREF(LAUNCHER_BG)),
+            lpszClassName: w!("astur_sysmenu"),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        let hwnd = CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            w!("astur_sysmenu"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            SYSMENU_W,
+            400,
+            None,
+            None,
+            hinst,
+            None,
+        );
+        let Ok(hwnd) = hwnd else {
+            return;
+        };
+        make_launcher_font();
+        SYSMENU_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+        let pref = DWMWCP_ROUND;
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            &pref as *const _ as *const c_void,
+            std::mem::size_of_val(&pref) as u32,
+        );
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 fn main() {
     // Reveal every managed window if any thread panics. `panic = "abort"` skips
     // destructors and a process kill skips the console handler, so without this a
@@ -3988,6 +6227,23 @@ fn main() {
         // Workspace-slide compositor (owns its overlay + message pump; idle on a
         // condvar until the manager dispatches a slide).
         std::thread::spawn(transition_worker);
+        // Per-window glide compositor (move/open/close/re-tile). Own overlay +
+        // pump; idle on a condvar until the manager dispatches a glide.
+        std::thread::spawn(glide_worker);
+        // App launcher (Alt+Space): owns its picker window + message pump, idle
+        // until the keyboard hook posts an open/key message.
+        std::thread::spawn(launcher_thread);
+        // Resolve launcher app icons to HBITMAPs off the UI thread, in parallel so
+        // the whole list is iconned fast (each worker is a COM STA; they idle on a
+        // condvar once the queue drains). Count is a speed/RAM trade — see
+        // plan/optimization.md.
+        for _ in 0..3 {
+            std::thread::spawn(icon_worker);
+        }
+        // File search against the Windows Search index (debounced, own COM STA).
+        std::thread::spawn(filesearch_worker);
+        // System / power menu (Alt+Shift+Space): owns its popup + message pump.
+        std::thread::spawn(sysmenu_thread);
         // Hot-reload config files on save.
         std::thread::spawn(config_watcher);
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
@@ -4006,6 +6262,7 @@ fn main() {
         println!("  Alt+H / Alt+L  = shrink / grow the master area");
         println!("  Alt+F          = toggle float for focused window");
         println!("  Alt+W          = close focused window");
+        println!("  Alt+Space      = app launcher (type to filter, Enter to run)");
         println!("  Alt+Enter      = launch terminal");
         println!("  Alt+Shift+Enter= launch default browser");
         println!("  Alt+1..9,0     = switch workspace (or click a bar pill)");

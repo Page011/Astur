@@ -1,6 +1,6 @@
 [package]
 name = "astur"
-version = "1.0.0"
+version = "2.0.0-dev"
 edition = "2021"
 description = "Alt-drag move/resize + tiling window manager for Windows"
 license = "Apache-2.0"
@@ -36,4 +36,10 @@ features = [
     "Win32_System_Power",
     "Win32_Media",
     "Win32_Storage_Xps",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_Com",
+    "Win32_System_Search",
+    "Win32_System_Shutdown",
+    "Win32_Security",
 ]

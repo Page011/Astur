@@ -22,7 +22,9 @@ pub(crate) struct Config {
     pub(crate) focus_follows_mouse: bool,  // hovering a window focuses it (focus follows mouse)
     pub(crate) animations: bool,           // animate tiling moves + workspace slides
     pub(crate) animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
-    pub(crate) workspace_slide: bool,      // GPU thumbnail slide transition on workspace switch
+    pub(crate) workspace_slide: bool,      // back-compat: false forces workspace_anim = off
+    pub(crate) workspace_anim: String,     // workspace-switch style: off | slide | spring | fade
+    pub(crate) window_anim: String,        // window move/open/close/resize: off | glide
     pub(crate) bar_enabled: bool,          // draw the status bar on every monitor
     pub(crate) bar_height: i32,            // bar thickness in px (work area is reserved for it)
     pub(crate) bar_bottom: bool,           // dock the bar at the bottom instead of the top
@@ -77,6 +79,8 @@ impl Config {
             animations: true,
             animation_ms: 140,
             workspace_slide: true,
+            workspace_anim: "slide".to_string(),
+            window_anim: "glide".to_string(),
             bar_enabled: true,
             bar_height: 28,
             bar_bottom: false,
@@ -205,19 +209,33 @@ focus_follows_mouse = false
 # ---------------------------------------------------------------------------
 # Animations
 # ---------------------------------------------------------------------------
-# Opening, moving, and re-tiling glide windows to their target. Closing is
-# instant (the app destroys the window before it can be animated).
+# Animations apply to the WORKSPACE SWITCH. The switch itself is always instant
+# and correct underneath; the animation is a cosmetic overlay composited on top,
+# so it is smooth even with heavy apps (the apps themselves aren't moved).
+# Window open/close/move/resize placement is currently instant.
 
 # Enable animations.  bool
 animations = true
-# Animation duration in milliseconds. Lower = snappier, higher = smoother but
-# more window traffic. 0 disables (same as animations = false).  int 0-2000
+# Animation duration in milliseconds. Lower = snappier, higher = smoother.
+# 0 disables (same as animations = false).  int 0-2000
 animation_ms = 140
-# Workspace-switch slide. Freezes the screen on an overlay and slides GPU-
-# composited thumbnails of the new workspace in from the side — smooth even with
-# heavy apps (the apps themselves aren't moved). false = instant switch. Needs
-# animations = true.  bool
+# Workspace-switch animation style:
+#   off    - instant switch, no overlay
+#   slide  - old slides off one edge, new slides in from the other (default)
+#   spring - slide that overshoots the target then settles back (Hyprland-like)
+#   fade   - old fades out, new fades in, both in place
+# string
+workspace_anim = slide
+# Back-compat toggle. false forces workspace_anim = off; true leaves it as set.
+# Prefer workspace_anim above. Needs animations = true.  bool
 workspace_slide = true
+# Window move / open / close / re-tile animation:
+#   off   - instant placement
+#   glide - windows glide from their old position to the new tile slot. Opening a
+#           window glides it in from where it spawned; closing reflows the rest.
+#           Composited on a brief overlay (the real windows are placed instantly
+#           underneath), so it stays smooth even with heavy apps.  string
+window_anim = glide
 
 # ---------------------------------------------------------------------------
 # Appearance: window borders & dimming
@@ -524,6 +542,18 @@ fn parse_into(c: &mut Config, text: &str) {
                 }
             }
             "workspace_slide" => c.workspace_slide = parse_bool(v),
+            "workspace_anim" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "off" | "slide" | "spring" | "fade") {
+                    c.workspace_anim = m;
+                }
+            }
+            "window_anim" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "off" | "glide") {
+                    c.window_anim = m;
+                }
+            }
             "ignore_classes" => c.ignore_classes = parse_list(v),
             "float_classes" => c.float_classes = parse_list(v),
             "key_focus_next" => {
