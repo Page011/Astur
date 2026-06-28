@@ -1,45 +1,16 @@
-[package]
-name = "astur"
-version = "2.0.0-dev"
-edition = "2021"
-description = "Alt-drag move/resize + tiling window manager for Windows"
-license = "Apache-2.0"
-homepage = "https://astur.app"
-repository = "https://github.com/Page011/Astur"
-keywords = ["windows", "tiling", "window-manager", "alt-drag"]
-categories = ["os::windows-apis"]
+[workspace]
+resolver = "2"
+members = [
+    "crates/astur",          # the window manager (the binary users run)
+    "crates/astur-config",   # shared config parsing (WM + settings GUI)
+    "crates/astur-settings", # settings GUI (egui) — WIP
+]
 
-[[bin]]
-name = "astur"
-path = "src/main.rs"
-
+# Release profile applies workspace-wide. The WM still ships tiny: LTO, strip,
+# panic=abort, single codegen unit. (Astur Lite = the frozen v1.0.0 tag.)
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
-
-[dependencies.windows]
-version = "0.58"
-features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Gdi",
-    "Win32_Graphics_Dwm",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Accessibility",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Threading",
-    "Win32_System_Console",
-    "Win32_System_SystemInformation",
-    "Win32_System_Power",
-    "Win32_Media",
-    "Win32_Storage_Xps",
-    "Win32_UI_Shell",
-    "Win32_UI_Shell_Common",
-    "Win32_System_Com",
-    "Win32_System_Search",
-    "Win32_System_Shutdown",
-    "Win32_Security",
-]

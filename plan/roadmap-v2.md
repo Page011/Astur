@@ -116,9 +116,12 @@ a strong candidate to live in the v2 experience.
 ## Suggested order
 
 1. (done) CONTAINS speed fix.
-2. System-menu categories (small, in current code).
-3. Settings GUI MVP (`astur-settings` egui app editing the conf) — the big adoption win.
-4. winget/installer packaging.
-5. Tab sortable columns.
-6. MFT index (feature-gated) for true instant + big result sets.
-7. Workspace restructure (config crate) somewhere around 3–6.
+2. (done) System-menu categories.
+3. (done 2026-06-28) Workspace restructure — `crates/astur` (WM),
+   `crates/astur-config` (shared, Win32-free), `crates/astur-settings` (egui stub).
+   Astur Lite stays the frozen `v1.0.0` tag.
+4. **Settings GUI MVP** (`astur-settings` egui app editing the conf via `astur-config`)
+   — the big adoption win. Separate process; never link into the WM.
+5. winget/installer packaging (bundle WM + GUI + autostart; keep the portable exe too).
+6. Tab sortable columns.
+7. MFT index (feature-gated `astur-index` crate) for true instant + big result sets.

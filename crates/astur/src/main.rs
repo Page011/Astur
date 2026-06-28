@@ -20,8 +20,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, Ordering}
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Instant;
 
-mod config;
 mod layout;
+// Config now lives in the shared `astur-config` crate (the settings GUI parses the
+// same model). Aliased to `config` so the rest of this file is unchanged.
+use astur_config as config;
 use config::{config_path, load_config, Config};
 use layout::{dwindle_layout, master_stack, resize_dwindle, split_ratio};
 

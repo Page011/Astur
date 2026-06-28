@@ -1,0 +1,9 @@
+[package]
+name = "astur-config"
+version = "2.0.0-dev"
+edition = "2021"
+description = "Astur configuration parsing — shared by the WM and the settings GUI"
+license = "Apache-2.0"
+
+[lib]
+path = "src/lib.rs"

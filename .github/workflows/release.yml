@@ -20,7 +20,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --release -p astur
 
       - name: Stage artifact
         run: Copy-Item target\release\astur.exe astur-windows-x64.exe

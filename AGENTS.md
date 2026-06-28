@@ -40,10 +40,13 @@ untouched. Alt+Tab still works via a synthetic Alt.
 
 ## Build / run / quit
 
+Cargo workspace (v2). Astur Lite = the frozen `v1.0.0` tag; this tree is the full
+"Astur". See `plan/roadmap-v2.md`.
+
 ```bash
-cargo build --release          # target/release/astur.exe  (LTO, strip, panic=abor/usat)
-cargo build                    # fast debug build for iterating
-cargo run                      # run from source
+cargo build --release -p astur # target/release/astur.exe  (LTO, strip, panic=abort)
+cargo build                    # fast debug build of the whole workspace
+cargo run -p astur             # run the WM from source
 ```
 
 Quit: `Ctrl+C` in the console (runs `restore_all_windows`), or kill the process.
@@ -51,17 +54,18 @@ Quit: `Ctrl+C` in the console (runs `restore_all_windows`), or kill the process.
 Config lives in `%USERPROFILE%\.astur\astur.conf` + `navbar.conf`, both created
 on first run, fully commented, **hot-reloaded on save**.
 
-## File map
+## File map (workspace)
 
 | File | Lines (approx) | What |
 |---|---|---|
-| `src/main.rs` | ~3900 | Everything Win32: hooks, worker threads, manager, bar, animations. One big file by design (single TU, fast build, no module ceremony). |
-| `src/config.rs` | ~600 | `Config` struct, documented-default file templates, key/value parser. **No Win32** — pure data. |
-| `src/layout.rs` | ~250 | `dwindle_layout` + `master_stack` geometry. Pure math, no Win32. |
-| `Cargo.toml` | — | `windows` crate 0.58 + feature list. Release profile tuned for size/speed. |
+| `crates/astur/src/main.rs` | ~5500 | Everything Win32: hooks, worker threads, manager, bar, animations, launcher, file search, system menu. One big file by design (single TU, fast build). |
+| `crates/astur/src/layout.rs` | ~250 | `dwindle_layout` + `master_stack` geometry. `RECT` type only, no Win32 calls. |
+| `crates/astur-config/src/lib.rs` | ~600 | `Config` struct, documented-default file templates, key/value parser. **No Win32** — pure data, shared with the settings GUI (aliased `config` in the WM). |
+| `crates/astur-settings/` | stub | Settings GUI (egui, WIP). Separate process — a GUI crash can't touch the WM. |
+| `Cargo.toml` (root) | — | `[workspace]` manifest + release profile. WM deps live in `crates/astur/Cargo.toml`. |
 
 `main.rs` is large but sectioned with `// ====` banners. Use the function map
-(`grep -n "^fn \|^unsafe extern\|^struct \|^static " src/main.rs`) to navigate.
+(`grep -n "^fn \|^unsafe extern\|^struct \|^static " crates/astur/src/main.rs`).
 
 ## Threads (mental model)
 

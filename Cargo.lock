@@ -4,10 +4,19 @@ version = 4
 
 [[package]]
 name = "astur"
-version = "1.0.0"
+version = "2.0.0-dev"
 dependencies = [
+ "astur-config",
  "windows",
 ]
+
+[[package]]
+name = "astur-config"
+version = "2.0.0-dev"
+
+[[package]]
+name = "astur-settings"
+version = "2.0.0-dev"
 
 [[package]]
 name = "proc-macro2"

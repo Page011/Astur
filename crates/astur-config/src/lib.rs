@@ -3,62 +3,62 @@
 
 /// Runtime configuration, loaded from astur.conf + navbar.conf at startup.
 #[derive(Clone)]
-pub(crate) struct Config {
-    pub(crate) per_monitor: bool,          // true: Alt+1..9 switches focused monitor only
-    pub(crate) start_tiled: bool,          // tile automatically on launch
-    pub(crate) outer_gap: i32,             // gap between windows and screen edge
-    pub(crate) inner_gap: i32,             // gap between adjacent windows
-    pub(crate) master_ratio: f32,          // fraction of width given to the master window
-    pub(crate) workspaces: usize,          // workspaces per monitor (1..10)
-    pub(crate) workspace_keys: Vec<u32>,   // VK code per workspace; Alt+key switches, +Shift moves
-    pub(crate) layout: String,             // "dwindle" (spiral into a corner) or "master"
-    pub(crate) terminal: String,           // command launched by Alt+Enter
-    pub(crate) browser: String,            // Alt+Shift+Enter; empty = default browser
-    pub(crate) unfocused_opacity: f32,     // 0.0-1.0 alpha for unfocused windows (1.0 = off)
-    pub(crate) border_enabled: bool,       // draw coloured DWM borders (Windows 11)
-    pub(crate) focused_border: u32,        // COLORREF for the focused window border
-    pub(crate) unfocused_border: u32,      // COLORREF for unfocused window borders
-    pub(crate) cursor_follows_focus: bool, // warp the mouse to the focused window
-    pub(crate) focus_follows_mouse: bool,  // hovering a window focuses it (focus follows mouse)
-    pub(crate) animations: bool,           // animate tiling moves + workspace slides
-    pub(crate) animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
-    pub(crate) workspace_slide: bool,      // back-compat: false forces workspace_anim = off
-    pub(crate) workspace_anim: String,     // workspace-switch style: off | slide | spring | fade
-    pub(crate) window_anim: String,        // window move/open/close/resize: off | glide
-    pub(crate) bar_enabled: bool,          // draw the status bar on every monitor
-    pub(crate) bar_height: i32,            // bar thickness in px (work area is reserved for it)
-    pub(crate) bar_bottom: bool,           // dock the bar at the bottom instead of the top
-    pub(crate) bar_font_size: i32,         // text height in px; 0 = auto from bar_height
-    pub(crate) bar_show_title: bool,       // show the focused window title
-    pub(crate) bar_show_clock: bool,       // show the clock
-    pub(crate) bar_clock_24h: bool,        // 24-hour clock (false = 12-hour with am/pm)
-    pub(crate) bar_show_layout: bool,      // show layout + tiling/floating state on the right
-    pub(crate) bar_bg: u32,                // COLORREF bar background
-    pub(crate) bar_fg: u32,                // COLORREF bar text
-    pub(crate) bar_accent: u32,            // COLORREF active-workspace highlight
-    pub(crate) bar_inactive: u32,          // COLORREF empty-workspace text
-    pub(crate) bar_font_name: String,      // font family (default "Segoe UI")
-    pub(crate) bar_hide_empty: bool,       // hide empty workspace pills
-    pub(crate) bar_padding: i32,           // horizontal padding from each screen edge (px)
-    pub(crate) bar_show_date: bool,        // show the date widget
-    pub(crate) bar_date_format: String,    // date token string, e.g. "ddd dd MMM"
-    pub(crate) bar_show_cpu: bool,         // show CPU load %
-    pub(crate) bar_show_mem: bool,         // show RAM load %
-    pub(crate) bar_show_battery: bool,     // show battery %
-    pub(crate) ignore_classes: Vec<String>, // window classes never tiled/managed
-    pub(crate) float_classes: Vec<String>,   // window classes managed but auto-floated
-    pub(crate) key_focus_next: u32,        // Alt+<key> focus next window in the stack (default J)
-    pub(crate) key_focus_prev: u32,        // Alt+<key> focus previous window in the stack (default K)
-    pub(crate) key_shrink_master: u32,     // Alt+<key> shrink the master area (default H)
-    pub(crate) key_grow_master: u32,       // Alt+<key> grow the master area (default L)
-    pub(crate) key_promote_master: u32,    // Alt+<key> promote focused window to master (default M)
-    pub(crate) key_toggle_tiling: u32,     // Alt+<key> toggle tiling on/off (default T)
-    pub(crate) key_toggle_float: u32,      // Alt+<key> toggle floating for focused window (default F)
-    pub(crate) key_close_window: u32,      // Alt+<key> close the focused window (default W)
+pub struct Config {
+    pub per_monitor: bool,          // true: Alt+1..9 switches focused monitor only
+    pub start_tiled: bool,          // tile automatically on launch
+    pub outer_gap: i32,             // gap between windows and screen edge
+    pub inner_gap: i32,             // gap between adjacent windows
+    pub master_ratio: f32,          // fraction of width given to the master window
+    pub workspaces: usize,          // workspaces per monitor (1..10)
+    pub workspace_keys: Vec<u32>,   // VK code per workspace; Alt+key switches, +Shift moves
+    pub layout: String,             // "dwindle" (spiral into a corner) or "master"
+    pub terminal: String,           // command launched by Alt+Enter
+    pub browser: String,            // Alt+Shift+Enter; empty = default browser
+    pub unfocused_opacity: f32,     // 0.0-1.0 alpha for unfocused windows (1.0 = off)
+    pub border_enabled: bool,       // draw coloured DWM borders (Windows 11)
+    pub focused_border: u32,        // COLORREF for the focused window border
+    pub unfocused_border: u32,      // COLORREF for unfocused window borders
+    pub cursor_follows_focus: bool, // warp the mouse to the focused window
+    pub focus_follows_mouse: bool,  // hovering a window focuses it (focus follows mouse)
+    pub animations: bool,           // animate tiling moves + workspace slides
+    pub animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
+    pub workspace_slide: bool,      // back-compat: false forces workspace_anim = off
+    pub workspace_anim: String,     // workspace-switch style: off | slide | spring | fade
+    pub window_anim: String,        // window move/open/close/resize: off | glide
+    pub bar_enabled: bool,          // draw the status bar on every monitor
+    pub bar_height: i32,            // bar thickness in px (work area is reserved for it)
+    pub bar_bottom: bool,           // dock the bar at the bottom instead of the top
+    pub bar_font_size: i32,         // text height in px; 0 = auto from bar_height
+    pub bar_show_title: bool,       // show the focused window title
+    pub bar_show_clock: bool,       // show the clock
+    pub bar_clock_24h: bool,        // 24-hour clock (false = 12-hour with am/pm)
+    pub bar_show_layout: bool,      // show layout + tiling/floating state on the right
+    pub bar_bg: u32,                // COLORREF bar background
+    pub bar_fg: u32,                // COLORREF bar text
+    pub bar_accent: u32,            // COLORREF active-workspace highlight
+    pub bar_inactive: u32,          // COLORREF empty-workspace text
+    pub bar_font_name: String,      // font family (default "Segoe UI")
+    pub bar_hide_empty: bool,       // hide empty workspace pills
+    pub bar_padding: i32,           // horizontal padding from each screen edge (px)
+    pub bar_show_date: bool,        // show the date widget
+    pub bar_date_format: String,    // date token string, e.g. "ddd dd MMM"
+    pub bar_show_cpu: bool,         // show CPU load %
+    pub bar_show_mem: bool,         // show RAM load %
+    pub bar_show_battery: bool,     // show battery %
+    pub ignore_classes: Vec<String>, // window classes never tiled/managed
+    pub float_classes: Vec<String>,   // window classes managed but auto-floated
+    pub key_focus_next: u32,        // Alt+<key> focus next window in the stack (default J)
+    pub key_focus_prev: u32,        // Alt+<key> focus previous window in the stack (default K)
+    pub key_shrink_master: u32,     // Alt+<key> shrink the master area (default H)
+    pub key_grow_master: u32,       // Alt+<key> grow the master area (default L)
+    pub key_promote_master: u32,    // Alt+<key> promote focused window to master (default M)
+    pub key_toggle_tiling: u32,     // Alt+<key> toggle tiling on/off (default T)
+    pub key_toggle_float: u32,      // Alt+<key> toggle floating for focused window (default F)
+    pub key_close_window: u32,      // Alt+<key> close the focused window (default W)
 }
 
 impl Config {
-    pub(crate) fn defaults() -> Self {
+    pub fn defaults() -> Self {
         Config {
             per_monitor: false,
             start_tiled: true,
@@ -378,7 +378,7 @@ accent = #66AAFF
 inactive = #565F89
 ";
 
-pub(crate) fn parse_bool(v: &str) -> bool {
+pub fn parse_bool(v: &str) -> bool {
     matches!(v.to_ascii_lowercase().as_str(), "true" | "yes" | "1" | "on")
 }
 
@@ -391,7 +391,7 @@ fn parse_list(v: &str) -> Vec<String> {
 }
 
 /// Map a key name ("1", "Q", "F3") to its Win32 virtual-key code.
-pub(crate) fn key_to_vk(name: &str) -> Option<u32> {
+pub fn key_to_vk(name: &str) -> Option<u32> {
     let n = name.trim().to_ascii_uppercase();
     let b = n.as_bytes();
     if b.len() == 1 {
@@ -440,7 +440,7 @@ fn parse_color(v: &str, fallback: u32) -> u32 {
 }
 
 /// Resolve a config file path: env override, else %USERPROFILE%\.astur\<name>.
-pub(crate) fn config_path(env: &str, name: &str) -> std::path::PathBuf {
+pub fn config_path(env: &str, name: &str) -> std::path::PathBuf {
     if let Ok(p) = std::env::var(env) {
         return std::path::PathBuf::from(p);
     }
@@ -469,7 +469,7 @@ fn read_or_create(path: &std::path::Path, default: &str) -> String {
 
 /// Load settings from astur.conf (window manager) and navbar.conf (status
 /// bar), creating each with documented defaults when missing.
-pub(crate) fn load_config() -> Config {
+pub fn load_config() -> Config {
     let mut c = Config::defaults();
     let wm = config_path("ASTUR_CONFIG", "astur.conf");
     parse_into(&mut c, &read_or_create(&wm, DEFAULT_CONFIG));

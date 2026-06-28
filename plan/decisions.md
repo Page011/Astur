@@ -2,6 +2,13 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-06-28 — Repo restructured into a **Cargo workspace** for v2: `crates/astur`
+  (WM, moved from `src/`), `crates/astur-config` (config extracted to a shared lib,
+  `pub`, Win32-free — the GUI will parse the same model; aliased `config` in the WM),
+  `crates/astur-settings` (egui GUI, stub). Astur Lite = the frozen `v1.0.0` tag (no
+  fork). Release workflow builds `-p astur`. (`roadmap-v2.md`, CLAUDE.md, AGENTS.md)
+- 2026-06-28 — v2 base committed (`5c530ab`); never add a Claude co-author trailer to
+  commits (user preference, saved to memory).
 - 2026-06-27 — File search sped up ~8×: `LIKE '%q%'` (914ms, full index scan) →
   `CONTAINS(System.FileName, '"q*"')` (108ms, full-text index) + debounce 120→45ms.
   Word-prefix not substring; true Everything-speed needs the MFT index (v2).

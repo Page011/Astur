@@ -1,0 +1,41 @@
+[package]
+name = "astur"
+version = "2.0.0-dev"
+edition = "2021"
+description = "Alt-drag move/resize + tiling window manager for Windows"
+license = "Apache-2.0"
+homepage = "https://astur.app"
+repository = "https://github.com/Page011/Astur"
+keywords = ["windows", "tiling", "window-manager", "alt-drag"]
+categories = ["os::windows-apis"]
+
+[[bin]]
+name = "astur"
+path = "src/main.rs"
+
+[dependencies]
+astur-config = { path = "../astur-config" }
+
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dwm",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_System_Console",
+    "Win32_System_SystemInformation",
+    "Win32_System_Power",
+    "Win32_Media",
+    "Win32_Storage_Xps",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_System_Com",
+    "Win32_System_Search",
+    "Win32_System_Shutdown",
+    "Win32_Security",
+]

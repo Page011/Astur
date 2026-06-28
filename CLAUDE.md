@@ -41,20 +41,33 @@ window animations. Left Alt is the reserved modifier (apps never see it).
 4. **Tile placement is INSTANT.** `animate_to` is a historical name — leave it
    instant. Real glide goes through the snapshot overlay, never per-frame
    real-window `SetWindowPos` (tried, removed — see `plan/known-issues.md`).
-5. Keep `config.rs` + `layout.rs` Win32-free (the only trivially-testable parts).
+5. Keep `astur-config` (+ `layout.rs`) Win32-free / Win32-light — the trivially
+   testable parts. `astur-config` is its own crate now and has zero Win32.
 
-## Code layout
+## Code layout (Cargo workspace, v2)
 
-- `src/main.rs` — everything Win32: hooks, manager loop, compositors, bar. One
-  big translation unit by design (fast build, no module ceremony).
-- `src/config.rs` — pure parsing → `Config`. No Win32.
-- `src/layout.rs` — pure geometry (`dwindle_layout`, `master_stack`). No Win32.
+The repo is a Cargo workspace. Astur Lite = the frozen `v1.0.0` git tag (single exe,
+pre-workspace); the workspace below is the evolving full "Astur" (v2). See
+`plan/roadmap-v2.md`.
+
+- `crates/astur/src/main.rs` — everything Win32: hooks, manager loop, compositors,
+  bar, launcher, system menu, file search. One big translation unit by design (fast
+  build, no module ceremony). The binary users run.
+- `crates/astur/src/layout.rs` — pure geometry (`dwindle_layout`, `master_stack`).
+  Uses the `RECT` type only; no Win32 calls.
+- `crates/astur-config/src/lib.rs` — pure parsing → `Config`. **No Win32.** Shared by
+  the WM and the (WIP) settings GUI so they never drift; aliased as `config` in the WM.
+- `crates/astur-settings/` — the settings GUI (egui, WIP — stub for now).
+
+NOTE: plan/ docs written before the workspace say `src/main.rs` / `src/config.rs` —
+those now map to `crates/astur/src/main.rs` / `crates/astur-config/src/lib.rs`.
 
 ## Build / verify
 
 Default toolchain is MSVC. If the MSVC linker isn't reachable in the shell
 (no `link.exe` / no `vcvars`), build with the installed self-contained GNU
-toolchain to verify compilation:
+toolchain to verify compilation (from the workspace root builds all crates; add
+`-p astur` for just the WM):
 
 ```
 cargo +stable-x86_64-pc-windows-gnu build --target x86_64-pc-windows-gnu
