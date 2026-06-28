@@ -30,3 +30,5 @@ jobs:
         with:
           files: astur-windows-x64.exe
           generate_release_notes: true
+          # Hyphenated semver tags (v2.0.0-alpha.1, -beta, -rc) publish as pre-releases.
+          prerelease: ${{ contains(github.ref_name, '-') }}
