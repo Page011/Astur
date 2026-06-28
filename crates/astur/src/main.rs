@@ -70,8 +70,9 @@ use windows::Win32::UI::Shell::{
     NIF_MESSAGE, NIF_TIP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyMenu, LoadIconW, PostQuitMessage, TrackPopupMenu,
-    IDI_APPLICATION, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK,
+    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyMenu, LoadIconW, PostQuitMessage,
+    TrackPopupMenu, HICON, IDI_APPLICATION, LR_DEFAULTCOLOR, MF_STRING, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK,
 };
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::System::Com::{
@@ -6078,6 +6079,17 @@ const WM_TRAY: u32 = WM_USER + 20;
 const TRAY_SETTINGS: usize = 1;
 const TRAY_QUIT: usize = 2;
 
+// The Astur logo (site favicon, 32x32 transparent), embedded so the tray icon needs
+// no external file or resource compiler.
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+
+/// Build the tray HICON from the embedded PNG (Win10/11 accept PNG icon bits).
+/// Falls back to the stock application icon if creation fails.
+unsafe fn tray_icon() -> HICON {
+    CreateIconFromResourceEx(TRAY_ICON_PNG, BOOL(1), 0x0003_0000, 0, 0, LR_DEFAULTCOLOR)
+        .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default())
+}
+
 unsafe fn tray_add(hwnd: HWND) {
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -6085,7 +6097,7 @@ unsafe fn tray_add(hwnd: HWND) {
         uID: 1,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAY,
-        hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+        hIcon: tray_icon(),
         ..Default::default()
     };
     for (i, c) in "Astur".encode_utf16().enumerate().take(127) {
