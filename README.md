@@ -1,13 +1,17 @@
-# Astur — Tiling Window Manager for Windows
+# Astur Lite — Tiling Window Manager for Windows
 
-**Astur** is a fast, free, open-source **tiling window manager for Windows**
+**Astur Lite** is a fast, free, open-source **tiling window manager for Windows**
 with **Alt-drag** window movement, nearest-corner resize,
 dwindle/master tiling, a per-monitor status bar, and up to 10 virtual
-workspaces — all in a single portable Rust `.exe` with no installer. A
-lightweight alternative to
+workspaces — all in a single portable Rust `.exe` with no installer (~1 MB,
+console window). A lightweight alternative to
 [komorebi](https://github.com/LGUG2Z/komorebi),
 [GlazeWM](https://github.com/glzr-io/glazewm), and PowerToys FancyZones for
 keyboard-driven, i3-style window management on Windows 10 and 11.
+
+> **Astur Lite** is the minimal edition. Want an **app launcher + file search**
+> (Alt+Space), a **power menu** (Alt+Shift+Space), a **tray icon**, and a settings
+> GUI? Use the full **[Astur](https://github.com/Page011/Astur)** (the `main` branch).
 
 [![GitHub release](https://img.shields.io/github/v/release/Page011/Astur)](https://github.com/Page011/Astur/releases/latest)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
