@@ -13,8 +13,10 @@
 // Both hooks run on this process's message-loop thread, so all drag state lives
 // behind a single Mutex with effectively zero contention.
 
-// Uncomment to run without a console window (release builds):
-// #![windows_subsystem = "windows"]
+// Astur Full ships without a console window — the tray icon is the control surface
+// (Settings / Quit). Release only, so debug builds keep the console for development.
+// (Astur Lite, the `lite` branch, keeps its console.)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -64,8 +66,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{
     ShellExecuteW, SHCreateItemFromParsingName, IShellItem, IEnumShellItems,
     IShellItemImageFactory, BHID_EnumItems, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
-    SIIGBF_ICONONLY,
+    SIIGBF_ICONONLY, Shell_NotifyIconW, NOTIFYICONDATAW, NIM_ADD, NIM_DELETE, NIF_ICON,
+    NIF_MESSAGE, NIF_TIP,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    AppendMenuW, CreatePopupMenu, DestroyMenu, LoadIconW, PostQuitMessage, TrackPopupMenu,
+    IDI_APPLICATION, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK,
+};
+use std::os::windows::ffi::OsStrExt;
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
@@ -6060,6 +6068,121 @@ fn sysmenu_thread() {
     }
 }
 
+// =========================================================================
+// System tray icon (Astur Full): the control surface when there's no console.
+// Left/double-click -> Settings; right-click -> Settings / Quit. Quit restores
+// all managed windows then exits. See plan/editions.md.
+// =========================================================================
+
+const WM_TRAY: u32 = WM_USER + 20;
+const TRAY_SETTINGS: usize = 1;
+const TRAY_QUIT: usize = 2;
+
+unsafe fn tray_add(hwnd: HWND) {
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_TRAY,
+        hIcon: LoadIconW(None, IDI_APPLICATION).unwrap_or_default(),
+        ..Default::default()
+    };
+    for (i, c) in "Astur".encode_utf16().enumerate().take(127) {
+        nid.szTip[i] = c;
+    }
+    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+unsafe fn tray_remove(hwnd: HWND) {
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+/// Launch the sibling settings GUI (`astur-settings.exe` next to this exe).
+unsafe fn tray_open_settings() {
+    let Ok(exe) = std::env::current_exe() else { return };
+    let Some(dir) = exe.parent() else { return };
+    let path = dir.join("astur-settings.exe");
+    let p: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
+    ShellExecuteW(
+        HWND(std::ptr::null_mut()),
+        PCWSTR(op.as_ptr()),
+        PCWSTR(p.as_ptr()),
+        PCWSTR::null(),
+        PCWSTR::null(),
+        SW_SHOW,
+    );
+}
+
+unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_TRAY {
+        // Classic NOTIFYICON callback: lParam low word = the mouse message.
+        let event = (l.0 as u32) & 0xFFFF;
+        if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+            tray_open_settings();
+        } else if event == WM_RBUTTONUP {
+            if let Ok(menu) = CreatePopupMenu() {
+                let s1: Vec<u16> = "Settings\0".encode_utf16().collect();
+                let s2: Vec<u16> = "Quit\0".encode_utf16().collect();
+                let _ = AppendMenuW(menu, MF_STRING, TRAY_SETTINGS, PCWSTR(s1.as_ptr()));
+                let _ = AppendMenuW(menu, MF_STRING, TRAY_QUIT, PCWSTR(s2.as_ptr()));
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                // Required so the menu dismisses when you click elsewhere.
+                let _ = SetForegroundWindow(h);
+                let cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, h, None);
+                let _ = DestroyMenu(menu);
+                match cmd.0 as usize {
+                    TRAY_SETTINGS => tray_open_settings(),
+                    TRAY_QUIT => {
+                        tray_remove(h);
+                        restore_all_windows();
+                        PostQuitMessage(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return LRESULT(0);
+    }
+    DefWindowProcW(h, msg, w, l)
+}
+
+/// Register + create the hidden tray window and add the tray icon. Returns its HWND.
+unsafe fn setup_tray(hinst: HINSTANCE) -> Option<HWND> {
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(tray_wndproc),
+        hInstance: hinst,
+        lpszClassName: w!("astur_tray"),
+        ..Default::default()
+    };
+    RegisterClassW(&wc);
+    let hwnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        w!("astur_tray"),
+        w!("Astur"),
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        hinst,
+        None,
+    )
+    .ok()?;
+    tray_add(hwnd);
+    Some(hwnd)
+}
+
 fn main() {
     // Reveal every managed window if any thread panics. `panic = "abort"` skips
     // destructors and a process kill skips the console handler, so without this a
@@ -6219,6 +6342,10 @@ fn main() {
             0,
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
         );
+
+        // System tray icon — the control surface for Astur Full (no console in
+        // release): left/double-click opens Settings, right-click menu = Settings/Quit.
+        let _tray = setup_tray(hinst);
 
         // Apply window moves/resizes off the input thread for smoothness.
         std::thread::spawn(position_worker);

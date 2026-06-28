@@ -2,6 +2,11 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-06-28 — Astur Full: tray icon + no-console SHIPPED. Release builds drop the
+  console (`cfg_attr(not(debug_assertions), windows_subsystem="windows")`); a
+  `Shell_NotifyIcon` tray is the control surface (Settings launches the sibling
+  `astur-settings.exe`; Quit restores windows + exits). Placeholder icon for now.
+  (`editions.md`)
 - 2026-06-28 — Editions split: Lite changed from frozen tag → **maintained `lite`
   branch** (created at `cc7e441`/v1.0.0). Lite = minimal console exe, core-only
   efficiency/quality updates; `main` = full app (tray + GUI + launcher + search +

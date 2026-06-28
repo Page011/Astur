@@ -58,10 +58,13 @@ leaner."
 
 ## Full's distinguishing work (on `main`)
 
-1. **Tray icon + no console** — `#![windows_subsystem = "windows"]` (drop the console)
-   + `Shell_NotifyIcon` tray icon. Left-click / double-click → open Settings; right-click
-   menu → Settings / Quit. **Quit must `restore_all_windows` then exit** (no console, so
-   no Ctrl+C path). This is the control surface for non-technical users. Embed an `.ico`.
+1. **Tray icon + no console** — SHIPPED 2026-06-28. `#![cfg_attr(not(debug_assertions),
+   windows_subsystem = "windows")]` drops the console in **release** (debug keeps it for
+   dev). `setup_tray` adds a `Shell_NotifyIcon`: left/double-click → `tray_open_settings`
+   (launches the sibling `astur-settings.exe`); right-click → popup menu Settings / Quit;
+   **Quit = `tray_remove` + `restore_all_windows` + `PostQuitMessage`** (the only exit
+   path now there's no console). Still TODO: embed a **custom `.ico`** (currently the
+   generic `IDI_APPLICATION` — needs an icon asset + a build script, e.g. `winres`).
 2. **Settings GUI** (`astur-settings`, egui) editing `astur.conf` via `astur-config`
    (needs a `save_config(&Config) -> String` writer). Separate process.
 3. **Installer** (winget first, then MSI/Inno): bundle WM exe + `astur-settings.exe` +
