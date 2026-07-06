@@ -2,6 +2,13 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-07 — **Astur Lite v1.0.1 SHIPPED** (tag `v1.0.1` on `lite`). First
+  maintained Lite release: the three v2 efficiency/quality backports — lockless
+  `PRESSED` (`[AtomicBool;256]` off the keyboard hot path), `switch_plain` index
+  iteration (no per-switch Vec clone), and the 2nd-gen workspace-switch flash fix
+  (frame 0 = exact `out_bmp` capture, not `compose(0)`; show overlay before
+  blitting frame 0; `UpdateWindow`+`DwmFlush`). No features — Lite's remit.
+  (`editions.md`)
 - 2026-06-28 — Astur Full: tray icon + no-console SHIPPED. Release builds drop the
   console (`cfg_attr(not(debug_assertions), windows_subsystem="windows")`); a
   `Shell_NotifyIcon` tray is the control surface (Settings launches the sibling

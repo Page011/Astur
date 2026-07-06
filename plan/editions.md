@@ -47,14 +47,22 @@ consume, with Full's extras behind a `full` cargo feature — then Lite is
 `--no-default-features` of the same code and backports vanish. Big refactor; revisit if
 the backport tax becomes annoying.
 
-## Lite's first maintained release — v1.0.1 (proposed)
+## Lite's first maintained release — v1.0.1 (SHIPPED 2026-07-07)
 
-Pure efficiency/quality, no features — exactly Lite's remit. Port from `main`'s v2 work:
-1. **Workspace-switch flash fix** (show overlay before presenting frame 0) — a real bug.
-2. **Lockless `PRESSED`** bitset (drop a Mutex from the keyboard hot path).
-3. **`switch_plain`** no longer clones the window Vec per switch.
-Then tag `v1.0.1`, build the portable exe. Marketing: "Astur Lite 1.0.1 — smoother,
-leaner."
+Pure efficiency/quality, no features — exactly Lite's remit. Ported from `main`'s v2 work,
+tag `v1.0.1` on the `lite` branch (commit `7649908`):
+1. **Workspace-switch flash fix (2nd gen)** — frame 0 is now the EXACT live capture
+   (`out_bmp`) instead of `compose(0)` (which could sub-pixel-mismatch the wallpaper and
+   flash); the overlay is shown BEFORE frame 0 is blitted to its DC (blitting to a hidden
+   window is clipped and lost — the original flash cause), then `UpdateWindow` + `DwmFlush`
+   settle frame 0 onto the glass before the real switch. Lite previously had only the 1st-gen
+   fix (compose-then-show), which still flashed.
+2. **Lockless `PRESSED`** — `Mutex<[bool;256]>` → `[AtomicBool;256]`; the keyboard hook no
+   longer takes a lock to debounce a held hotkey.
+3. **`switch_plain`** iterates the window Vec by index — no clone per switch.
+
+The GH Actions `Release` workflow (tag `v*`) builds `astur-windows-x64.exe` and cuts the
+GitHub release automatically. Marketing: "Astur Lite 1.0.1 — smoother, leaner."
 
 ## Full's distinguishing work (on `main`)
 
