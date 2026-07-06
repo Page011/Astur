@@ -35,7 +35,7 @@ use windows::Win32::Graphics::Gdi::{
     CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
-    SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    SetWindowRgn, UpdateWindow, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
     DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
     DT_VCENTER, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
     PAINTSTRUCT, RGN_OR, SRCCOPY, TRANSPARENT,
@@ -66,7 +66,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use std::collections::{HashMap, VecDeque};
 use core::ffi::c_void;
 use windows::Win32::Graphics::Dwm::{
-    DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
     DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
@@ -334,7 +334,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
 
             // Clear the auto-repeat guard on release.
             if up && (kb.vkCode as usize) < 256 {
-                PRESSED.lock().unwrap()[kb.vkCode as usize] = false;
+                PRESSED[kb.vkCode as usize].store(false, Ordering::Relaxed);
             }
 
             if kb.vkCode == VK_LMENU.0 as u32 {
@@ -368,10 +368,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 let shift = vk_down(VK_SHIFT);
                 if let Some(cmd) = resolve_hotkey(kb.vkCode, shift) {
                     let vk = kb.vkCode as usize;
-                    let mut p = PRESSED.lock().unwrap();
-                    if vk < 256 && !p[vk] {
-                        p[vk] = true;
-                        drop(p);
+                    // swap(true): push only on the first down (debounce auto-repeat),
+                    // re-armed by the key-up store above. Lockless on the hot path.
+                    if vk < 256 && !PRESSED[vk].swap(true, Ordering::Relaxed) {
                         push_cmd(cmd);
                     }
                     return LRESULT(1);
@@ -697,7 +696,9 @@ static CMDCV: Condvar = Condvar::new();
 // While true, programmatic show/hide must not be mistaken for app events.
 static SUPPRESS: AtomicBool = AtomicBool::new(false);
 // De-duplicates auto-repeat key-downs for our hotkeys.
-static PRESSED: Mutex<[bool; 256]> = Mutex::new([false; 256]);
+// Per-VK auto-repeat guard. Atomic (not a Mutex) so the keyboard hook — on the
+// OS-wide input path — never takes a lock to debounce a held hotkey.
+static PRESSED: [AtomicBool; 256] = [const { AtomicBool::new(false) }; 256];
 // Every window the manager currently tracks (across all monitors/workspaces).
 // Kept in sync by the manager so the shutdown handler can reveal them all.
 static MANAGED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
@@ -2008,14 +2009,31 @@ unsafe fn run_transition(req: SlideReq) {
         }
     };
 
-    // Paint frame 0 (off = 0: outgoing windows at their current spots over the
-    // still wallpaper, identical to what's on screen) BEFORE showing the overlay,
-    // so raising it causes no flash. Then signal the manager that the monitor is
-    // covered, so it can do the real switch underneath without the destination
-    // workspace flashing first.
-    compose(0);
-    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+    // Paint frame 0 BEFORE showing the overlay so raising it causes no flash.
+    // CRITICAL: frame 0 must be pixel-identical to what's already on screen, or
+    // the instant the overlay is raised it pops (the "flash before the slide").
+    // `compose(0)` rebuilds the frame from the wallpaper capture + window rects;
+    // if that wallpaper differs even slightly from the live DWM-composited desktop
+    // (acrylic/transparency, sub-pixel crop), the gaps flash on raise. So for
+    // frame 0 we blit the EXACT live screen capture (`out_bmp`, grabbed by
+    // `capture_monitor` a moment ago) straight through — a guaranteed match. The
+    // wallpaper-composited path only kicks in once the windows actually start
+    // moving (off != 0), where a sub-pixel gap diff is invisible under motion.
+    let _ = BitBlt(backdc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
+    // CRITICAL ORDER — show the overlay FIRST, then present frame 0 to its DC.
+    // Blitting to the window DC while the overlay is still HIDDEN is clipped to its
+    // (empty) visible region and silently lost; the overlay then comes up empty and
+    // DWM shows the wallpaper underneath until the animation loop's first frame
+    // lands a few ms later. That is exactly the "windows flash hidden (wallpaper),
+    // then reappear and slide" the user reported. Showing first makes the present
+    // land on the now-visible window; `UpdateWindow` settles any pending paint onto
+    // our pixels (erase is suppressed in `slide_wndproc`); `DwmFlush` blocks until
+    // frame 0 is genuinely on the glass. Only THEN signal the manager to do the
+    // real switch underneath the (now actually covering) overlay.
     let _ = ShowWindow(overlay, SW_SHOWNA);
+    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+    let _ = UpdateWindow(overlay);
+    let _ = DwmFlush();
     signal_slide_overlay_up();
 
     // The new ws came from the `dir` side, so the outgoing leaves the opposite
@@ -2079,12 +2097,20 @@ unsafe extern "system" fn slide_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM)
 /// the slide compositor is disabled or not applicable.
 unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     SUPPRESS.store(true, Ordering::Relaxed);
-    for h in mgr.monitors[mi].workspaces[old].windows.clone() {
-        let _ = ShowWindow(hwnd_from(h), SW_HIDE);
+    // Iterate by index (no Vec clone per switch): the manager owns `mgr` on this
+    // thread and ShowWindow touches no Astur state, so the borrow is safe to hold.
+    {
+        let ws = &mgr.monitors[mi].workspaces[old].windows;
+        for i in 0..ws.len() {
+            let _ = ShowWindow(hwnd_from(ws[i]), SW_HIDE);
+        }
     }
     mgr.monitors[mi].active = n;
-    for h in mgr.monitors[mi].workspaces[n].windows.clone() {
-        let _ = ShowWindow(hwnd_from(h), SW_SHOW);
+    {
+        let ws = &mgr.monitors[mi].workspaces[n].windows;
+        for i in 0..ws.len() {
+            let _ = ShowWindow(hwnd_from(ws[i]), SW_SHOW);
+        }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
     // Instant placement — these windows were just unhidden; gliding them from a
