@@ -13,6 +13,11 @@ categories = ["os::windows-apis"]
 name = "astur"
 path = "src/main.rs"
 
+[build-dependencies]
+# Embeds the app icon (assets/astur.ico) into the exe so Explorer, the taskbar,
+# Alt+Tab, and shortcuts show the Astur hawk instead of the default exe icon.
+embed-resource = "2"
+
 [dependencies]
 astur-config = { path = "../astur-config" }
 

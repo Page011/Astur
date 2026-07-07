@@ -34,6 +34,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
 LicenseFile=..\LICENSE
+SetupIconFile=..\crates\astur\assets\astur.ico
 OutputDir=..\dist
 OutputBaseFilename=Astur-Setup-{#AppVersion}
 Compression=lzma2/max

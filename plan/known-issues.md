@@ -2,6 +2,22 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-07 — RESOLVED: move/resize slow — live cross-process SetWindowPos per frame
+
+Alt-move / Alt-resize repositioned the REAL window every mouse-move via a
+`position_worker` (`set_target`). Moving another process's window live forces that
+app to process `WM_WINDOWPOSCHANGED` and repaint each step; resizing forces a full
+client re-layout per pixel — a browser/Electron can't keep up, so it felt "awfully
+slow." (Astur itself measured 0.4% CPU / 48 MB — NOT the bottleneck; the foreign
+app's repaint is.) A Windows WM can't own another app's surface the way Mac/Wayland
+compositors do, so live is a dead end. Fix: drag a cheap in-process **outline
+overlay** (`OUTLINE_HWND`, a region-shaped frame) following the cursor and commit
+the final rect to the real window ONCE on release (`commit_rect`) — same reason
+"show window contents while dragging = off" is instant. Removed `position_worker` /
+`set_target` / `Target`. Fancier future path with live content: a DWM thumbnail
+proxy (`DwmRegisterThumbnail`, GPU-composited, works even for Chrome where
+`PrintWindow` is black). (`architecture.md`, `win32-reference.md`)
+
 ## 2026-07-07 — RESOLVED: launcher icons had a white halo (straight vs premultiplied alpha)
 
 Launcher app icons showed a white outline on their antialiased edges. Cause: the

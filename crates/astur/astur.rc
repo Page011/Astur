@@ -1,0 +1,3 @@
+// Windows resource script. The first icon (lowest ID) becomes the exe's
+// application icon shown by Explorer, the taskbar, Alt+Tab, and shortcuts.
+1 ICON "assets/astur.ico"

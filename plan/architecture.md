@@ -23,11 +23,17 @@ across threads except through these channels.
                                           monitors → workspaces → windows)
                                           all SetWindowPos / tiling / switch
                                           │            │              │
-                       set_target ────────┘            │              └─ dispatch_slide
-                              ▼                         ▼                     ▼
-                       position_worker          style/border/focus      transition_worker
-                       (drag move/resize)                                (overlay compositor)
+                                                       │              └─ dispatch_slide
+                                                       ▼                     ▼
+                                                style/border/focus      transition_worker
+                                                                        (overlay compositor)
 ```
+
+Drag (Alt-move / Alt-resize) does NOT touch the manager per frame: the mouse hook
+draws a lightweight in-process **outline overlay** (`OUTLINE_HWND`) following the
+cursor and, on button-up, commits the final rect with ONE `SetWindowPos`, then
+pushes `Cmd::DragMoved`/`DragResized` so the manager re-tiles. There is no
+`position_worker` thread any more (removed 2026-07-07).
 
 Side threads, independent: `stats_worker` (CPU/RAM/battery ~2s), `config_watcher`
 (file mtime → `WM_RELOAD`), `focus_follow_worker`, and one message-pump window per
@@ -54,8 +60,11 @@ passes through it. Rules:
 
 - Early-out on `ANY_DRAG`/`ALT_DOWN` atomics **before** taking any lock, so the
   no-drag case is a couple of atomic loads.
-- Never `SetWindowPos` on the hook. Drag deltas go to `position_worker` via
-  `set_target` + a condvar; the worker does the cross-process call that can stall.
+- Never do a *cross-process* `SetWindowPos` per frame on the hook. Live drag draws
+  an in-process outline overlay (our own window — cheap); the single cross-process
+  `SetWindowPos` happens once on release via `commit_rect`. The old per-frame
+  `position_worker` + `set_target` path was removed — resizing a foreign window
+  live stalls on its own repaint (see `known-issues.md` 2026-07-07).
 - `keyboard_proc` swallows Left Alt entirely (`SUPPRESS`/`FAKE_ALT` dance keeps
   Alt+Tab working with a synthetic Alt).
 

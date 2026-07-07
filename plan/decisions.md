@@ -2,6 +2,15 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-07 — Full: **outline drag** replaces live per-frame `SetWindowPos` for
+  Alt-move/resize. Foreign-window live resize stalls on the app's own repaint (Astur
+  was 0.4% CPU — not the bottleneck; a Windows WM can't own another app's surface
+  like Mac/Wayland). Hook draws a region-shaped outline overlay and commits once on
+  release (`commit_rect`); removed `position_worker`/`set_target`. Also: hawk **logo**
+  → `astur.ico` embedded in the exe (build.rs + `embed-resource`) + hawk tray PNG +
+  installer/setup icon; launcher icon premultiply (white-halo) fix. Inno per-user
+  installer at `packaging/astur.iss`. (`architecture.md`, `known-issues.md`)
+
 - 2026-07-07 — Bug fixes + drag smoothness on `main` (Full): (1) **phantom Shift**
   fixed — capture-mode `is_mod` matched generic `VK_SHIFT` but the LL hook delivers
   `VK_LSHIFT`/`VK_RSHIFT`, so Shift key-up was swallowed while a menu was open →

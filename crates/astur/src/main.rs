@@ -54,7 +54,7 @@ use windows::Win32::Graphics::Gdi::{
     SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
     DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
     DT_VCENTER, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
-    PAINTSTRUCT, RGN_OR, SRCCOPY, TRANSPARENT,
+    PAINTSTRUCT, RGN_DIFF, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
@@ -93,9 +93,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursorPos,
     TranslateMessage,
     UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HWND_TOPMOST, KBDLLHOOKSTRUCT,
-    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
+    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
     SWP_NOZORDER,
-    SWP_ASYNCWINDOWPOS,
     SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, DestroyWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -166,6 +165,12 @@ struct Drag {
     // for resize: which corner is being dragged
     left: bool,
     top: bool,
+    // latest previewed rect shown by the drag outline; committed to the real
+    // window once on release, so there is no per-frame cross-process SetWindowPos.
+    cur_x: i32,
+    cur_y: i32,
+    cur_w: i32,
+    cur_h: i32,
 }
 
 impl Drag {
@@ -181,81 +186,73 @@ impl Drag {
             win_h: 0,
             left: false,
             top: false,
+            cur_x: 0,
+            cur_y: 0,
+            cur_w: 0,
+            cur_h: 0,
         }
     }
 }
 
 static STATE: Mutex<Drag> = Mutex::new(Drag::new());
 
-/// Latest desired window placement. A dedicated worker thread applies it so the
-/// input hook never blocks on a slow app's SetWindowPos; intermediate updates
-/// are coalesced and only the most recent target is applied.
-#[derive(Clone, Copy)]
-struct Target {
-    hwnd: isize,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    resize: bool,
-}
-static TARGET: Mutex<Option<Target>> = Mutex::new(None);
-static TARGET_CV: Condvar = Condvar::new();
+/// Drag preview is an outline overlay, not the real window. Moving/resizing a
+/// foreign window live means a cross-process SetWindowPos per mouse event, which
+/// stalls on the target app's own repaint (a browser re-layouts per pixel — the
+/// "resizing is slow" complaint). Instead we drag a cheap in-process frame overlay
+/// and commit the final rect to the real window ONCE on release. Silky regardless
+/// of the target app — the same reason Windows' own "show window contents while
+/// dragging = off" is instant. (A live GPU thumbnail is the fancier future path.)
+static OUTLINE_HWND: AtomicIsize = AtomicIsize::new(0);
+const OUTLINE_THICK: i32 = 3;
 
-/// Queue the newest placement for the worker thread and wake it.
-fn set_target(hwnd: isize, x: i32, y: i32, w: i32, h: i32, resize: bool) {
-    {
-        let mut t = TARGET.lock().unwrap();
-        *t = Some(Target { hwnd, x, y, w, h, resize });
+/// Show the drag outline as a hollow rectangle at (x, y, w, h): region-shaped to a
+/// frame so only the border paints. Layered / click-through / topmost overlay.
+unsafe fn show_outline(x: i32, y: i32, w: i32, h: i32) {
+    let raw = OUTLINE_HWND.load(Ordering::Relaxed);
+    if raw == 0 || w <= 0 || h <= 0 {
+        return;
     }
-    TARGET_CV.notify_one();
+    let hwnd = hwnd_from(raw);
+    let t = OUTLINE_THICK;
+    let region = CreateRectRgn(0, 0, w, h);
+    if w > 2 * t && h > 2 * t {
+        let inner = CreateRectRgn(t, t, w - t, h - t);
+        CombineRgn(region, region, inner, RGN_DIFF);
+        let _ = DeleteObject(HGDIOBJ(inner.0));
+    }
+    // The window takes ownership of `region`; the system frees the previous one.
+    SetWindowRgn(hwnd, region, BOOL(1));
+    let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
-/// Worker loop: wait for a target, apply the newest, repeat. Runs SetWindowPos
-/// off the input thread so a busy app can't stutter the cursor, and drops stale
-/// intermediate positions so the window always converges to the latest one.
-fn position_worker() {
-    loop {
-        let target = {
-            let mut t = TARGET.lock().unwrap();
-            loop {
-                if let Some(target) = t.take() {
-                    break target;
-                }
-                t = TARGET_CV.wait(t).unwrap();
-            }
-        };
-        unsafe {
-            let hwnd = hwnd_from(target.hwnd);
-            // SWP_ASYNCWINDOWPOS: post the request to the target's queue and return
-            // immediately instead of blocking until a (possibly busy) foreign app
-            // acknowledges it. Keeps the drag following the cursor smoothly even over
-            // heavy apps (browsers, Electron); the final rect is re-applied on drop
-            // (Cmd::DragMoved/DragResized), so any in-flight async lag self-corrects.
-            if target.resize {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    target.x,
-                    target.y,
-                    target.w,
-                    target.h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS,
-                );
-            } else {
-                let _ = SetWindowPos(
-                    hwnd,
-                    None,
-                    target.x,
-                    target.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING
-                        | SWP_ASYNCWINDOWPOS,
-                );
-            }
-        }
+unsafe fn hide_outline() {
+    let raw = OUTLINE_HWND.load(Ordering::Relaxed);
+    if raw != 0 {
+        let _ = ShowWindow(hwnd_from(raw), SW_HIDE);
     }
+}
+
+/// Trivial WndProc for the outline overlay. Must be its OWN proc (not the marker's,
+/// which handles WM_DISPLAYCHANGE/WM_RELOAD and would double-fire the bar rebuild).
+unsafe extern "system" fn outline_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    DefWindowProcW(h, msg, w, l)
+}
+
+/// Commit a previewed rect to the real window in one synchronous SetWindowPos —
+/// synchronous (not async) so the manager's DragMoved/DragResized reads the final
+/// rect via GetWindowRect right after. Handles floating windows (which keep this
+/// dropped rect) and tiled ones (which retile over it) alike.
+unsafe fn commit_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+    let _ = SetWindowPos(
+        hwnd_from(hwnd),
+        None,
+        x,
+        y,
+        w,
+        h,
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+    );
 }
 
 // =========================================================================
@@ -756,7 +753,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.win_y = y;
                     s.win_w = w;
                     s.win_h = h;
+                    s.cur_x = x;
+                    s.cur_y = y;
+                    s.cur_w = w;
+                    s.cur_h = h;
                     ANY_DRAG.store(true, Ordering::Relaxed);
+                    drop(s);
+                    show_outline(x, y, w, h);
                     return suppress;
                 } else if GetWindowRect(hwnd, &mut rect).is_ok() {
                     let mut s = STATE.lock().unwrap();
@@ -768,7 +771,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.win_y = rect.top;
                     s.win_w = rect.right - rect.left;
                     s.win_h = rect.bottom - rect.top;
+                    s.cur_x = rect.left;
+                    s.cur_y = rect.top;
+                    s.cur_w = rect.right - rect.left;
+                    s.cur_h = rect.bottom - rect.top;
                     ANY_DRAG.store(true, Ordering::Relaxed);
+                    drop(s);
+                    show_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
                     return suppress;
                 }
             }
@@ -796,7 +805,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.win_h = rect.bottom - rect.top;
                     s.left = left;
                     s.top = top;
+                    s.cur_x = rect.left;
+                    s.cur_y = rect.top;
+                    s.cur_w = rect.right - rect.left;
+                    s.cur_h = rect.bottom - rect.top;
                     ANY_DRAG.store(true, Ordering::Relaxed);
+                    drop(s);
+                    show_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
                     return suppress;
                 }
             }
@@ -812,12 +827,16 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             //
             // The ANY_DRAG guard keeps every other process's mouse-move off the
             // STATE mutex entirely — only an active drag reaches this lock.
-            let s = STATE.lock().unwrap();
+            let mut s = STATE.lock().unwrap();
             match s.mode {
                 Mode::Move => {
-                    let dx = pt.x - s.origin_x;
-                    let dy = pt.y - s.origin_y;
-                    set_target(s.hwnd, s.win_x + dx, s.win_y + dy, 0, 0, false);
+                    let nx = s.win_x + (pt.x - s.origin_x);
+                    let ny = s.win_y + (pt.y - s.origin_y);
+                    s.cur_x = nx;
+                    s.cur_y = ny;
+                    s.cur_w = s.win_w;
+                    s.cur_h = s.win_h;
+                    show_outline(nx, ny, s.win_w, s.win_h);
                 }
                 Mode::Resize => {
                     // Drag the nearest corner; the opposite corner stays fixed.
@@ -851,7 +870,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         }
                         h = MIN_H;
                     }
-                    set_target(s.hwnd, x, y, w, h, true);
+                    s.cur_x = x;
+                    s.cur_y = y;
+                    s.cur_w = w;
+                    s.cur_h = h;
+                    show_outline(x, y, w, h);
                     let corner_x = if s.left { x } else { x + w };
                     let corner_y = if s.top { y } else { y + h };
                     show_marker(corner_x, corner_y, s.left, s.top);
@@ -863,10 +886,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             let mut s = STATE.lock().unwrap();
             if s.mode == Mode::Move {
                 let h = s.hwnd;
+                let (cx, cy, cw, ch) = (s.cur_x, s.cur_y, s.cur_w, s.cur_h);
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
-                // Re-integrate the dropped window into the tiling layout.
+                hide_outline();
+                // Commit the previewed position to the real window, then re-integrate
+                // it into the layout (retile overrides tiled windows; a floating window
+                // keeps this dropped rect).
+                commit_rect(h, cx, cy, cw, ch);
                 push_cmd(Cmd::DragMoved(h, pt.x, pt.y));
                 return suppress;
             }
@@ -875,11 +903,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             let mut s = STATE.lock().unwrap();
             if s.mode == Mode::Resize {
                 let h = s.hwnd;
+                let (cx, cy, cw, ch) = (s.cur_x, s.cur_y, s.cur_w, s.cur_h);
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
                 hide_marker();
-                // Apply the new size to the layout (master ratio) or snap back.
+                hide_outline();
+                // Commit the previewed size to the real window (synchronous, so the
+                // manager reads the final rect), then apply it to the layout.
+                commit_rect(h, cx, cy, cw, ch);
                 push_cmd(Cmd::DragResized(h));
                 return suppress;
             }
@@ -6334,6 +6366,38 @@ fn main() {
         let _ = SetLayeredWindowAttributes(marker, COLORREF(0), 200, LWA_ALPHA);
         MARKER_HWND.store(marker.0 as isize, Ordering::Relaxed);
 
+        // Drag-outline overlay: an accent-coloured hollow frame previewing the
+        // move/resize target. Region-shaped per drag; layered + click-through so it
+        // never eats input. A plain DefWindowProc window — it must NOT share
+        // marker_wndproc (that handles WM_DISPLAYCHANGE/WM_RELOAD, which would then
+        // double-fire the bar/monitor rebuild).
+        let outline_brush = CreateSolidBrush(COLORREF(LAUNCHER_SELBG)); // #366382 accent
+        let outline_wc = WNDCLASSW {
+            lpfnWndProc: Some(outline_wndproc),
+            hInstance: hinst,
+            hbrBackground: outline_brush,
+            lpszClassName: w!("astur_outline"),
+            ..Default::default()
+        };
+        RegisterClassW(&outline_wc);
+        let outline = CreateWindowExW(
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            w!("astur_outline"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            10,
+            10,
+            None,
+            None,
+            hinst,
+            None,
+        )
+        .expect("CreateWindowExW failed");
+        let _ = SetLayeredWindowAttributes(outline, COLORREF(0), 220, LWA_ALPHA);
+        OUTLINE_HWND.store(outline.0 as isize, Ordering::Relaxed);
+
         // Status bar on every monitor (waybar-style). Register the class once,
         // build the font, then create a bar window per monitor.
         if cfg.bar_enabled && cfg.bar_height > 0 {
@@ -6420,8 +6484,6 @@ fn main() {
         // release): left/double-click opens Settings, right-click menu = Settings/Quit.
         let _tray = setup_tray(hinst);
 
-        // Apply window moves/resizes off the input thread for smoothness.
-        std::thread::spawn(position_worker);
         // Focus-follows-mouse poll loop (no-op unless enabled in config).
         std::thread::spawn(focus_follow_worker);
         // CPU/RAM/battery poll loop (idles unless a stats widget is enabled).
