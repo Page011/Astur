@@ -43,6 +43,19 @@ the final rect to the real window ONCE on release (`commit_rect`) — same reaso
 proxy (`DwmRegisterThumbnail`, GPU-composited, works even for Chrome where
 `PrintWindow` is black). (`architecture.md`, `win32-reference.md`)
 
+## 2026-07-08 — Launcher icons: switched to jumbo image list + DrawIconEx
+
+SUPERSEDES the premultiply fix below. Icons are now HICONs from the system image list
+at JUMBO (256px) via `SHGetFileInfo(SHGFI_SYSICONINDEX)` + `SHGetImageList(SHIL_JUMBO)`
+→ `IImageList::GetIcon`, drawn with `DrawIconEx` (`DI_NORMAL`). DrawIconEx composites
+the icon's own straight alpha correctly, so there's no manual premultiply and no halo,
+and jumbo source = Start-Menu-quality downscale. UWP / `shell:AppsFolder` entries that
+`SHGetFileInfo` can't resolve fall back to `IShellItemImageFactory` → HBITMAP →
+`CreateIconIndirect` → HICON (this also fixes the "some icons don't load" cases). The
+premultiply path below is gone. Traps: `SHGetImageList` is generic (`SHGetImageList::<
+IImageList>(SHIL_JUMBO as i32)`); needs `Win32_UI_Controls`. Icons use STRAIGHT alpha
+(do NOT premultiply for an HICON).
+
 ## 2026-07-07 — RESOLVED: launcher icons had a white halo (straight vs premultiplied alpha)
 
 Launcher app icons showed a white outline on their antialiased edges. Cause: the

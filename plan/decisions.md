@@ -2,6 +2,15 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-08 (3) — Launcher icons rewritten to **Start-Menu quality**: primary source
+  is the system image list at JUMBO (256px) — `SHGetFileInfo(SHGFI_SYSICONINDEX)` +
+  `SHGetImageList(SHIL_JUMBO)` / `IImageList::GetIcon` → HICON, drawn with `DrawIconEx`
+  (correct straight-alpha, no halo, crisp). Fallback for UWP / `shell:AppsFolder`
+  entries: `IShellItemImageFactory` HBITMAP wrapped to HICON via `CreateIconIndirect`
+  (catches the icons that used to fail to load). Dropped the old AlphaBlend+premultiply
+  path. Features added: `Win32_UI_Controls`, `Win32_Storage_FileSystem`. (Still open:
+  Tab→columns, mouse on popups.) (`known-issues.md`)
+
 - 2026-07-08 (2) — Drag polish: the real window is now **parked off-screen** during a
   thumbnail drag (was left in place → user saw original + thumbnail), and **RESIZE also
   uses the live thumbnail** (accepts DWM aspect-ratio letterbox — user chose live

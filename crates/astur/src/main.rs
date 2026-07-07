@@ -45,10 +45,11 @@ use windows::Win32::Security::{
     SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY,
 };
 use windows::Win32::Graphics::Gdi::{
-    AlphaBlend, BITMAP, BLENDFUNCTION, StretchBlt, SetStretchBltMode, HALFTONE,
-    BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
+    AlphaBlend, BLENDFUNCTION, StretchBlt, SetStretchBltMode, HALFTONE,
+    BeginPaint, BitBlt, CombineRgn, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC,
+    CreateFontW,
     CreateRectRgn, CreateSolidBrush, CreatePen, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    GetObjectW, HBITMAP, RoundRect, PS_SOLID, UpdateWindow,
+    RoundRect, PS_SOLID, UpdateWindow,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
     SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
@@ -68,12 +69,15 @@ use windows::Win32::UI::Shell::{
     ShellExecuteW, SHCreateItemFromParsingName, IShellItem, IEnumShellItems,
     IShellItemImageFactory, BHID_EnumItems, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
     SIIGBF_ICONONLY, Shell_NotifyIconW, NOTIFYICONDATAW, NIM_ADD, NIM_DELETE, NIF_ICON,
-    NIF_MESSAGE, NIF_TIP,
+    NIF_MESSAGE, NIF_TIP, SHGetFileInfoW, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGetImageList,
+    SHIL_JUMBO,
 };
+use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreateIconFromResourceEx, CreatePopupMenu, DestroyMenu, LoadIconW, PostQuitMessage,
-    TrackPopupMenu, HICON, IDI_APPLICATION, LR_DEFAULTCOLOR, MF_STRING, TPM_RETURNCMD,
-    TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK,
+    AppendMenuW, CreateIconFromResourceEx, CreateIconIndirect, CreatePopupMenu, DestroyMenu,
+    DrawIconEx, LoadIconW, PostQuitMessage, TrackPopupMenu, DI_NORMAL, HICON, ICONINFO,
+    IDI_APPLICATION, LR_DEFAULTCOLOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK,
 };
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::System::Com::{
@@ -4883,57 +4887,73 @@ fn launcher_enumerate() -> Vec<AppEntry> {
     v
 }
 
-/// Resolve a shell item's icon to a 32bpp ARGB HBITMAP at `px` square. Returns the
-/// HBITMAP as an isize, or -1 on failure. Runs on the icon worker (slow shell call
-/// off the UI thread). Requires COM initialised on the calling thread.
-unsafe fn load_icon(path: &str, px: i32) -> isize {
+/// Resolve an app's icon to an HICON. Returns the HICON as an isize, or -1 on
+/// failure. Runs on the icon worker (slow shell calls off the UI thread). Requires
+/// COM initialised on the calling thread.
+///
+/// Primary = the system image list at JUMBO (256px) via `SHGetFileInfo` — the same
+/// source Explorer/Start use, so file-backed apps (.lnk/.exe) get crisp, correctly
+/// alpha'd icons (this is how "Start-Menu-quality" launchers do it). Fallback =
+/// `IShellItemImageFactory` (handles UWP / `shell:AppsFolder` parsing names), whose
+/// HBITMAP is wrapped into an HICON so the paint path is uniform (`DrawIconEx`).
+unsafe fn load_icon(path: &str, _px: i32) -> isize {
+    if let Some(hicon) = jumbo_icon(path) {
+        return hicon.0 as isize;
+    }
+    if let Some(hicon) = shell_item_hicon(path, 256) {
+        return hicon.0 as isize;
+    }
+    -1
+}
+
+/// System image-list JUMBO (256px) icon for a file-backed shell path.
+unsafe fn jumbo_icon(path: &str) -> Option<HICON> {
     let mut w: Vec<u16> = path.encode_utf16().collect();
     w.push(0);
-    let factory: windows::core::Result<IShellItemImageFactory> =
-        SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None);
-    let Ok(factory) = factory else { return -1 };
-    // Request the icon at EXACTLY the display size. The shell scales to the request
-    // with high quality (picking the best native size), and we blit it 1:1 — no
-    // second, softer AlphaBlend downscale (requesting 2x then shrinking looked mushy).
-    match factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY) {
-        Ok(hb) => {
-            premultiply_bgra(hb);
-            hb.0 as isize
-        }
-        Err(_) => -1,
+    let mut shfi = SHFILEINFOW::default();
+    let r = SHGetFileInfoW(
+        PCWSTR(w.as_ptr()),
+        FILE_FLAGS_AND_ATTRIBUTES(0),
+        Some(&mut shfi),
+        std::mem::size_of::<SHFILEINFOW>() as u32,
+        SHGFI_SYSICONINDEX,
+    );
+    if r == 0 {
+        return None;
     }
+    let il: IImageList = SHGetImageList(SHIL_JUMBO as i32).ok()?;
+    let hicon = il.GetIcon(shfi.iIcon, ILD_TRANSPARENT.0).ok()?;
+    (!hicon.0.is_null()).then_some(hicon)
 }
 
-/// Premultiply a 32bpp top-down BGRA DIB section in place. `IShellItemImageFactory::
-/// GetImage` returns STRAIGHT (non-premultiplied) alpha, but the launcher blits with
-/// `AlphaBlend` + `AC_SRC_ALPHA`, which requires premultiplied colour — without this
-/// the antialiased icon edges blend too bright and show a white halo/outline. DIB
-/// sections expose their bits via `BITMAP.bmBits`, so we can multiply RGB by A/255.
-unsafe fn premultiply_bgra(hb: HBITMAP) {
-    let mut bm = BITMAP::default();
-    if GetObjectW(
-        HGDIOBJ(hb.0),
-        std::mem::size_of::<BITMAP>() as i32,
-        Some(&mut bm as *mut _ as *mut c_void),
-    ) == 0
-        || bm.bmBits.is_null()
-        || bm.bmBitsPixel != 32
-    {
-        return;
-    }
-    let count = (bm.bmWidth * bm.bmHeight).max(0) as usize;
-    let bits = bm.bmBits as *mut u8;
-    for i in 0..count {
-        let p = bits.add(i * 4);
-        let a = *p.add(3) as u32;
-        // BGRA order; premultiply each colour channel by alpha.
-        *p = (*p as u32 * a / 255) as u8;
-        *p.add(1) = (*p.add(1) as u32 * a / 255) as u8;
-        *p.add(2) = (*p.add(2) as u32 * a / 255) as u8;
-    }
+/// Fallback: an `IShellItemImageFactory` HBITMAP wrapped into an HICON, for UWP /
+/// parsing-name entries `SHGetFileInfo` can't resolve. `px` is the requested size.
+unsafe fn shell_item_hicon(path: &str, px: i32) -> Option<HICON> {
+    let mut w: Vec<u16> = path.encode_utf16().collect();
+    w.push(0);
+    let factory: IShellItemImageFactory =
+        SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None).ok()?;
+    let hb = factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY).ok()?;
+    // Monochrome AND-mask, zeroed: with a 32bpp colour bitmap the per-pixel alpha
+    // drives transparency, so an all-0 mask is correct. CreateIconIndirect requires one.
+    let stride = (((px + 15) & !15) / 8) as usize;
+    let mask_bits = vec![0u8; stride * px as usize];
+    let mask = CreateBitmap(px, px, 1, 1, Some(mask_bits.as_ptr() as *const c_void));
+    let ii = ICONINFO {
+        fIcon: BOOL(1),
+        xHotspot: 0,
+        yHotspot: 0,
+        hbmMask: mask,
+        hbmColor: hb,
+    };
+    let hicon = CreateIconIndirect(&ii).ok();
+    // CreateIconIndirect copies the bitmaps; free the sources.
+    let _ = DeleteObject(HGDIOBJ(mask.0));
+    let _ = DeleteObject(HGDIOBJ(hb.0));
+    hicon.filter(|h| !h.0.is_null())
 }
 
-/// Icon worker: drains `ICON_QUEUE`, resolves each app's shell icon to an HBITMAP,
+/// Icon worker: drains `ICON_QUEUE`, resolves each app's shell icon to an HICON,
 /// stores it on the entry, and repaints. Off the UI thread so a slow icon (UWP
 /// logo, network path) never stalls typing. One apartment for its lifetime.
 fn icon_worker() {
@@ -5480,14 +5500,6 @@ unsafe fn launcher_paint(h: HWND) {
     let list_bottom = ht - footer_h - 4;
     let rows = ((list_bottom - list_top) / LAUNCHER_ROW_H).max(1) as usize;
     let scroll = if st.sel >= rows { st.sel - rows + 1 } else { 0 };
-    let icon_dc = CreateCompatibleDC(hdc);
-    // AC_SRC_OVER + AC_SRC_ALPHA: blend the 32bpp icon by its own per-pixel alpha.
-    let icon_blend = BLENDFUNCTION {
-        BlendOp: 0,
-        BlendFlags: 0,
-        SourceConstantAlpha: 255,
-        AlphaFormat: 1,
-    };
     let text_left = LAUNCHER_PAD + 6 + LAUNCHER_ICON_PX + 10;
     let mut want: Vec<usize> = Vec::new(); // app indices whose icon isn't loaded yet
     for vis in 0..rows {
@@ -5532,20 +5544,22 @@ unsafe fn launcher_paint(h: HWND) {
                 let e = &st.all[i];
                 // App icon, loaded lazily off the UI thread; missing ones queue + pop in.
                 if e.icon > 1 {
-                    let hb = e.icon as *mut c_void;
-                    let prev = SelectObject(icon_dc, HGDIOBJ(hb));
-                    let mut bm = BITMAP::default();
-                    GetObjectW(
-                        HGDIOBJ(hb),
-                        std::mem::size_of::<BITMAP>() as i32,
-                        Some(&mut bm as *mut _ as *mut c_void),
-                    );
+                    // DrawIconEx scales the (256px jumbo) HICON to the row box and
+                    // composites its straight alpha correctly onto the surface — no
+                    // manual premultiply / no white halo.
+                    let hicon = HICON(e.icon as *mut c_void);
                     let iy = top + (LAUNCHER_ROW_H - LAUNCHER_ICON_PX) / 2;
-                    let _ = AlphaBlend(
-                        hdc, row.left + 6, iy, LAUNCHER_ICON_PX, LAUNCHER_ICON_PX, icon_dc, 0, 0,
-                        bm.bmWidth.max(1), bm.bmHeight.max(1), icon_blend,
+                    let _ = DrawIconEx(
+                        hdc,
+                        row.left + 6,
+                        iy,
+                        hicon,
+                        LAUNCHER_ICON_PX,
+                        LAUNCHER_ICON_PX,
+                        0,
+                        None,
+                        DI_NORMAL,
                     );
-                    SelectObject(icon_dc, prev);
                 } else if e.icon == 0 {
                     want.push(i);
                 }
@@ -5580,7 +5594,6 @@ unsafe fn launcher_paint(h: HWND) {
             DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
     }
-    let _ = DeleteDC(icon_dc);
 
     // Detail footer for the selected file (Tab toggles it).
     if footer_h > 0 {

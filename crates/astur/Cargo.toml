@@ -39,6 +39,8 @@ features = [
     "Win32_Storage_Xps",
     "Win32_UI_Shell",
     "Win32_UI_Shell_Common",
+    "Win32_UI_Controls",
+    "Win32_Storage_FileSystem",
     "Win32_System_Com",
     "Win32_System_Search",
     "Win32_System_Shutdown",
