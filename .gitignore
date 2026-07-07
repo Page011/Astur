@@ -1,6 +1,9 @@
 # Rust build output
 /target/
 
+# Installer output
+/dist/
+
 # Planning / internal docs (not for public repo)
 /public/
 /site/

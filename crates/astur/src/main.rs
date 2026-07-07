@@ -48,7 +48,7 @@ use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BITMAP, BLENDFUNCTION, StretchBlt, SetStretchBltMode, HALFTONE,
     BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreateRectRgn, CreateSolidBrush, CreatePen, DeleteDC, DeleteObject, DrawTextW, EndPaint,
-    GetObjectW, RoundRect, PS_SOLID, UpdateWindow,
+    GetObjectW, HBITMAP, RoundRect, PS_SOLID, UpdateWindow,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
     SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
@@ -4736,9 +4736,44 @@ unsafe fn load_icon(path: &str, px: i32) -> isize {
     let factory: windows::core::Result<IShellItemImageFactory> =
         SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None);
     let Ok(factory) = factory else { return -1 };
-    match factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY) {
-        Ok(hb) => hb.0 as isize,
+    // Request 2x the display box so downscaling (rather than upscaling a tiny
+    // source) keeps the icon crisp; AlphaBlend does the final fit at paint time.
+    let src = (px * 2).max(px);
+    match factory.GetImage(SIZE { cx: src, cy: src }, SIIGBF_ICONONLY) {
+        Ok(hb) => {
+            premultiply_bgra(hb);
+            hb.0 as isize
+        }
         Err(_) => -1,
+    }
+}
+
+/// Premultiply a 32bpp top-down BGRA DIB section in place. `IShellItemImageFactory::
+/// GetImage` returns STRAIGHT (non-premultiplied) alpha, but the launcher blits with
+/// `AlphaBlend` + `AC_SRC_ALPHA`, which requires premultiplied colour — without this
+/// the antialiased icon edges blend too bright and show a white halo/outline. DIB
+/// sections expose their bits via `BITMAP.bmBits`, so we can multiply RGB by A/255.
+unsafe fn premultiply_bgra(hb: HBITMAP) {
+    let mut bm = BITMAP::default();
+    if GetObjectW(
+        HGDIOBJ(hb.0),
+        std::mem::size_of::<BITMAP>() as i32,
+        Some(&mut bm as *mut _ as *mut c_void),
+    ) == 0
+        || bm.bmBits.is_null()
+        || bm.bmBitsPixel != 32
+    {
+        return;
+    }
+    let count = (bm.bmWidth * bm.bmHeight).max(0) as usize;
+    let bits = bm.bmBits as *mut u8;
+    for i in 0..count {
+        let p = bits.add(i * 4);
+        let a = *p.add(3) as u32;
+        // BGRA order; premultiply each colour channel by alpha.
+        *p = (*p as u32 * a / 255) as u8;
+        *p.add(1) = (*p.add(1) as u32 * a / 255) as u8;
+        *p.add(2) = (*p.add(2) as u32 * a / 255) as u8;
     }
 }
 

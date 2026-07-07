@@ -2,6 +2,19 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-07 — RESOLVED: launcher icons had a white halo (straight vs premultiplied alpha)
+
+Launcher app icons showed a white outline on their antialiased edges. Cause: the
+paint blits with `AlphaBlend` + `AlphaFormat = AC_SRC_ALPHA` (1), which requires
+**premultiplied** BGRA, but `IShellItemImageFactory::GetImage` returns **straight**
+(non-premultiplied) alpha — translucent edge pixels then blend too bright → white
+halo. Fix: `premultiply_bgra()` multiplies each colour channel by A/255 in the DIB
+section (`BITMAP.bmBits`) right after `GetImage`. Also now request the icon at 2×
+the display box for crisper downscaling. Trap: any AlphaBlend of a shell-provided
+32bpp icon must premultiply first — GetImage/thumbnail bitmaps are straight-alpha.
+Still open: some apps' icons don't resolve at all (UWP/failed GetImage) and DPI
+scaling of the fixed-px launcher — separate items. (`win32-reference.md`)
+
 ## 2026-07-07 — RESOLVED: phantom Shift (stuck-down after Alt+Shift+Space)
 
 Shift read as held when it wasn't — e.g. Alt+3 acted as Alt+Shift+3 (move-to-ws
