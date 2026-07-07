@@ -2,6 +2,28 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-07 — RESOLVED: phantom Shift (stuck-down after Alt+Shift+Space)
+
+Shift read as held when it wasn't — e.g. Alt+3 acted as Alt+Shift+3 (move-to-ws
+instead of switch), Alt+Space opened the system menu not the launcher. Cause: the
+launcher/sysmenu capture blocks in `keyboard_proc` computed `is_mod` by comparing
+`kb.vkCode` against the **generic** `VK_SHIFT` (0x10). The LL keyboard hook delivers
+the **specific** codes (`VK_LSHIFT` 0xA0 / `VK_RSHIFT` 0xA1), so the check never
+matched a real Shift → while a menu was open Shift was treated as a normal key and
+**swallowed** (`return LRESULT(1)`). Releasing Shift before closing the menu (natural
+after Alt+Shift+Space) meant the key-UP never reached the system, so
+`GetAsyncKeyState(VK_SHIFT)` stayed stuck-down globally. Fix: `is_modifier_vk(vk)`
+covers the generic AND both L/R specifics for Shift/Alt/Ctrl; both capture blocks use
+it so modifiers always fall through. Trap: LL keyboard hook gives SPECIFIC L/R vkCodes
+— never match a physical modifier against its generic VK. (`win32-reference.md`)
+
+## 2026-07-07 — sysmenu Esc now steps back a level (was: always close)
+
+Pressing Esc inside a system-menu submenu (e.g. Power) closed the whole menu. The
+hook posted `SM_CLOSE` for Esc, which closes regardless of depth. Now Esc posts
+`SM_BACK` (same as Left/Backspace): cancel a confirm → back to root → close only from
+root. `SM_CLOSE` is now unused (kept as a referenced match arm). (`system-menu.md`)
+
 ## 2026-06-27 — RESOLVED: file search was ~900ms/query (leading-wildcard LIKE)
 
 `WHERE System.FileName LIKE '%q%'` (leading wildcard) **scans the whole index** —

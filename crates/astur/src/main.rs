@@ -60,8 +60,9 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_CHAR, VIRTUAL_KEY, VK_BACK, VK_DOWN, VK_ESCAPE,
-    VK_LBUTTON, VK_LEFT, VK_LMENU, VK_MENU, VK_RBUTTON, VK_RETURN, VK_SPACE, VK_TAB, VK_UP,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_CHAR, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN,
+    VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RBUTTON,
+    VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     ShellExecuteW, SHCreateItemFromParsingName, IShellItem, IEnumShellItems,
@@ -94,6 +95,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HWND_TOPMOST, KBDLLHOOKSTRUCT,
     LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
     SWP_NOZORDER,
+    SWP_ASYNCWINDOWPOS,
     SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, DestroyWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
@@ -225,6 +227,11 @@ fn position_worker() {
         };
         unsafe {
             let hwnd = hwnd_from(target.hwnd);
+            // SWP_ASYNCWINDOWPOS: post the request to the target's queue and return
+            // immediately instead of blocking until a (possibly busy) foreign app
+            // acknowledges it. Keeps the drag following the cursor smoothly even over
+            // heavy apps (browsers, Electron); the final rect is re-applied on drop
+            // (Cmd::DragMoved/DragResized), so any in-flight async lag self-corrects.
             if target.resize {
                 let _ = SetWindowPos(
                     hwnd,
@@ -233,7 +240,7 @@ fn position_worker() {
                     target.y,
                     target.w,
                     target.h,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING | SWP_ASYNCWINDOWPOS,
                 );
             } else {
                 let _ = SetWindowPos(
@@ -243,7 +250,8 @@ fn position_worker() {
                     target.y,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING
+                        | SWP_ASYNCWINDOWPOS,
                 );
             }
         }
@@ -352,6 +360,27 @@ unsafe fn vk_down(vk: VIRTUAL_KEY) -> bool {
     (GetAsyncKeyState(vk.0 as i32) as u16 & 0x8000) != 0
 }
 
+/// True for any modifier key's virtual-key code. The low-level keyboard hook
+/// reports the SPECIFIC left/right codes (`VK_LSHIFT`/`VK_RSHIFT`, `VK_LMENU`,
+/// `VK_LCONTROL`…), never the generic aggregate (`VK_SHIFT` etc.). Capture modes
+/// (launcher / system menu) MUST let these fall through to the system: swallowing
+/// a modifier key-up while a menu is open leaves the global async key state (what
+/// `GetAsyncKeyState` reads) reporting that modifier stuck down — the "phantom
+/// Shift" bug when a menu is opened with Alt+Shift+Space and Shift is released
+/// before the menu closes. Includes the generic codes for injected events too.
+#[inline]
+fn is_modifier_vk(vk: u32) -> bool {
+    vk == VK_SHIFT.0 as u32
+        || vk == VK_LSHIFT.0 as u32
+        || vk == VK_RSHIFT.0 as u32
+        || vk == VK_MENU.0 as u32
+        || vk == VK_LMENU.0 as u32
+        || vk == VK_RMENU.0 as u32
+        || vk == VK_CONTROL.0 as u32
+        || vk == VK_LCONTROL.0 as u32
+        || vk == VK_RCONTROL.0 as u32
+}
+
 #[inline]
 unsafe fn left_alt_down() -> bool {
     // Trust the hook flag, but fall back to the live key state so a missed
@@ -429,10 +458,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // System-menu capture mode: route nav keys to the power menu while open.
             if SYSMENU_OPEN.load(Ordering::Relaxed) {
                 let vk = kb.vkCode;
-                let is_mod = vk == VK_LMENU.0 as u32
-                    || vk == VK_MENU.0 as u32
-                    || vk == VK_SHIFT.0 as u32;
-                if !is_mod {
+                if !is_modifier_vk(vk) {
                     if down {
                         let hs = SYSMENU_HWND.load(Ordering::Relaxed);
                         if hs != 0 {
@@ -441,7 +467,10 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                                 let _ = PostMessageW(hwnd, WM_SYSMENU, WPARAM(a), LPARAM(0));
                             };
                             if vk == VK_ESCAPE.0 as u32 {
-                                post(SM_CLOSE);
+                                // Esc steps back one level (cancel confirm -> back to
+                                // root -> close from root), same as Left/Backspace —
+                                // so Esc in a submenu returns to the menu, not exit.
+                                post(SM_BACK);
                             } else if vk == VK_RETURN.0 as u32 {
                                 post(SM_ACTIVATE);
                             } else if vk == VK_UP.0 as u32 {
@@ -462,10 +491,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             // Alt's own bookkeeping (ALT_DOWN / FAKE_ALT) still runs.
             if LAUNCHER_OPEN.load(Ordering::Relaxed) {
                 let vk = kb.vkCode;
-                let is_mod = vk == VK_LMENU.0 as u32
-                    || vk == VK_MENU.0 as u32
-                    || vk == VK_SHIFT.0 as u32;
-                if !is_mod {
+                if !is_modifier_vk(vk) {
                     if down {
                         let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
                         if hl != 0 {

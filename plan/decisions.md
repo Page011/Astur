@@ -2,6 +2,14 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-07 — Bug fixes + drag smoothness on `main` (Full): (1) **phantom Shift**
+  fixed — capture-mode `is_mod` matched generic `VK_SHIFT` but the LL hook delivers
+  `VK_LSHIFT`/`VK_RSHIFT`, so Shift key-up was swallowed while a menu was open →
+  `GetAsyncKeyState` stuck; new `is_modifier_vk` covers L/R specifics. (2) **sysmenu
+  Esc** steps back a level (posts `SM_BACK`) instead of closing outright. (3) drag
+  `position_worker` uses `SWP_ASYNCWINDOWPOS` so a busy foreign app can't stall the
+  move/resize follow. (`known-issues.md`, `win32-reference.md`, `system-menu.md`)
+
 - 2026-07-07 — **Astur Lite v1.0.1 SHIPPED** (tag `v1.0.1` on `lite`). First
   maintained Lite release: the three v2 efficiency/quality backports — lockless
   `PRESSED` (`[AtomicBool;256]` off the keyboard hot path), `switch_plain` index

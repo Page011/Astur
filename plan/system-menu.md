@@ -17,8 +17,10 @@ kind = `Category(&[SysItem])` or `Action(SysAct, needs_confirm)`):
 - (Theme/Appearance category lands once theming + wallpaper exist.)
 
 Navigation: Enter drills into a category (chevron `›` marks them; window resizes to the
-level via `sysmenu_layout`); **←/Backspace** = back to root; **Esc** cancels a confirm
-or closes. Session-ending actions are **confirm-gated** (first Enter arms, second runs).
+level via `sysmenu_layout`); **←/Backspace/Esc** all step back one level — cancel a
+confirm → back to root → close only from root (Esc was fixed 2026-07-07 to step back
+rather than always close; see `known-issues.md`). Session-ending actions are
+**confirm-gated** (first Enter arms, second runs).
 The hierarchy is a `const` tree now but is the exact shape a mod would extend (see
 `plan/mods.md` — `sys_actions_extra`).
 

@@ -54,6 +54,19 @@ APIs Astur leans on, where the docs are, and which calls are slow/buggy traps.
 
 ## Gotchas
 
+- **LL keyboard hook delivers SPECIFIC left/right VK codes**, never the generic
+  aggregate. Physical Shift arrives as `VK_LSHIFT` (0xA0) / `VK_RSHIFT` (0xA1), NOT
+  `VK_SHIFT` (0x10); Alt as `VK_LMENU`/`VK_RMENU`; Ctrl as `VK_LCONTROL`/`VK_RCONTROL`.
+  (The generic codes only appear via `GetKeyState`/`GetAsyncKeyState` aggregation.)
+  Comparing `kb.vkCode` against a generic `VK_SHIFT` silently never matches — the
+  "phantom Shift" bug (see `known-issues.md` 2026-07-07). Use `is_modifier_vk`.
+- **`SWP_ASYNCWINDOWPOS`** — for cross-process `SetWindowPos` from a worker that must
+  not block on a busy foreign app (the drag `position_worker`). Posts the request to
+  the target's queue and returns immediately. Only for the transient drag-follow;
+  the authoritative final rect is re-applied synchronously on drop.
+- Swallowing a modifier key-UP in a hook (returning 1) while a capture mode is open
+  leaves `GetAsyncKeyState` reporting that modifier stuck down globally — always let
+  modifier keys fall through.
 - Hidden windows (`SW_HIDE`) still report rects; filter on workspace membership,
   not visibility, when laying out.
 - A topmost overlay must `WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW` and swallow

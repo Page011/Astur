@@ -16,6 +16,14 @@ Each item: location, the change, expected win, risk. Do them roughly top-down
 
 ## A. Input latency (hooks)
 
+- **DONE 2026-07-07 — drag `position_worker` now uses `SWP_ASYNCWINDOWPOS`.** The
+  worker's cross-process `SetWindowPos` was synchronous, so dragging a window that
+  belongs to a busy app (browser/Electron) stalled the follow until that app ACKed
+  each move. Async posts the request and returns immediately → smooth cursor-follow
+  on heavy apps; the final rect is re-applied synchronously on drop
+  (`Cmd::DragMoved`/`DragResized`) so nothing is lost. (`win32-reference.md`)
+
+
 - **DONE 2026-06-27 — `PRESSED: Mutex<[bool; 256]>` → lockless `[AtomicBool; 256]`.**
   `keyboard_proc` no longer takes a Mutex on key-up or Alt-hotkey down; the
   repeat-guard is `swap(true)`/`store(false)`. Lock removed from the OS-wide key path.
