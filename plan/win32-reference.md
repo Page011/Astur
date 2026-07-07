@@ -60,10 +60,15 @@ APIs Astur leans on, where the docs are, and which calls are slow/buggy traps.
   (The generic codes only appear via `GetKeyState`/`GetAsyncKeyState` aggregation.)
   Comparing `kb.vkCode` against a generic `VK_SHIFT` silently never matches — the
   "phantom Shift" bug (see `known-issues.md` 2026-07-07). Use `is_modifier_vk`.
-- **`SWP_ASYNCWINDOWPOS`** — for cross-process `SetWindowPos` from a worker that must
-  not block on a busy foreign app (the drag `position_worker`). Posts the request to
-  the target's queue and returns immediately. Only for the transient drag-follow;
-  the authoritative final rect is re-applied synchronously on drop.
+- **DWM live thumbnail** (`DwmRegisterThumbnail` → `DwmUpdateThumbnailProperties` →
+  `DwmUnregisterThumbnail`) mirrors ANY top-level window into a dest window, GPU-
+  composited — works on GPU apps (Chrome) where `PrintWindow` is black. Used for the
+  live move-drag preview. windows-rs 0.58: the id is a raw `isize` (no `HTHUMBNAIL`
+  type); `DwmRegisterThumbnail(dest, src) -> Result<isize>`. It PRESERVES the source
+  aspect ratio (letterboxes if the dest aspect differs) — fine for move, not resize.
+  Never move the real source window off-screen to "hide the original" — a crash
+  mid-drag would strand it (the outline / thumbnail leave the real window untouched
+  until release).
 - Swallowing a modifier key-UP in a hook (returning 1) while a capture mode is open
   leaves `GetAsyncKeyState` reporting that modifier stuck down globally — always let
   modifier keys fall through.

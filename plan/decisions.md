@@ -2,6 +2,15 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-08 — Full: **live DWM-thumbnail move drag**. Alt-move mirrors the window
+  with a `DwmRegisterThumbnail` overlay (GPU-composited — live even on Chrome, where
+  PrintWindow is black). Real window is NEVER moved during the drag (bar #1: can't
+  lose a window), committed once on release; falls back to the outline if registration
+  fails. Resize stays outline (thumbnails preserve source aspect → would letterbox).
+  **Ghost-tile fix**: `workspace_layout` now skips `!IsWindow` HWNDs (missed
+  EVENT_OBJECT_DESTROY left a stale slot). Settings stub is now windows-subsystem (no
+  console flash the WM could tile). (`known-issues.md`, `win32-reference.md`)
+
 - 2026-07-07 — Full: **outline drag** replaces live per-frame `SetWindowPos` for
   Alt-move/resize. Foreign-window live resize stalls on the app's own repaint (Astur
   was 0.4% CPU — not the bottleneck; a Windows WM can't own another app's surface

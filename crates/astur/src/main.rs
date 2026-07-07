@@ -105,8 +105,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use std::collections::{HashMap, VecDeque};
 use core::ffi::c_void;
 use windows::Win32::Graphics::Dwm::{
-    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    DwmFlush, DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute,
+    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
     DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
@@ -233,10 +235,97 @@ unsafe fn hide_outline() {
     }
 }
 
-/// Trivial WndProc for the outline overlay. Must be its OWN proc (not the marker's,
-/// which handles WM_DISPLAYCHANGE/WM_RELOAD and would double-fire the bar rebuild).
+/// Trivial WndProc for the outline / thumbnail overlays. Must be its OWN proc (not
+/// the marker's, which handles WM_DISPLAYCHANGE/WM_RELOAD and would double-fire the
+/// bar rebuild).
 unsafe extern "system" fn outline_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     DefWindowProcW(h, msg, w, l)
+}
+
+// --- Live DWM-thumbnail drag preview (move) --------------------------------
+// For a MOVE we mirror the window live with a DWM thumbnail (GPU-composited — works
+// even on Chrome, where PrintWindow returns black). The real window is NEVER moved
+// during the drag; only the thumbnail overlay follows the cursor, so an interrupted
+// drag can't lose a window (the #1 rule). commit_rect places the real window on
+// release. Resize keeps the outline: a DWM thumbnail preserves the source aspect
+// ratio, so it would letterbox as the aspect changes.
+static THUMB_HWND: AtomicIsize = AtomicIsize::new(0); // overlay DWM renders into
+static THUMB_ID: AtomicIsize = AtomicIsize::new(0); // HTHUMBNAIL (0 = none active)
+static DRAG_THUMB: AtomicBool = AtomicBool::new(false); // this drag uses the thumbnail
+
+unsafe fn thumb_props(id: isize, w: i32, h: i32) {
+    let props = DWM_THUMBNAIL_PROPERTIES {
+        dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
+        rcDestination: RECT { left: 0, top: 0, right: w, bottom: h },
+        opacity: 255,
+        fVisible: BOOL(1),
+        fSourceClientAreaOnly: BOOL(0),
+        ..Default::default()
+    };
+    let _ = DwmUpdateThumbnailProperties(id, &props);
+}
+
+/// Begin a live thumbnail preview of `src` at (x, y, w, h). Returns false if the
+/// thumbnail can't be registered (caller falls back to the outline).
+unsafe fn thumb_begin(src: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
+    let ov = THUMB_HWND.load(Ordering::Relaxed);
+    if ov == 0 || w <= 0 || h <= 0 {
+        return false;
+    }
+    let id = match DwmRegisterThumbnail(hwnd_from(ov), hwnd_from(src)) {
+        Ok(id) => id,
+        Err(_) => return false,
+    };
+    THUMB_ID.store(id, Ordering::Relaxed);
+    let _ = SetWindowPos(hwnd_from(ov), HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    thumb_props(id, w, h);
+    true
+}
+
+unsafe fn thumb_update(x: i32, y: i32, w: i32, h: i32) {
+    let ov = THUMB_HWND.load(Ordering::Relaxed);
+    let id = THUMB_ID.load(Ordering::Relaxed);
+    if ov == 0 || id == 0 || w <= 0 || h <= 0 {
+        return;
+    }
+    let _ = SetWindowPos(hwnd_from(ov), HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
+    thumb_props(id, w, h);
+}
+
+unsafe fn thumb_end() {
+    let id = THUMB_ID.load(Ordering::Relaxed);
+    if id != 0 {
+        let _ = DwmUnregisterThumbnail(id);
+        THUMB_ID.store(0, Ordering::Relaxed);
+    }
+    let ov = THUMB_HWND.load(Ordering::Relaxed);
+    if ov != 0 {
+        let _ = ShowWindow(hwnd_from(ov), SW_HIDE);
+    }
+}
+
+// Move-drag preview: a live thumbnail when it registers, else the outline frame.
+unsafe fn drag_preview_begin(src: isize, x: i32, y: i32, w: i32, h: i32) {
+    if thumb_begin(src, x, y, w, h) {
+        DRAG_THUMB.store(true, Ordering::Relaxed);
+    } else {
+        DRAG_THUMB.store(false, Ordering::Relaxed);
+        show_outline(x, y, w, h);
+    }
+}
+unsafe fn drag_preview_update(x: i32, y: i32, w: i32, h: i32) {
+    if DRAG_THUMB.load(Ordering::Relaxed) {
+        thumb_update(x, y, w, h);
+    } else {
+        show_outline(x, y, w, h);
+    }
+}
+unsafe fn drag_preview_end() {
+    if DRAG_THUMB.load(Ordering::Relaxed) {
+        thumb_end();
+    } else {
+        hide_outline();
+    }
 }
 
 /// Commit a previewed rect to the real window in one synchronous SetWindowPos —
@@ -757,9 +846,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = y;
                     s.cur_w = w;
                     s.cur_h = h;
+                    let src = s.hwnd;
                     ANY_DRAG.store(true, Ordering::Relaxed);
                     drop(s);
-                    show_outline(x, y, w, h);
+                    drag_preview_begin(src, x, y, w, h);
                     return suppress;
                 } else if GetWindowRect(hwnd, &mut rect).is_ok() {
                     let mut s = STATE.lock().unwrap();
@@ -775,9 +865,16 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = rect.top;
                     s.cur_w = rect.right - rect.left;
                     s.cur_h = rect.bottom - rect.top;
+                    let src = s.hwnd;
                     ANY_DRAG.store(true, Ordering::Relaxed);
                     drop(s);
-                    show_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+                    drag_preview_begin(
+                        src,
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                    );
                     return suppress;
                 }
             }
@@ -836,7 +933,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = ny;
                     s.cur_w = s.win_w;
                     s.cur_h = s.win_h;
-                    show_outline(nx, ny, s.win_w, s.win_h);
+                    drag_preview_update(nx, ny, s.win_w, s.win_h);
                 }
                 Mode::Resize => {
                     // Drag the nearest corner; the opposite corner stays fixed.
@@ -890,7 +987,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
-                hide_outline();
+                drag_preview_end();
                 // Commit the previewed position to the real window, then re-integrate
                 // it into the layout (retile overrides tiled windows; a floating window
                 // keeps this dropped rect).
@@ -1655,7 +1752,14 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
         .windows
         .iter()
         .copied()
-        .filter(|h| !ws.floating.contains(h) && !IsIconic(hwnd_from(*h)).as_bool())
+        // Skip dead HWNDs: if a window was destroyed but its EVENT_OBJECT_DESTROY was
+        // missed (WinEvent hooks can drop events under load), a stale entry would
+        // otherwise reserve an empty tile — the "ghost window taking a tile" bug.
+        .filter(|h| {
+            IsWindow(hwnd_from(*h)).as_bool()
+                && !ws.floating.contains(h)
+                && !IsIconic(hwnd_from(*h)).as_bool()
+        })
         .collect();
     let n = tiled.len();
     if n == 0 {
@@ -6397,6 +6501,34 @@ fn main() {
         .expect("CreateWindowExW failed");
         let _ = SetLayeredWindowAttributes(outline, COLORREF(0), 220, LWA_ALPHA);
         OUTLINE_HWND.store(outline.0 as isize, Ordering::Relaxed);
+
+        // Thumbnail overlay: a plain (non-layered) topmost tool window DWM renders
+        // the live window mirror into during a move-drag. Black background is never
+        // seen — the thumbnail fills the whole client.
+        let thumb_wc = WNDCLASSW {
+            lpfnWndProc: Some(outline_wndproc),
+            hInstance: hinst,
+            hbrBackground: CreateSolidBrush(COLORREF(0)),
+            lpszClassName: w!("astur_thumb"),
+            ..Default::default()
+        };
+        RegisterClassW(&thumb_wc);
+        let thumb = CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+            w!("astur_thumb"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            10,
+            10,
+            None,
+            None,
+            hinst,
+            None,
+        )
+        .expect("CreateWindowExW failed");
+        THUMB_HWND.store(thumb.0 as isize, Ordering::Relaxed);
 
         // Status bar on every monitor (waybar-style). Register the class once,
         // build the font, then create a bar window per monitor.

@@ -8,6 +8,11 @@
 //
 // This stub exists so the workspace compiles and the crate slot is reserved. The real
 // egui UI replaces it next.
+//
+// No console in release: launched from the WM's tray, a console-subsystem stub would
+// FLASH a console window that the WM can briefly try to tile (a ghost tile). Windows
+// subsystem = no console. (Debug keeps the console for dev output.)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
     println!("astur-settings (WIP) — friendly editor for astur.conf.");
