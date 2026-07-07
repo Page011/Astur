@@ -93,7 +93,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetCursorPos,
     TranslateMessage,
     UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HWND_TOPMOST, KBDLLHOOKSTRUCT,
-    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING,
+    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
     SWP_NOZORDER,
     SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, DestroyWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
     WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
@@ -279,6 +279,19 @@ unsafe fn thumb_begin(src: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
     THUMB_ID.store(id, Ordering::Relaxed);
     let _ = SetWindowPos(hwnd_from(ov), HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     thumb_props(id, w, h);
+    // Park the real window far off-screen (keep its size) so we don't see both the
+    // original AND the live thumbnail. It stays composited off-screen, so the
+    // thumbnail keeps mirroring it. NOT SW_HIDE (that blanks the thumbnail source).
+    // commit_rect on release brings it back on-screen at the final rect.
+    let _ = SetWindowPos(
+        hwnd_from(src),
+        None,
+        -32000,
+        -32000,
+        0,
+        0,
+        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+    );
     true
 }
 
@@ -906,9 +919,16 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = rect.top;
                     s.cur_w = rect.right - rect.left;
                     s.cur_h = rect.bottom - rect.top;
+                    let src = s.hwnd;
                     ANY_DRAG.store(true, Ordering::Relaxed);
                     drop(s);
-                    show_outline(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+                    drag_preview_begin(
+                        src,
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                    );
                     return suppress;
                 }
             }
@@ -971,7 +991,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = y;
                     s.cur_w = w;
                     s.cur_h = h;
-                    show_outline(x, y, w, h);
+                    drag_preview_update(x, y, w, h);
                     let corner_x = if s.left { x } else { x + w };
                     let corner_y = if s.top { y } else { y + h };
                     show_marker(corner_x, corner_y, s.left, s.top);
@@ -1005,7 +1025,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
                 hide_marker();
-                hide_outline();
+                drag_preview_end();
                 // Commit the previewed size to the real window (synchronous, so the
                 // manager reads the final rect), then apply it to the layout.
                 commit_rect(h, cx, cy, cw, ch);
@@ -4682,7 +4702,7 @@ const LAUNCHER_H: i32 = 452;
 const LAUNCHER_ROW_H: i32 = 40;
 const LAUNCHER_PAD: i32 = 16;
 const LAUNCHER_HEADER: i32 = 54; // query row height
-const LAUNCHER_ICON_PX: i32 = 28; // per-row app icon box
+const LAUNCHER_ICON_PX: i32 = 32; // per-row app icon box (Start-Menu-ish size)
 const LAUNCHER_SEL_RADIUS: i32 = 12; // rounded selection pill
 
 static LAUNCHER_OPEN: AtomicBool = AtomicBool::new(false);
@@ -4872,10 +4892,10 @@ unsafe fn load_icon(path: &str, px: i32) -> isize {
     let factory: windows::core::Result<IShellItemImageFactory> =
         SHCreateItemFromParsingName(PCWSTR(w.as_ptr()), None);
     let Ok(factory) = factory else { return -1 };
-    // Request 2x the display box so downscaling (rather than upscaling a tiny
-    // source) keeps the icon crisp; AlphaBlend does the final fit at paint time.
-    let src = (px * 2).max(px);
-    match factory.GetImage(SIZE { cx: src, cy: src }, SIIGBF_ICONONLY) {
+    // Request the icon at EXACTLY the display size. The shell scales to the request
+    // with high quality (picking the best native size), and we blit it 1:1 — no
+    // second, softer AlphaBlend downscale (requesting 2x then shrinking looked mushy).
+    match factory.GetImage(SIZE { cx: px, cy: px }, SIIGBF_ICONONLY) {
         Ok(hb) => {
             premultiply_bgra(hb);
             hb.0 as isize

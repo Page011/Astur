@@ -65,10 +65,11 @@ APIs Astur leans on, where the docs are, and which calls are slow/buggy traps.
   composited — works on GPU apps (Chrome) where `PrintWindow` is black. Used for the
   live move-drag preview. windows-rs 0.58: the id is a raw `isize` (no `HTHUMBNAIL`
   type); `DwmRegisterThumbnail(dest, src) -> Result<isize>`. It PRESERVES the source
-  aspect ratio (letterboxes if the dest aspect differs) — fine for move, not resize.
-  Never move the real source window off-screen to "hide the original" — a crash
-  mid-drag would strand it (the outline / thumbnail leave the real window untouched
-  until release).
+  aspect ratio (letterboxes if the dest aspect differs). To avoid showing the original
+  AND the thumbnail, the real window is parked far off-screen (`-32000`) during the
+  drag — off-screen (NOT `SW_HIDE`/minimize, which blank the thumbnail source) keeps
+  it composited, and `commit_rect` restores it on release. Accept the small risk that
+  a hard crash mid-drag strands it; button-up always restores.
 - Swallowing a modifier key-UP in a hook (returning 1) while a capture mode is open
   leaves `GetAsyncKeyState` reporting that modifier stuck down globally — always let
   modifier keys fall through.

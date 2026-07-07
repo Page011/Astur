@@ -12,16 +12,20 @@ hold a slot. Also: the `astur-settings` stub is now `windows_subsystem = "window
 so launching it from the tray no longer flashes a console window the WM could briefly
 tile. Future hardening: a periodic missed-destroy sweep over the whole managed set.
 
-## 2026-07-08 — Live DWM thumbnail for the move drag (Chrome-safe, aspect-limited)
+## 2026-07-08 — Live DWM thumbnail for move AND resize (Chrome-safe)
 
-Alt-move uses `DwmRegisterThumbnail` to mirror the dragged window live into a topmost
-overlay — GPU-composited, so it works on Chrome (unlike `PrintWindow`, which returns
-black on GPU apps). The real window is NOT moved during the drag (an interrupted drag
-must never lose it) — only committed on release. In windows-rs 0.58 the thumbnail id
-is a raw `isize` (there is NO `HTHUMBNAIL` type) and `DwmRegisterThumbnail` returns
-`Result<isize>` (2 args, not an out-param). Trap: DWM thumbnails preserve the SOURCE
-aspect ratio, so they letterbox as the aspect changes — that's why RESIZE keeps the
-outline, not a thumbnail. Falls back to the outline if registration fails.
+Alt-move and Alt-resize mirror the dragged window live via `DwmRegisterThumbnail`
+into a topmost overlay — GPU-composited, so it works on Chrome (unlike `PrintWindow`,
+which returns black on GPU apps). The real window is **parked far off-screen**
+(`-32000,-32000`, same size) for the duration so the user sees only the thumbnail,
+not the original AND a copy. Off-screen (not `SW_HIDE`/minimize) keeps it DWM-
+composited so the thumbnail stays live; `commit_rect` restores it on release. The
+only loss risk is a hard crash mid-drag; button-up always restores, so it's
+acceptable (standard technique). In windows-rs 0.58 the thumbnail id is a raw `isize`
+(NO `HTHUMBNAIL` type); `DwmRegisterThumbnail(dest, src) -> Result<isize>`. DWM
+thumbnails preserve source aspect ratio, so resize letterboxes when the aspect
+changes (accepted — user chose live content over the outline). Falls back to the
+outline if registration fails (then the real window is NOT parked off-screen).
 
 ## 2026-07-07 — RESOLVED: move/resize slow — live cross-process SetWindowPos per frame
 

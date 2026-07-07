@@ -2,6 +2,15 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-08 (2) — Drag polish: the real window is now **parked off-screen** during a
+  thumbnail drag (was left in place → user saw original + thumbnail), and **RESIZE also
+  uses the live thumbnail** (accepts DWM aspect-ratio letterbox — user chose live
+  content). Off-screen keeps it composited so the thumbnail stays live; `commit_rect`
+  restores on release. Launcher icons: request at the EXACT display size (1:1 blit,
+  crisper than 2x-then-downscale) + box 28→32. Still open (next launcher pass):
+  jumbo/`DrawIconEx` for Start-Menu quality, missing-icon fallback, Tab→columns, mouse
+  on popups. (`known-issues.md`, `win32-reference.md`)
+
 - 2026-07-08 — Full: **live DWM-thumbnail move drag**. Alt-move mirrors the window
   with a `DwmRegisterThumbnail` overlay (GPU-composited — live even on Chrome, where
   PrintWindow is black). Real window is NEVER moved during the drag (bar #1: can't
