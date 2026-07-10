@@ -54,7 +54,8 @@ use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
     SetWindowRgn, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
     DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
+    DT_VCENTER, DRAW_TEXT_FORMAT, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    OUT_DEFAULT_PRECIS,
     PAINTSTRUCT, RGN_DIFF, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -69,11 +70,11 @@ use windows::Win32::UI::Shell::{
     ShellExecuteW, SHCreateItemFromParsingName, IShellItem, IEnumShellItems,
     IShellItemImageFactory, BHID_EnumItems, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING,
     SIIGBF_ICONONLY, Shell_NotifyIconW, NOTIFYICONDATAW, NIM_ADD, NIM_DELETE, NIF_ICON,
-    NIF_MESSAGE, NIF_TIP, SHGetFileInfoW, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGetImageList,
-    SHIL_JUMBO,
+    NIF_MESSAGE, NIF_TIP, SHGetFileInfoW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_SYSICONINDEX,
+    SHGFI_USEFILEATTRIBUTES, SHGetImageList, SHIL_LARGE,
 };
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
-use windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES;
+use windows::Win32::Storage::FileSystem::{FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CreateIconFromResourceEx, CreateIconIndirect, CreatePopupMenu, DestroyMenu,
     DrawIconEx, LoadIconW, PostQuitMessage, TrackPopupMenu, DI_NORMAL, HICON, ICONINFO,
@@ -100,7 +101,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
     SWP_NOZORDER,
     SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, DestroyWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -202,13 +204,12 @@ impl Drag {
 
 static STATE: Mutex<Drag> = Mutex::new(Drag::new());
 
-/// Drag preview is an outline overlay, not the real window. Moving/resizing a
-/// foreign window live means a cross-process SetWindowPos per mouse event, which
-/// stalls on the target app's own repaint (a browser re-layouts per pixel — the
-/// "resizing is slow" complaint). Instead we drag a cheap in-process frame overlay
-/// and commit the final rect to the real window ONCE on release. Silky regardless
-/// of the target app — the same reason Windows' own "show window contents while
-/// dragging = off" is instant. (A live GPU thumbnail is the fancier future path.)
+/// Drag previews never touch the real window per frame. Moving/resizing a foreign
+/// window live means a cross-process SetWindowPos per mouse event, which stalls on
+/// the target app's own repaint (a browser re-layouts per pixel — the "resizing is
+/// slow" complaint). The primary preview is a live DWM thumbnail (below); this
+/// outline frame is the fallback when a thumbnail can't register. Either way the
+/// final rect is committed to the real window ONCE on release, by the manager.
 static OUTLINE_HWND: AtomicIsize = AtomicIsize::new(0);
 const OUTLINE_THICK: i32 = 3;
 
@@ -246,13 +247,14 @@ unsafe extern "system" fn outline_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARA
     DefWindowProcW(h, msg, w, l)
 }
 
-// --- Live DWM-thumbnail drag preview (move) --------------------------------
-// For a MOVE we mirror the window live with a DWM thumbnail (GPU-composited — works
-// even on Chrome, where PrintWindow returns black). The real window is NEVER moved
-// during the drag; only the thumbnail overlay follows the cursor, so an interrupted
-// drag can't lose a window (the #1 rule). commit_rect places the real window on
-// release. Resize keeps the outline: a DWM thumbnail preserves the source aspect
-// ratio, so it would letterbox as the aspect changes.
+// --- Live DWM-thumbnail drag preview (move + resize) -----------------------
+// The dragged window is mirrored live with a DWM thumbnail (GPU-composited — works
+// even on Chrome, where PrintWindow returns black). The manager parks the real
+// window off-screen for the duration (Cmd::DragPark) so only the mirror is visible,
+// and commits the final rect on release (Cmd::DragMoved/DragResized) — the hook
+// itself never does a cross-process SetWindowPos. Thumbnails preserve the source
+// aspect ratio, so a resize letterboxes while the aspect changes (accepted for live
+// content); registration failure falls back to the outline (and no park).
 static THUMB_HWND: AtomicIsize = AtomicIsize::new(0); // overlay DWM renders into
 static THUMB_ID: AtomicIsize = AtomicIsize::new(0); // HTHUMBNAIL (0 = none active)
 static DRAG_THUMB: AtomicBool = AtomicBool::new(false); // this drag uses the thumbnail
@@ -283,19 +285,7 @@ unsafe fn thumb_begin(src: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
     THUMB_ID.store(id, Ordering::Relaxed);
     let _ = SetWindowPos(hwnd_from(ov), HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
     thumb_props(id, w, h);
-    // Park the real window far off-screen (keep its size) so we don't see both the
-    // original AND the live thumbnail. It stays composited off-screen, so the
-    // thumbnail keeps mirroring it. NOT SW_HIDE (that blanks the thumbnail source).
-    // commit_rect on release brings it back on-screen at the final rect.
-    let _ = SetWindowPos(
-        hwnd_from(src),
-        None,
-        -32000,
-        -32000,
-        0,
-        0,
-        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-    );
+    let _ = src; // parked by the manager (Cmd::DragPark) — never from the hook
     true
 }
 
@@ -321,10 +311,15 @@ unsafe fn thumb_end() {
     }
 }
 
-// Move-drag preview: a live thumbnail when it registers, else the outline frame.
+// Drag preview: a live thumbnail when it registers, else the outline frame.
 unsafe fn drag_preview_begin(src: isize, x: i32, y: i32, w: i32, h: i32) {
     if thumb_begin(src, x, y, w, h) {
         DRAG_THUMB.store(true, Ordering::Relaxed);
+        // The mirror overlay is up (frame 0 == the window's own pixels). Now ask
+        // the manager to park the real window off-screen so the user sees only the
+        // thumbnail — via the queue, because the hook must never do a cross-process
+        // SetWindowPos. The park lands under/behind the already-covering overlay.
+        push_cmd(Cmd::DragPark(src));
     } else {
         DRAG_THUMB.store(false, Ordering::Relaxed);
         show_outline(x, y, w, h);
@@ -345,10 +340,10 @@ unsafe fn drag_preview_end() {
     }
 }
 
-/// Commit a previewed rect to the real window in one synchronous SetWindowPos —
-/// synchronous (not async) so the manager's DragMoved/DragResized reads the final
-/// rect via GetWindowRect right after. Handles floating windows (which keep this
-/// dropped rect) and tiled ones (which retile over it) alike.
+/// Commit a previewed rect to the real window in one synchronous SetWindowPos.
+/// Runs on the MANAGER thread (DragMoved/DragResized/DragPark handlers), never on a
+/// hook. Handles floating windows (which keep this dropped rect) and tiled ones
+/// (which retile over it) alike.
 unsafe fn commit_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
     let _ = SetWindowPos(
         hwnd_from(hwnd),
@@ -612,7 +607,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                                     post(LA_ACTIVATE, 0);
                                 }
                             } else if vk == VK_TAB.0 as u32 {
-                                post(LA_TAB, 0); // toggle the file detail footer
+                                post(LA_TAB, 0); // toggle the wide column view
                             } else if vk == VK_BACK.0 as u32 {
                                 post(LA_BACK, 0);
                             } else if vk == VK_UP.0 as u32 {
@@ -809,21 +804,50 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let msg = wparam.0 as u32;
     let suppress = LRESULT(1);
 
-    // Click outside the open launcher dismisses it. The picker is NOACTIVATE (never
-    // focused), so the global hook is the only place that sees the click. Cheap: one
-    // atomic when the launcher's closed (the common case), a rect compare only while
-    // it's open AND the event is a button-down.
-    if LAUNCHER_OPEN.load(Ordering::Relaxed) && matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) {
+    // Popup mouse routing (launcher + system menu). Closed = one atomic load, the
+    // common case. Open: a click OUTSIDE dismisses (eaten, so it doesn't also act
+    // on whatever is underneath); the WHEEL inside scrolls the list (eaten, so the
+    // app under the popup doesn't scroll — wheel routing to unfocused windows is a
+    // user setting, the hook is deterministic). Clicks INSIDE fall through: the
+    // popups are NOACTIVATE but still receive mouse messages directly, and their
+    // wndprocs handle hover-select and click-activate.
+    if LAUNCHER_OPEN.load(Ordering::Relaxed) {
         let inside = pt.x >= LAUNCHER_RECT_L.load(Ordering::Relaxed)
             && pt.x < LAUNCHER_RECT_R.load(Ordering::Relaxed)
             && pt.y >= LAUNCHER_RECT_T.load(Ordering::Relaxed)
             && pt.y < LAUNCHER_RECT_B.load(Ordering::Relaxed);
-        if !inside {
-            let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
-            if hl != 0 {
+        let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
+        if hl != 0 {
+            if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) && !inside {
                 let _ = PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_CLOSE), LPARAM(0));
+                return suppress; // eat the dismissing click so it doesn't also act
             }
-            return suppress; // eat the dismissing click so it doesn't also act
+            if msg == WM_MOUSEWHEEL && inside {
+                // Wheel delta rides the high word of mouseData (signed, ±120/notch).
+                let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
+                let step: isize = if delta > 0 { 1 } else { -1 };
+                let _ = PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_SCROLL), LPARAM(step));
+                return suppress;
+            }
+        }
+    }
+    if SYSMENU_OPEN.load(Ordering::Relaxed) {
+        let inside = pt.x >= SYSMENU_RECT_L.load(Ordering::Relaxed)
+            && pt.x < SYSMENU_RECT_R.load(Ordering::Relaxed)
+            && pt.y >= SYSMENU_RECT_T.load(Ordering::Relaxed)
+            && pt.y < SYSMENU_RECT_B.load(Ordering::Relaxed);
+        let hs = SYSMENU_HWND.load(Ordering::Relaxed);
+        if hs != 0 {
+            if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN) && !inside {
+                let _ = PostMessageW(hwnd_from(hs), WM_SYSMENU, WPARAM(SM_CLOSE), LPARAM(0));
+                return suppress;
+            }
+            if msg == WM_MOUSEWHEEL && inside {
+                let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
+                let act = if delta > 0 { SM_UP } else { SM_DOWN };
+                let _ = PostMessageW(hwnd_from(hs), WM_SYSMENU, WPARAM(act), LPARAM(0));
+                return suppress;
+            }
         }
     }
 
@@ -1011,12 +1035,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
+                // Push first so the manager can commit the previewed rect (and
+                // restore a parked window) at the earliest; then drop the preview.
+                push_cmd(Cmd::DragMoved(
+                    h,
+                    pt.x,
+                    pt.y,
+                    RECT { left: cx, top: cy, right: cx + cw, bottom: cy + ch },
+                ));
                 drag_preview_end();
-                // Commit the previewed position to the real window, then re-integrate
-                // it into the layout (retile overrides tiled windows; a floating window
-                // keeps this dropped rect).
-                commit_rect(h, cx, cy, cw, ch);
-                push_cmd(Cmd::DragMoved(h, pt.x, pt.y));
                 return suppress;
             }
         }
@@ -1028,12 +1055,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
+                // Push first (manager commits the previewed rect + restores a parked
+                // window), then tear the preview down.
+                push_cmd(Cmd::DragResized(
+                    h,
+                    Some(RECT { left: cx, top: cy, right: cx + cw, bottom: cy + ch }),
+                ));
                 hide_marker();
                 drag_preview_end();
-                // Commit the previewed size to the real window (synchronous, so the
-                // manager reads the final rect), then apply it to the layout.
-                commit_rect(h, cx, cy, cw, ch);
-                push_cmd(Cmd::DragResized(h));
                 return suppress;
             }
         }
@@ -1082,8 +1111,12 @@ enum Cmd {
     CloseFocused,
     Retile,
     RefreshMonitors,
-    DragMoved(isize, i32, i32), // window dropped after an Alt+left-drag (hwnd, x, y)
-    DragResized(isize),         // window released after an Alt+right-drag resize
+    // Alt-drag lifecycle. The hook never touches the real window (a cross-process
+    // SetWindowPos can stall on a busy app) — it previews with an overlay and
+    // pushes these; the manager parks/commits the real window.
+    DragPark(isize),                   // thumbnail drag began: park the window off-screen
+    DragMoved(isize, i32, i32, RECT),  // dropped after Alt+left-drag: (hwnd, x, y, final rect)
+    DragResized(isize, Option<RECT>),  // released after resize; None = read the live rect
     LaunchTerminal,             // Alt+Enter
     LaunchBrowser,              // Alt+Shift+Enter
     FocusGeo(Dir),              // Alt+arrow: focus the window in a direction
@@ -3484,7 +3517,29 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
         }
         Cmd::Retile => retile_all(mgr),
         Cmd::RefreshMonitors => refresh_monitors(mgr),
-        Cmd::DragMoved(h, x, y) => {
+        Cmd::DragPark(h) => {
+            // Thumbnail drag began: park the real window far off-screen (size kept)
+            // so the user sees only the live DWM mirror. Off-screen, NOT SW_HIDE — a
+            // hidden window blanks its thumbnail. The drop (DragMoved/DragResized)
+            // commits the final rect, which restores it on-screen.
+            if IsWindow(hwnd_from(h)).as_bool() {
+                let _ = SetWindowPos(
+                    hwnd_from(h),
+                    None,
+                    -32000,
+                    -32000,
+                    0,
+                    0,
+                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+                );
+            }
+        }
+        Cmd::DragMoved(h, x, y, r) => {
+            // Land the previewed rect FIRST — the real window never moved during the
+            // drag (the thumbnail path even parked it off-screen), so this single
+            // SetWindowPos is the actual move. It must precede every early-out:
+            // floating, unmanaged, and tiling-off windows keep exactly this rect.
+            commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
             if !mgr.tiling {
                 return;
             }
@@ -3535,7 +3590,13 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             focus_window(h);
         }
-        Cmd::DragResized(h) => {
+        Cmd::DragResized(h, rect) => {
+            // Alt-resize carries the previewed rect (commit before any early-out so
+            // floating/unmanaged windows land too); the native MOVESIZEEND path
+            // passes None and the window already sits at its final rect.
+            if let Some(r) = rect {
+                commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
             if !mgr.tiling {
                 return;
             }
@@ -3547,11 +3608,17 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             {
                 return;
             }
-            let mut r = RECT::default();
-            if GetWindowRect(hwnd_from(h), &mut r).is_err() {
-                retile_monitor(mgr, mi);
-                return;
-            }
+            let r = match rect {
+                Some(r) => r,
+                None => {
+                    let mut r = RECT::default();
+                    if GetWindowRect(hwnd_from(h), &mut r).is_err() {
+                        retile_monitor(mgr, mi);
+                        return;
+                    }
+                    r
+                }
+            };
             let wa = mgr.monitors[mi].work_area;
             // Tiled order must match what retile_monitor / dwindle_layout use.
             let tiled: Vec<isize> = mgr.monitors[mi].workspaces[wi]
@@ -4606,7 +4673,9 @@ unsafe extern "system" fn win_event_proc(
         // into the tiling: master keeps its new width as the ratio, everything
         // else snaps back so windows never overlap.
         EVENT_SYSTEM_MOVESIZEEND if !SUPPRESS.load(Ordering::Relaxed) => {
-            push_cmd(Cmd::DragResized(hwnd.0 as isize));
+            // No preview rect here — the window is already where the user put it;
+            // the manager reads the live rect (None).
+            push_cmd(Cmd::DragResized(hwnd.0 as isize, None));
         }
         _ => {}
     }
@@ -4689,8 +4758,9 @@ const LA_UP: usize = 3;
 const LA_DOWN: usize = 4;
 const LA_ACTIVATE: usize = 5;
 const LA_CLOSE: usize = 6;
-const LA_TAB: usize = 7; // toggle the file detail footer
+const LA_TAB: usize = 7; // toggle the wide column view (modified / size / path)
 const LA_ACTIVATE_ALT: usize = 8; // Shift+Enter: open a file's containing folder
+const LA_SCROLL: usize = 9; // mouse wheel: lParam = +1 (up) / -1 (down)
 
 // Theme (COLORREF is 0x00BBGGRR). Forte blue #366382 accent on a dark surface;
 // minimal chrome (thin frame, subtle divider) for a clean omarchy/rofi look.
@@ -4702,7 +4772,11 @@ const LAUNCHER_SELFG: u32 = 0x00FF_FFFF;
 const LAUNCHER_FRAME: u32 = 0x0033_2A26; // subtle blue-tinted 1px frame
 const LAUNCHER_DIVIDER: u32 = 0x0029_2929; // muted divider under the query row
 const LAUNCHER_W: i32 = 660;
+const LAUNCHER_WIDE_W: i32 = 1060; // Tab column view (clamped to the work area)
 const LAUNCHER_H: i32 = 452;
+const LAUNCHER_COLHDR: i32 = 22; // wide-mode column-header row height
+const COL_DATE_W: i32 = 150; // "Modified" column
+const COL_SIZE_W: i32 = 90; // "Size" column (right-aligned)
 const LAUNCHER_ROW_H: i32 = 40;
 const LAUNCHER_PAD: i32 = 16;
 const LAUNCHER_HEADER: i32 = 54; // query row height
@@ -4719,6 +4793,11 @@ static LAUNCHER_RECT_L: AtomicI32 = AtomicI32::new(0);
 static LAUNCHER_RECT_T: AtomicI32 = AtomicI32::new(0);
 static LAUNCHER_RECT_R: AtomicI32 = AtomicI32::new(0);
 static LAUNCHER_RECT_B: AtomicI32 = AtomicI32::new(0);
+// Last screen-space cursor position the launcher evaluated for hover-select.
+// Seeded on open so a popup appearing UNDER a still cursor can't steal selection;
+// only a genuine move afterwards hovers.
+static LAUNCHER_LAST_MX: AtomicI32 = AtomicI32::new(i32::MIN);
+static LAUNCHER_LAST_MY: AtomicI32 = AtomicI32::new(i32::MIN);
 
 // Lazy icon loader: paint enqueues visible app indices needing an icon; the icon
 // worker resolves the shell icon to an HBITMAP off the UI thread and repaints.
@@ -4729,7 +4808,7 @@ struct AppEntry {
     name: String,
     name_lc: String,
     path: String,    // .lnk/.url file path, or `shell:AppsFolder\<id>` for UWP/system apps
-    icon: isize,     // 0 = not yet loaded, -1 = none/failed, else an HBITMAP (32bpp ARGB)
+    icon: isize,     // 0 = not yet loaded, -1 = none/failed, else an HICON (owned)
 }
 /// One file/folder result from the Windows Search index (Phase 3).
 struct FileHit {
@@ -4750,8 +4829,9 @@ struct LauncherState {
     files: Vec<FileHit>,   // current file-search results (top-N, replaced per query)
     filtered: Vec<Hit>,    // merged app + file rows, best first
     sel: usize,
+    scroll: usize,         // first visible row (wheel scrolls; keyboard keeps sel visible)
     loaded: bool,
-    detail: bool,          // Tab: show the expanded detail footer for a file row
+    wide: bool,            // Tab: wide column view (modified / size / path)
     search_gen: u64,       // generation of `files` (drops stale async results)
 }
 static LAUNCHER_STATE: Mutex<LauncherState> = Mutex::new(LauncherState {
@@ -4760,8 +4840,9 @@ static LAUNCHER_STATE: Mutex<LauncherState> = Mutex::new(LauncherState {
     files: Vec::new(),
     filtered: Vec::new(),
     sel: 0,
+    scroll: 0,
     loaded: false,
-    detail: false,
+    wide: false,
     search_gen: 0,
 });
 
@@ -4896,18 +4977,30 @@ fn launcher_enumerate() -> Vec<AppEntry> {
 /// alpha'd icons (this is how "Start-Menu-quality" launchers do it). Fallback =
 /// `IShellItemImageFactory` (handles UWP / `shell:AppsFolder` parsing names), whose
 /// HBITMAP is wrapped into an HICON so the paint path is uniform (`DrawIconEx`).
-unsafe fn load_icon(path: &str, _px: i32) -> isize {
-    if let Some(hicon) = jumbo_icon(path) {
+unsafe fn load_icon(path: &str, px: i32) -> isize {
+    // 1) Shell item image at EXACTLY the display size: the shell picks the best
+    //    native frame and scales it high-quality, and it handles .lnk, .exe AND
+    //    UWP (`shell:AppsFolder\…`) parsing names. Do NOT use SHIL_JUMBO here:
+    //    icons with no 256px frame come back as a tiny 32px sprite in the CORNER
+    //    of the 256px cell, and DrawIconEx's 256→32 downscale is low-quality —
+    //    that combination was the "icon quality died" regression.
+    if let Some(hicon) = shell_item_hicon(path, px) {
         return hicon.0 as isize;
     }
-    if let Some(hicon) = shell_item_hicon(path, 256) {
+    // 2) System image list at native 32px (SHIL_LARGE == the display box, 1:1) —
+    //    robust for odd .lnk/.exe paths where the item factory fails.
+    if let Some(hicon) = sys_list_icon(path) {
+        return hicon.0 as isize;
+    }
+    // 3) Generic executable icon so a row never renders blank.
+    if let Some(hicon) = generic_app_icon() {
         return hicon.0 as isize;
     }
     -1
 }
 
-/// System image-list JUMBO (256px) icon for a file-backed shell path.
-unsafe fn jumbo_icon(path: &str) -> Option<HICON> {
+/// System image-list icon (SHIL_LARGE, native 32px) for a file-backed shell path.
+unsafe fn sys_list_icon(path: &str) -> Option<HICON> {
     let mut w: Vec<u16> = path.encode_utf16().collect();
     w.push(0);
     let mut shfi = SHFILEINFOW::default();
@@ -4921,13 +5014,51 @@ unsafe fn jumbo_icon(path: &str) -> Option<HICON> {
     if r == 0 {
         return None;
     }
-    let il: IImageList = SHGetImageList(SHIL_JUMBO as i32).ok()?;
+    let il: IImageList = SHGetImageList(SHIL_LARGE as i32).ok()?;
     let hicon = il.GetIcon(shfi.iIcon, ILD_TRANSPARENT.0).ok()?;
     (!hicon.0.is_null()).then_some(hicon)
 }
 
-/// Fallback: an `IShellItemImageFactory` HBITMAP wrapped into an HICON, for UWP /
-/// parsing-name entries `SHGetFileInfo` can't resolve. `px` is the requested size.
+/// Cached generic "application" icon (the shell's default .exe icon), used when
+/// both real resolvers fail so the row still shows something. 0 = not yet
+/// resolved, -1 = resolution failed, else an HICON we own for the process life.
+static GENERIC_APP_ICON: AtomicIsize = AtomicIsize::new(0);
+
+unsafe fn generic_app_icon() -> Option<HICON> {
+    let cached = GENERIC_APP_ICON.load(Ordering::Relaxed);
+    if cached == -1 {
+        return None;
+    }
+    if cached != 0 {
+        return Some(HICON(cached as *mut c_void));
+    }
+    // SHGFI_USEFILEATTRIBUTES: resolve by name+attributes only — the file need
+    // not exist, we just want the shell's stock icon for "an .exe".
+    let name: Vec<u16> = "app.exe".encode_utf16().chain(std::iter::once(0)).collect();
+    let mut shfi = SHFILEINFOW::default();
+    let r = SHGetFileInfoW(
+        PCWSTR(name.as_ptr()),
+        FILE_ATTRIBUTE_NORMAL,
+        Some(&mut shfi),
+        std::mem::size_of::<SHFILEINFOW>() as u32,
+        SHGFI_FLAGS(SHGFI_SYSICONINDEX.0 | SHGFI_USEFILEATTRIBUTES.0),
+    );
+    let hicon = if r != 0 {
+        SHGetImageList::<IImageList>(SHIL_LARGE as i32)
+            .ok()
+            .and_then(|il| il.GetIcon(shfi.iIcon, ILD_TRANSPARENT.0).ok())
+            .filter(|h| !h.0.is_null())
+    } else {
+        None
+    };
+    GENERIC_APP_ICON.store(hicon.map_or(-1, |h| h.0 as isize), Ordering::Relaxed);
+    hicon
+}
+
+/// Primary resolver: an `IShellItemImageFactory` image at `px` square, wrapped into
+/// an HICON so the paint path is uniform (`DrawIconEx`). The factory handles .lnk,
+/// .exe and UWP (`shell:AppsFolder\…`) parsing names, and scales from the icon's
+/// best native frame with high quality — request the EXACT display size and blit 1:1.
 unsafe fn shell_item_hicon(path: &str, px: i32) -> Option<HICON> {
     let mut w: Vec<u16> = path.encode_utf16().collect();
     w.push(0);
@@ -4977,11 +5108,11 @@ fn icon_worker() {
                     _ => continue,
                 }
             };
-            let hbmp = load_icon(&path, LAUNCHER_ICON_PX);
+            let hicon = load_icon(&path, LAUNCHER_ICON_PX);
             {
                 let mut st = LAUNCHER_STATE.lock().unwrap();
                 if let Some(e) = st.all.get_mut(idx) {
-                    e.icon = hbmp;
+                    e.icon = hicon;
                 }
             }
             let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
@@ -5368,20 +5499,31 @@ unsafe fn make_launcher_font() {
 
 /// Center the launcher on the monitor under the cursor and show it (no-activate
 /// — we drive it via the keyboard hook, so it must not steal focus).
+/// Size + center the picker on `wa`, publish its bounds for the mouse hook
+/// (click-outside dismiss + wheel routing), and repaint. `wide` = the Tab column
+/// view; the width is clamped to the work area on small screens.
+unsafe fn launcher_place(h: HWND, wa: RECT, wide: bool) {
+    let want = if wide { LAUNCHER_WIDE_W } else { LAUNCHER_W };
+    let win_w = want.min(wa.right - wa.left - 48).max(320);
+    let x = (wa.left + wa.right) / 2 - win_w / 2;
+    let y = (wa.top + wa.bottom) / 2 - LAUNCHER_H / 2;
+    let _ = SetWindowPos(h, HWND_TOPMOST, x, y, win_w, LAUNCHER_H, SWP_NOACTIVATE);
+    LAUNCHER_RECT_L.store(x, Ordering::Relaxed);
+    LAUNCHER_RECT_T.store(y, Ordering::Relaxed);
+    LAUNCHER_RECT_R.store(x + win_w, Ordering::Relaxed);
+    LAUNCHER_RECT_B.store(y + LAUNCHER_H, Ordering::Relaxed);
+    let _ = InvalidateRect(h, None, BOOL(0));
+}
+
 unsafe fn launcher_show(h: HWND) {
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
-    let wa = work_area_at(pt);
-    let x = (wa.left + wa.right) / 2 - LAUNCHER_W / 2;
-    let y = (wa.top + wa.bottom) / 2 - LAUNCHER_H / 2;
-    let _ = SetWindowPos(h, HWND_TOPMOST, x, y, LAUNCHER_W, LAUNCHER_H, SWP_NOACTIVATE);
-    // Publish bounds for the mouse hook's click-outside-to-dismiss check.
-    LAUNCHER_RECT_L.store(x, Ordering::Relaxed);
-    LAUNCHER_RECT_T.store(y, Ordering::Relaxed);
-    LAUNCHER_RECT_R.store(x + LAUNCHER_W, Ordering::Relaxed);
-    LAUNCHER_RECT_B.store(y + LAUNCHER_H, Ordering::Relaxed);
+    launcher_place(h, work_area_at(pt), false);
+    // Hover baseline: the popup opens under a possibly-still cursor; only a real
+    // move after this may hover-select.
+    LAUNCHER_LAST_MX.store(pt.x, Ordering::Relaxed);
+    LAUNCHER_LAST_MY.store(pt.y, Ordering::Relaxed);
     let _ = ShowWindow(h, SW_SHOWNA);
-    let _ = InvalidateRect(h, None, BOOL(0));
 }
 
 /// Hide the launcher and reset transient state.
@@ -5391,8 +5533,9 @@ unsafe fn launcher_close(h: HWND) {
     let mut st = LAUNCHER_STATE.lock().unwrap();
     st.query.clear();
     st.sel = 0;
+    st.scroll = 0;
     st.files.clear();
-    st.detail = false;
+    st.wide = false;
 }
 
 /// Launch the selected shortcut/app/file via the shell (resolves target/args/dir).
@@ -5425,6 +5568,39 @@ unsafe fn launcher_reveal_in_folder(path: &str) {
         PCWSTR::null(),
         SW_SHOW,
     );
+}
+
+// --- Launcher list geometry (paint + mouse hit-testing share these) ---------
+
+/// Top of the result list in client coords (below the query row, and below the
+/// column-header row in wide mode).
+fn launcher_list_top(st: &LauncherState) -> i32 {
+    LAUNCHER_HEADER + 6 + if st.wide { LAUNCHER_COLHDR } else { 0 }
+}
+
+/// Visible list rows for the current mode + client height.
+fn launcher_rows(st: &LauncherState, ht: i32) -> usize {
+    (((ht - 4) - launcher_list_top(st)) / LAUNCHER_ROW_H).max(1) as usize
+}
+
+/// Stored scroll clamped so the viewport never runs past the end of the list.
+fn launcher_scroll(st: &LauncherState, rows: usize) -> usize {
+    st.scroll.min(st.filtered.len().saturating_sub(rows))
+}
+
+/// Result-row index under a client-space `y`, or None on chrome/padding/empties.
+fn launcher_row_hit(st: &LauncherState, ht: i32, y: i32) -> Option<usize> {
+    let list_top = launcher_list_top(st);
+    if y < list_top || y >= ht - 4 {
+        return None;
+    }
+    let vis = ((y - list_top) / LAUNCHER_ROW_H) as usize;
+    let rows = launcher_rows(st, ht);
+    if vis >= rows {
+        return None;
+    }
+    let idx = launcher_scroll(st, rows) + vis;
+    (idx < st.filtered.len()).then_some(idx)
 }
 
 unsafe fn launcher_paint(h: HWND) {
@@ -5488,19 +5664,35 @@ unsafe fn launcher_paint(h: HWND) {
     FillRect(hdc, &div, dbrush);
     let _ = DeleteObject(HGDIOBJ(dbrush.0));
 
-    // Result rows, scrolled so the selection is always visible.
-    let list_top = LAUNCHER_HEADER + 6;
-    // Tab detail footer: when on and the selection is a file, reserve a panel at the
-    // bottom (path / modified / size) and shrink the list to fit.
-    let sel_file = match st.filtered.get(st.sel) {
-        Some(Hit::File(i)) => st.files.get(*i),
-        _ => None,
-    };
-    let footer_h = if st.detail && sel_file.is_some() { 80 } else { 0 };
-    let list_bottom = ht - footer_h - 4;
-    let rows = ((list_bottom - list_top) / LAUNCHER_ROW_H).max(1) as usize;
-    let scroll = if st.sel >= rows { st.sel - rows + 1 } else { 0 };
+    // Result rows: st.scroll drives the viewport (wheel scrolls it; the keyboard
+    // arms keep the selection visible). Wide (Tab) adds Modified/Size/Path columns.
+    let list_top = launcher_list_top(&st);
+    let rows = launcher_rows(&st, ht);
+    let scroll = launcher_scroll(&st, rows);
     let text_left = LAUNCHER_PAD + 6 + LAUNCHER_ICON_PX + 10;
+    // Wide-mode column x's, anchored off the right edge; path gets the big share.
+    let col_path_w = (w as f64 * 0.40) as i32;
+    let path_x = w - LAUNCHER_PAD - 6 - col_path_w;
+    let size_x = path_x - COL_SIZE_W;
+    let date_x = size_x - COL_DATE_W;
+    if st.wide {
+        // Dim column headers in the band under the query divider.
+        SetTextColor(hdc, COLORREF(LAUNCHER_DIM));
+        let hdr = |x0: i32, x1: i32, label: &str, extra: DRAW_TEXT_FORMAT| {
+            let mut r = RECT {
+                left: x0,
+                top: LAUNCHER_HEADER + 2,
+                right: x1,
+                bottom: LAUNCHER_HEADER + 2 + LAUNCHER_COLHDR,
+            };
+            let mut v: Vec<u16> = label.encode_utf16().collect();
+            DrawTextW(hdc, &mut v, &mut r, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | extra);
+        };
+        hdr(text_left, date_x - 10, "Name", DRAW_TEXT_FORMAT(0));
+        hdr(date_x, size_x - 8, "Modified", DRAW_TEXT_FORMAT(0));
+        hdr(size_x, size_x + COL_SIZE_W - 16, "Size", DT_RIGHT);
+        hdr(path_x, w - LAUNCHER_PAD, "Path", DRAW_TEXT_FORMAT(0));
+    }
     let mut want: Vec<usize> = Vec::new(); // app indices whose icon isn't loaded yet
     for vis in 0..rows {
         let idx = scroll + vis;
@@ -5538,15 +5730,15 @@ unsafe fn launcher_paint(h: HWND) {
         } else {
             SetTextColor(hdc, COLORREF(LAUNCHER_FG));
         }
-        // Resolve name + (apps only) lazy icon.
-        let name: &str = match hit {
+        // Resolve name + wide-mode meta cells (+ apps' lazy icon).
+        let (name, date_s, size_s, path_s): (&str, String, String, &str) = match hit {
             Hit::App(i) => {
                 let e = &st.all[i];
                 // App icon, loaded lazily off the UI thread; missing ones queue + pop in.
                 if e.icon > 1 {
-                    // DrawIconEx scales the (256px jumbo) HICON to the row box and
-                    // composites its straight alpha correctly onto the surface — no
-                    // manual premultiply / no white halo.
+                    // The HICON was resolved at exactly LAUNCHER_ICON_PX, so this is
+                    // a 1:1 draw (no scaling blur); DrawIconEx composites the icon's
+                    // own straight alpha — no premultiply, no halo.
                     let hicon = HICON(e.icon as *mut c_void);
                     let iy = top + (LAUNCHER_ROW_H - LAUNCHER_ICON_PX) / 2;
                     let _ = DrawIconEx(
@@ -5563,11 +5755,11 @@ unsafe fn launcher_paint(h: HWND) {
                 } else if e.icon == 0 {
                     want.push(i);
                 }
-                e.name.as_str()
+                (e.name.as_str(), String::new(), String::new(), e.path.as_str())
             }
             Hit::File(i) => {
                 // File rows: a small dim square marks them (no shell icon yet); the
-                // Tab footer shows path/size/date.
+                // wide view carries date/size/path in columns.
                 if idx != st.sel {
                     let mk = CreateSolidBrush(COLORREF(LAUNCHER_DIM));
                     let g = RECT {
@@ -5579,11 +5771,18 @@ unsafe fn launcher_paint(h: HWND) {
                     FillRect(hdc, &g, mk);
                     let _ = DeleteObject(HGDIOBJ(mk.0));
                 }
-                st.files[i].name.as_str()
+                let f = &st.files[i];
+                (
+                    f.name.as_str(),
+                    if f.date > 0.0 { fmt_oadate(f.date) } else { String::new() },
+                    fmt_size(f.size),
+                    f.path.as_str(),
+                )
             }
         };
         let mut tr = RECT {
             left: text_left,
+            right: if st.wide { date_x - 10 } else { row.right },
             ..row
         };
         let mut v: Vec<u16> = name.encode_utf16().collect();
@@ -5593,31 +5792,28 @@ unsafe fn launcher_paint(h: HWND) {
             &mut tr,
             DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
         );
-    }
-
-    // Detail footer for the selected file (Tab toggles it).
-    if footer_h > 0 {
-        if let Some(f) = sel_file {
-            let fy = ht - footer_h;
-            let divf = RECT { left: LAUNCHER_PAD, top: fy, right: w - LAUNCHER_PAD, bottom: fy + 1 };
-            let db = CreateSolidBrush(COLORREF(LAUNCHER_DIVIDER));
-            FillRect(hdc, &divf, db);
-            let _ = DeleteObject(HGDIOBJ(db.0));
-            let line = |n: i32, label: &str, color: u32| {
-                SetTextColor(hdc, COLORREF(color));
-                let mut r = RECT {
-                    left: LAUNCHER_PAD + 2,
-                    top: fy + 8 + n * 22,
-                    right: w - LAUNCHER_PAD,
-                    bottom: fy + 8 + n * 22 + 22,
-                };
-                let mut v: Vec<u16> = label.encode_utf16().collect();
-                DrawTextW(hdc, &mut v, &mut r, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+        if st.wide {
+            // Meta cells: dim normally, selection-white on the accent pill.
+            SetTextColor(
+                hdc,
+                COLORREF(if idx == st.sel { LAUNCHER_SELFG } else { LAUNCHER_DIM }),
+            );
+            let cell = |x0: i32, x1: i32, s: &str, extra: DRAW_TEXT_FORMAT| {
+                if s.is_empty() {
+                    return;
+                }
+                let mut r = RECT { left: x0, right: x1, ..row };
+                let mut v: Vec<u16> = s.encode_utf16().collect();
+                DrawTextW(
+                    hdc,
+                    &mut v,
+                    &mut r,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS | extra,
+                );
             };
-            line(0, &f.path, LAUNCHER_FG);
-            let meta = format!("Modified {}    Size {}", fmt_oadate(f.date), fmt_size(f.size));
-            line(1, &meta, LAUNCHER_DIM);
-            line(2, "Enter: open    Shift+Enter: open folder", LAUNCHER_DIM);
+            cell(date_x, size_x - 8, &date_s, DRAW_TEXT_FORMAT(0));
+            cell(size_x, size_x + COL_SIZE_W - 16, &size_s, DT_RIGHT);
+            cell(path_x, w - LAUNCHER_PAD, path_s, DRAW_TEXT_FORMAT(0));
         }
     }
 
@@ -5652,8 +5848,9 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                         }
                         st.query.clear();
                         st.sel = 0;
+                        st.scroll = 0;
                         st.files.clear();
-                        st.detail = false;
+                        st.wide = false;
                         launcher_refilter(&mut st);
                     }
                     launcher_show(h);
@@ -5665,6 +5862,7 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                             st.query.push(c);
                         }
                         st.sel = 0;
+                        st.scroll = 0;
                         st.files.clear(); // stale results vanish until the new query returns
                         launcher_refilter(&mut st);
                         st.query.clone()
@@ -5677,6 +5875,7 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                         let mut st = LAUNCHER_STATE.lock().unwrap();
                         st.query.pop();
                         st.sel = 0;
+                        st.scroll = 0;
                         st.files.clear();
                         launcher_refilter(&mut st);
                         st.query.clone()
@@ -5685,19 +5884,32 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     let _ = InvalidateRect(h, None, BOOL(0));
                 }
                 LA_UP => {
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(h, &mut rc);
                     {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
                         if st.sel > 0 {
                             st.sel -= 1;
                         }
+                        // Keep the keyboard selection visible in the scrolled viewport.
+                        let rows = launcher_rows(&st, rc.bottom);
+                        if st.sel < launcher_scroll(&st, rows) {
+                            st.scroll = st.sel;
+                        }
                     }
                     let _ = InvalidateRect(h, None, BOOL(0));
                 }
                 LA_DOWN => {
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(h, &mut rc);
                     {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
                         if st.sel + 1 < st.filtered.len() {
                             st.sel += 1;
+                        }
+                        let rows = launcher_rows(&st, rc.bottom);
+                        if st.sel >= launcher_scroll(&st, rows) + rows {
+                            st.scroll = st.sel + 1 - rows;
                         }
                     }
                     let _ = InvalidateRect(h, None, BOOL(0));
@@ -5732,14 +5944,99 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     }
                 }
                 LA_TAB => {
+                    // Tab toggles the wide column view; resize + recenter in place
+                    // (on the monitor the picker is on) and republish the bounds.
+                    let wide = {
+                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                        st.wide = !st.wide;
+                        st.wide
+                    };
+                    let mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+                    let mut mi = MONITORINFO {
+                        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+                        ..Default::default()
+                    };
+                    let wa = if GetMonitorInfoW(mon, &mut mi).as_bool() {
+                        mi.rcWork
+                    } else {
+                        RECT { left: 0, top: 0, right: 1920, bottom: 1080 }
+                    };
+                    launcher_place(h, wa, wide);
+                }
+                LA_SCROLL => {
+                    // Mouse wheel: scroll the viewport; drag the selection along so
+                    // Enter always acts on a visible row.
+                    let mut rc = RECT::default();
+                    let _ = GetClientRect(h, &mut rc);
                     {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
-                        st.detail = !st.detail;
+                        let rows = launcher_rows(&st, rc.bottom);
+                        let maxs = st.filtered.len().saturating_sub(rows);
+                        let cur = launcher_scroll(&st, rows);
+                        let next = if l.0 > 0 { cur.saturating_sub(1) } else { (cur + 1).min(maxs) };
+                        st.scroll = next;
+                        if !st.filtered.is_empty() {
+                            let last = st.filtered.len() - 1;
+                            st.sel = st.sel.clamp(next, (next + rows - 1).min(last));
+                        }
                     }
                     let _ = InvalidateRect(h, None, BOOL(0));
                 }
                 LA_CLOSE => launcher_close(h),
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            // Hover-select. Screen-space move guard: the popup can open (or resize)
+            // under a still cursor, and the synthetic WM_MOUSEMOVE that generates
+            // must not steal the keyboard selection.
+            let mx = (l.0 & 0xFFFF) as i16 as i32;
+            let my = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
+            let sx = LAUNCHER_RECT_L.load(Ordering::Relaxed) + mx;
+            let sy = LAUNCHER_RECT_T.load(Ordering::Relaxed) + my;
+            if sx == LAUNCHER_LAST_MX.load(Ordering::Relaxed)
+                && sy == LAUNCHER_LAST_MY.load(Ordering::Relaxed)
+            {
+                return LRESULT(0);
+            }
+            LAUNCHER_LAST_MX.store(sx, Ordering::Relaxed);
+            LAUNCHER_LAST_MY.store(sy, Ordering::Relaxed);
+            let mut rc = RECT::default();
+            let _ = GetClientRect(h, &mut rc);
+            let repaint = {
+                let mut st = LAUNCHER_STATE.lock().unwrap();
+                match launcher_row_hit(&st, rc.bottom, my) {
+                    Some(idx) if idx != st.sel => {
+                        st.sel = idx;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if repaint {
+                let _ = InvalidateRect(h, None, BOOL(0));
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            // Click activates the row under the cursor (select, then the same code
+            // path as Enter). Clicks on chrome/padding do nothing.
+            let my = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
+            let mut rc = RECT::default();
+            let _ = GetClientRect(h, &mut rc);
+            let hit = {
+                let mut st = LAUNCHER_STATE.lock().unwrap();
+                match launcher_row_hit(&st, rc.bottom, my) {
+                    Some(idx) => {
+                        st.sel = idx;
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if hit {
+                let _ = PostMessageW(h, WM_LAUNCHER, WPARAM(LA_ACTIVATE), LPARAM(0));
             }
             LRESULT(0)
         }
@@ -5842,6 +6139,15 @@ const SYSMENU_FOOTER: i32 = 34; // hint / confirm banner
 
 static SYSMENU_OPEN: AtomicBool = AtomicBool::new(false);
 static SYSMENU_HWND: AtomicIsize = AtomicIsize::new(0);
+// Menu bounds (screen coords), published by sysmenu_layout for the mouse hook's
+// click-outside-dismiss + wheel routing (same scheme as the launcher).
+static SYSMENU_RECT_L: AtomicI32 = AtomicI32::new(0);
+static SYSMENU_RECT_T: AtomicI32 = AtomicI32::new(0);
+static SYSMENU_RECT_R: AtomicI32 = AtomicI32::new(0);
+static SYSMENU_RECT_B: AtomicI32 = AtomicI32::new(0);
+// Hover-select move baseline (see LAUNCHER_LAST_MX).
+static SYSMENU_LAST_MX: AtomicI32 = AtomicI32::new(i32::MIN);
+static SYSMENU_LAST_MY: AtomicI32 = AtomicI32::new(i32::MIN);
 
 #[derive(Clone, Copy, PartialEq)]
 enum SysAct {
@@ -5969,7 +6275,25 @@ unsafe fn sysmenu_layout(h: HWND) {
     let x = (wa.left + wa.right) / 2 - SYSMENU_W / 2;
     let y = (wa.top + wa.bottom) / 2 - hgt / 2;
     let _ = SetWindowPos(h, HWND_TOPMOST, x, y, SYSMENU_W, hgt, SWP_NOACTIVATE);
+    // Publish bounds for the hook's click-outside dismiss + wheel routing, and
+    // re-seed the hover baseline (the menu just moved/resized under the cursor).
+    SYSMENU_RECT_L.store(x, Ordering::Relaxed);
+    SYSMENU_RECT_T.store(y, Ordering::Relaxed);
+    SYSMENU_RECT_R.store(x + SYSMENU_W, Ordering::Relaxed);
+    SYSMENU_RECT_B.store(y + hgt, Ordering::Relaxed);
+    SYSMENU_LAST_MX.store(pt.x, Ordering::Relaxed);
+    SYSMENU_LAST_MY.store(pt.y, Ordering::Relaxed);
     let _ = InvalidateRect(h, None, BOOL(0));
+}
+
+/// Menu-row index under a client-space `y` (rows sit under the title, fixed pitch).
+fn sysmenu_row_hit(n: usize, y: i32) -> Option<usize> {
+    let top = SYSMENU_HEADER + 6;
+    if y < top {
+        return None;
+    }
+    let i = ((y - top) / LAUNCHER_ROW_H) as usize;
+    (i < n).then_some(i)
 }
 
 unsafe fn sysmenu_show(h: HWND) {
@@ -6240,6 +6564,58 @@ unsafe extern "system" fn sysmenu_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARA
                     }
                 }
                 _ => {}
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            // Hover-select (same move guard as the launcher). A selection change
+            // also disarms a pending confirm — confirm belongs to the armed row.
+            let mx = (l.0 & 0xFFFF) as i16 as i32;
+            let my = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
+            let sx = SYSMENU_RECT_L.load(Ordering::Relaxed) + mx;
+            let sy = SYSMENU_RECT_T.load(Ordering::Relaxed) + my;
+            if sx == SYSMENU_LAST_MX.load(Ordering::Relaxed)
+                && sy == SYSMENU_LAST_MY.load(Ordering::Relaxed)
+            {
+                return LRESULT(0);
+            }
+            SYSMENU_LAST_MX.store(sx, Ordering::Relaxed);
+            SYSMENU_LAST_MY.store(sy, Ordering::Relaxed);
+            let repaint = {
+                let mut st = SYSMENU_STATE.lock().unwrap();
+                match sysmenu_row_hit(st.items.len(), my) {
+                    Some(i) if i != st.sel => {
+                        st.sel = i;
+                        st.confirm = false;
+                        true
+                    }
+                    _ => false,
+                }
+            };
+            if repaint {
+                let _ = InvalidateRect(h, None, BOOL(0));
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONDOWN => {
+            // Click = select + the same activate path as Enter (drill a category,
+            // arm/execute a confirm-gated action, run a plain action).
+            let my = ((l.0 >> 16) & 0xFFFF) as i16 as i32;
+            let hit = {
+                let mut st = SYSMENU_STATE.lock().unwrap();
+                match sysmenu_row_hit(st.items.len(), my) {
+                    Some(i) => {
+                        if i != st.sel {
+                            st.sel = i;
+                            st.confirm = false;
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            };
+            if hit {
+                let _ = PostMessageW(h, WM_SYSMENU, WPARAM(SM_ACTIVATE), LPARAM(0));
             }
             LRESULT(0)
         }

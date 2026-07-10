@@ -69,8 +69,10 @@ Manager) too.
   the real windows land instantly underneath — smooth even with heavy apps.
 - **App launcher + file search** *(Astur)* — `Alt+Space` opens a fuzzy picker over
   your installed apps (Start Menu **and** Store/UWP apps like Notepad, with icons) and
-  your files (via the Windows Search index). `Tab` shows file details (path, size,
-  modified); `Shift+Enter` opens a file's folder; click outside to dismiss.
+  your files (via the Windows Search index). `Tab` expands a wide view with
+  **Modified / Size / Path columns**; `Shift+Enter` opens a file's folder. Full mouse
+  support: hover to select, click to launch, scroll with the wheel, click outside to
+  dismiss — same on the power menu.
 - **Power menu** *(Astur)* — `Alt+Shift+Space` opens a categorised menu: **Power**
   (Lock / Sleep / Sign out / Restart / Shut down, with a confirm step) and **Setup**.
 - **Tray icon** *(Astur)* — no console window; left-click for Settings, right-click for

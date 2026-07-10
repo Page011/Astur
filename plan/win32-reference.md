@@ -54,6 +54,15 @@ APIs Astur leans on, where the docs are, and which calls are slow/buggy traps.
 
 ## Gotchas
 
+- **`SHIL_JUMBO` corner-sprite**: icons with no 256px frame return a small sprite in
+  the corner of the 256px cell — downscale that and you get a speck. **`DrawIconEx`
+  scaling is low-quality** — only draw HICONs 1:1; get scaling from
+  `IShellItemImageFactory::GetImage` at the exact size (shell scales HQ). See
+  `known-issues.md` 2026-07-10.
+- **Mouse wheel in the LL hook**: `WM_MOUSEWHEEL` arrives with the signed delta in
+  the HIGH word of `MSLLHOOKSTRUCT.mouseData` (`(mouseData >> 16) as u16 as i16`).
+  Routing wheel via the hook is deterministic; wheel delivery to unfocused windows
+  is otherwise a user setting ("scroll inactive windows").
 - **LL keyboard hook delivers SPECIFIC left/right VK codes**, never the generic
   aggregate. Physical Shift arrives as `VK_LSHIFT` (0xA0) / `VK_RSHIFT` (0xA1), NOT
   `VK_SHIFT` (0x10); Alt as `VK_LMENU`/`VK_RMENU`; Ctrl as `VK_LCONTROL`/`VK_RCONTROL`.

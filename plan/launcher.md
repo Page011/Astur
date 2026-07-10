@@ -11,8 +11,27 @@ Win+Space, which is the Windows layout toggle).
 |---|---|---|
 | v1 | Start Menu `.lnk`/`.url` shortcuts (installed apps) | **SHIPPED 2026-06-26** |
 | v2 | + shell `AppsFolder` (UWP/system apps: Notepad, Calculator, …), per-row icons, click-outside-to-dismiss | **SHIPPED 2026-06-26** |
+| v4 | Tab **wide column view** (Modified/Size/Path), full **mouse support** (hover/click/wheel), icon pipeline v3 | **SHIPPED 2026-07-10** |
 | later | Windows Search index (files, Everything-style) | planned (below) |
 | maybe | open-window switcher (focus a managed window) | backlog |
+
+### v4 as built (2026-07-10)
+
+- **Tab = wide column view** (replaces the old detail footer): the picker resizes
+  660→1060px (clamped to the work area, recentered via `launcher_place`, bounds
+  republished) and file rows gain Modified / Size (right-aligned) / Path columns
+  with a dim header row; app rows show their launch path. `fmt_oadate`/`fmt_size`
+  formatters reused.
+- **Mouse**: hover moves the selection (screen-space move guard so a popup opening
+  under a still cursor can't steal it — `LAUNCHER_LAST_MX/MY`), click activates the
+  row (same path as Enter), wheel scrolls the viewport (`LA_SCROLL` posted from the
+  LL mouse hook, which owns wheel routing; selection is clamped into view so Enter
+  always acts on something visible). Scrolling is now explicit `st.scroll` state —
+  it no longer derives from `sel`, which would have made hover jump the list.
+- **Icon pipeline v3** (`load_icon`): exact-size `IShellItemImageFactory::GetImage`
+  → HICON (HQ shell scaling, UWP-capable) → fallback `SHIL_LARGE` native 32px →
+  cached generic .exe icon (rows never blank). Drawn 1:1 with `DrawIconEx`. See
+  `known-issues.md` 2026-07-10 for the jumbo regression this replaced.
 
 ### v2 as built (2026-06-26)
 

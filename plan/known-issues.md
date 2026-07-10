@@ -43,18 +43,35 @@ the final rect to the real window ONCE on release (`commit_rect`) — same reaso
 proxy (`DwmRegisterThumbnail`, GPU-composited, works even for Chrome where
 `PrintWindow` is black). (`architecture.md`, `win32-reference.md`)
 
-## 2026-07-08 — Launcher icons: switched to jumbo image list + DrawIconEx
+## 2026-07-10 — RESOLVED: jumbo icon pass REGRESSED quality ("quality just died")
 
-SUPERSEDES the premultiply fix below. Icons are now HICONs from the system image list
-at JUMBO (256px) via `SHGetFileInfo(SHGFI_SYSICONINDEX)` + `SHGetImageList(SHIL_JUMBO)`
-→ `IImageList::GetIcon`, drawn with `DrawIconEx` (`DI_NORMAL`). DrawIconEx composites
-the icon's own straight alpha correctly, so there's no manual premultiply and no halo,
-and jumbo source = Start-Menu-quality downscale. UWP / `shell:AppsFolder` entries that
-`SHGetFileInfo` can't resolve fall back to `IShellItemImageFactory` → HBITMAP →
-`CreateIconIndirect` → HICON (this also fixes the "some icons don't load" cases). The
-premultiply path below is gone. Traps: `SHGetImageList` is generic (`SHGetImageList::<
-IImageList>(SHIL_JUMBO as i32)`); needs `Win32_UI_Controls`. Icons use STRAIGHT alpha
-(do NOT premultiply for an HICON).
+The 2026-07-08 change below made icons WORSE, for two reasons that are now traps:
+1. **`DrawIconEx` downscaling is low-quality.** Scaling a 256px HICON into a 32px
+   box uses plain stretch arithmetic — mushy/aliased. High-quality scaling only
+   happens where the SHELL scales for you (`IShellItemImageFactory::GetImage` at the
+   requested size).
+2. **`SHIL_JUMBO` corner-sprite gotcha.** Icons that ship no 256px frame come back
+   as a small 32px sprite in the TOP-LEFT CORNER of the 256px cell; drawn scaled
+   down, the visible icon becomes a near-invisible speck.
+Fix (current pipeline, `load_icon`): (1) `IShellItemImageFactory::GetImage` at
+EXACTLY `LAUNCHER_ICON_PX` (shell picks the best frame + scales HQ; handles .lnk,
+.exe, UWP AppsFolder names) wrapped to HICON; (2) fallback `SHGetFileInfo` +
+`SHGetImageList(SHIL_LARGE)` (native 32px, 1:1); (3) cached generic .exe icon
+(`SHGFI_USEFILEATTRIBUTES`) so no row is ever blank. Paint = `DrawIconEx` at 1:1
+(no scaling). Traps: never request jumbo to downscale yourself; never scale icons
+in `DrawIconEx`; load at the display size.
+
+## 2026-07-10 — Hook purity restored: drag park/commit moved to the manager
+
+The 2026-07-08 thumbnail drag did TWO cross-process `SetWindowPos` calls on the
+mouse hook (park at drag start inside `thumb_begin`, commit on button-up) —
+violating "hooks are sacred" (a busy foreign app can stall the OS input path).
+Now the hook only pushes: `Cmd::DragPark(h)` (manager parks off-screen),
+`Cmd::DragMoved(h, x, y, rect)` / `Cmd::DragResized(h, Some(rect))` (manager
+`commit_rect`s the previewed rect, BEFORE any early-out so floating/unmanaged/
+tiling-off windows land too, then re-tiles). `DragResized(h, None)` is the native
+MOVESIZEEND path (reads the live rect). The preview overlays (thumbnail/outline)
+are our own windows and stay on the hook — same precedent as the resize marker.
 
 ## 2026-07-07 — RESOLVED: launcher icons had a white halo (straight vs premultiplied alpha)
 

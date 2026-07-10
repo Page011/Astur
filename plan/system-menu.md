@@ -24,10 +24,16 @@ rather than always close; see `known-issues.md`). Session-ending actions are
 The hierarchy is a `const` tree now but is the exact shape a mod would extend (see
 `plan/mods.md` — `sys_actions_extra`).
 
+**Mouse support SHIPPED 2026-07-10**: hover selects (move-guarded so opening under a
+still cursor doesn't steal selection; a selection change disarms a pending confirm),
+click = the Enter path (drill / arm / run), wheel = Up/Down (routed from the LL mouse
+hook via `SYSMENU_RECT_*` bounds published by `sysmenu_layout`), and click-outside
+dismisses (posts `SM_CLOSE`, so an armed confirm is cancelled first — safety kept).
+
 Backlog: **wallpaper submenu** (below — the big remaining piece), Theme category +
-theming, click-outside-to-dismiss (launcher has it; sysmenu is Esc/← only), Restart-
-Astur (needs a restore-then-relaunch dance), screenshot entry, config keys +
-mod-supplied entries, launch the settings GUI from Setup (see `plan/roadmap-v2.md`).
+theming, Restart-Astur (needs a restore-then-relaunch dance), screenshot entry,
+config keys + mod-supplied entries, launch the settings GUI from Setup (see
+`plan/roadmap-v2.md`).
 
 ## Original design / remaining pieces
 

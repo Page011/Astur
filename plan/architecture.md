@@ -29,11 +29,21 @@ across threads except through these channels.
                                                                         (overlay compositor)
 ```
 
-Drag (Alt-move / Alt-resize) does NOT touch the manager per frame: the mouse hook
-draws a lightweight in-process **outline overlay** (`OUTLINE_HWND`) following the
-cursor and, on button-up, commits the final rect with ONE `SetWindowPos`, then
-pushes `Cmd::DragMoved`/`DragResized` so the manager re-tiles. There is no
-`position_worker` thread any more (removed 2026-07-07).
+Drag (Alt-move / Alt-resize) never touches the real window from the hook. The
+preview is a live **DWM thumbnail** overlay (`THUMB_HWND`, `DwmRegisterThumbnail`;
+falls back to the outline frame `OUTLINE_HWND` if registration fails) that follows
+the cursor. On the thumbnail path the hook pushes `Cmd::DragPark` and the MANAGER
+parks the real window off-screen (only the mirror is visible); on button-up the
+hook pushes `Cmd::DragMoved(h, x, y, rect)` / `DragResized(h, Some(rect))` and the
+manager `commit_rect`s the previewed rect (one cross-process `SetWindowPos`), then
+re-tiles. All cross-process window placement lives on the manager thread. There is
+no `position_worker` thread any more (removed 2026-07-07; park/commit moved fully
+off the hook 2026-07-10).
+
+The popups take mouse input: the hook routes wheel + click-outside (rect atomics
+published by `launcher_place`/`sysmenu_layout`); hover-select and click-activate
+are handled in `launcher_wndproc`/`sysmenu_wndproc` directly (the windows are
+NOACTIVATE but still receive mouse messages).
 
 Side threads, independent: `stats_worker` (CPU/RAM/battery ~2s), `config_watcher`
 (file mtime → `WM_RELOAD`), `focus_follow_worker`, and one message-pump window per
@@ -60,11 +70,12 @@ passes through it. Rules:
 
 - Early-out on `ANY_DRAG`/`ALT_DOWN` atomics **before** taking any lock, so the
   no-drag case is a couple of atomic loads.
-- Never do a *cross-process* `SetWindowPos` per frame on the hook. Live drag draws
-  an in-process outline overlay (our own window — cheap); the single cross-process
-  `SetWindowPos` happens once on release via `commit_rect`. The old per-frame
-  `position_worker` + `set_target` path was removed — resizing a foreign window
-  live stalls on its own repaint (see `known-issues.md` 2026-07-07).
+- Never do a *cross-process* `SetWindowPos` on the hook — not even once per drag.
+  The preview overlays are our own windows (cheap); the real window's park and
+  final placement go through `Cmd::DragPark`/`DragMoved`/`DragResized` and run on
+  the manager thread (`commit_rect`). The old per-frame `position_worker` +
+  `set_target` path was removed — resizing a foreign window live stalls on its own
+  repaint (see `known-issues.md` 2026-07-07).
 - `keyboard_proc` swallows Left Alt entirely (`SUPPRESS`/`FAKE_ALT` dance keeps
   Alt+Tab working with a synthetic Alt).
 

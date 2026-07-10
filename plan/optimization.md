@@ -74,6 +74,11 @@ Each item: location, the change, expected win, risk. Do them roughly top-down
 
 ## E. General RAM
 
+- **DONE 2026-07-10 — launcher icons load at the display size (32px), not 256px.**
+  The jumbo pass cached a 256×256×4 ≈ 256KB bitmap per app (~100 apps ≈ 25MB);
+  exact-size HICONs are ≈ 4KB each (~0.4MB total) AND look better (no low-quality
+  downscale). Quality and RAM moved the same direction.
+
 - Snapshots are GPU-backed DDBs (`dup_ddb`) — already ~no process RAM. Keep.
 - Launcher icon HBITMAPs accumulate over a session (bounded by app count, 24×24×4 ≈
   4KB each). If this matters, evict icons for apps not shown recently, or cap the

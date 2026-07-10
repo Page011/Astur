@@ -2,6 +2,17 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-10 — Quality pass on the Full popups + drag internals: (1) **icon pipeline
+  v3** — exact-size `GetImage` → HICON, `SHIL_LARGE` fallback, generic-exe last
+  resort, 1:1 `DrawIconEx` (the 07-08 jumbo pass REGRESSED quality: DrawIconEx
+  downscale + SHIL_JUMBO corner-sprite — both now documented traps); (2) **hook
+  purity restored** — drag park/commit moved off the mouse hook into manager cmds
+  (`DragPark`, `DragMoved`/`DragResized` now carry the previewed rect, committed
+  before any early-out); (3) **Tab = wide column view** (Modified/Size/Path, 1060px,
+  replaces the detail footer) with explicit viewport scroll state; (4) **mouse on
+  both popups** — hover/click/wheel + sysmenu click-outside-dismiss. (`launcher.md`,
+  `system-menu.md`, `known-issues.md`, `win32-reference.md`, `architecture.md`)
+
 - 2026-07-08 (3) — Launcher icons rewritten to **Start-Menu quality**: primary source
   is the system image list at JUMBO (256px) — `SHGetFileInfo(SHGFI_SYSICONINDEX)` +
   `SHGetImageList(SHIL_JUMBO)` / `IImageList::GetIcon` → HICON, drawn with `DrawIconEx`
