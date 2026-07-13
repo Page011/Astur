@@ -2,6 +2,14 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-13 (5) — **Bar colours are tri-state now**: `auto` (follow theme;
+  shared `BAR_DARK`/`BAR_LIGHT` presets live in astur-config) or explicit
+  `#RRGGBB`. `Option<u32>` in Config; template ships `auto`; GUI has per-colour
+  Auto checkboxes; old dark-default literals migrate to auto at parse. Replaced
+  two failed customised-or-not heuristics — never infer intent from
+  value==default. Settings GUI restyled for contrast (egui dark labels
+  gray(140)→gray(222)). (`known-issues.md`)
+
 - 2026-07-13 (4) — **Root-caused the disappearing hidden-workspace windows**: our
   own SW_HIDE batch's async `EVENT_OBJECT_HIDE` tail outlived the SUPPRESS window
   and untracked live windows. New `HIDDEN_BY_US` identity set (marked before each

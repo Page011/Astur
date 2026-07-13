@@ -12,7 +12,7 @@
 
 use astur_config::{
     apply_updates, color_to_hex, config_path, default_config_text, default_navbar_text,
-    key_to_vk, parse_pair, vk_to_key, Config, BAR_WIDGETS,
+    key_to_vk, parse_pair, vk_to_key, Config, BAR_DARK, BAR_WIDGETS,
 };
 use eframe::egui;
 
@@ -243,10 +243,10 @@ impl App {
             ("show_net", b(c.bar_show_net)),
             ("show_volume", b(c.bar_show_volume)),
             ("show_apps", b(c.bar_show_apps)),
-            ("bg", color_to_hex(c.bar_bg)),
-            ("fg", color_to_hex(c.bar_fg)),
-            ("accent", color_to_hex(c.bar_accent)),
-            ("inactive", color_to_hex(c.bar_inactive)),
+            ("bg", opt_hex(c.bar_bg)),
+            ("fg", opt_hex(c.bar_fg)),
+            ("accent", opt_hex(c.bar_accent)),
+            ("inactive", opt_hex(c.bar_inactive)),
         ];
         let (wm_old, nav_old) = read_confs();
         let wm_new = apply_updates(&wm_old, &wm_updates);
@@ -268,6 +268,11 @@ impl App {
             self.saved_at = Some(std::time::Instant::now());
         }
     }
+}
+
+/// Themeable colour to conf text: explicit hex, or `auto` (follow the theme).
+fn opt_hex(c: Option<u32>) -> String {
+    c.map(color_to_hex).unwrap_or_else(|| "auto".to_string())
 }
 
 /// Read both config files, falling back to the built-in commented templates so
@@ -295,6 +300,32 @@ fn color_row(ui: &mut egui::Ui, label: &str, c: &mut u32) {
     });
 }
 
+/// Themeable colour row: "Auto" follows the dark/light theme preset; unticking
+/// it starts from `seed` and lets the user pick an explicit override.
+fn theme_color_row(ui: &mut egui::Ui, label: &str, c: &mut Option<u32>, seed: u32) {
+    ui.horizontal(|ui| {
+        let mut auto = c.is_none();
+        if ui
+            .checkbox(&mut auto, "Auto")
+            .on_hover_text("Follow the theme (dark/light preset)")
+            .changed()
+        {
+            *c = if auto { None } else { Some(seed) };
+        }
+        if let Some(v) = c.as_mut() {
+            let mut rgb = [
+                (*v & 0xFF) as u8,
+                ((*v >> 8) & 0xFF) as u8,
+                ((*v >> 16) & 0xFF) as u8,
+            ];
+            if ui.color_edit_button_srgb(&mut rgb).changed() {
+                *v = ((rgb[2] as u32) << 16) | ((rgb[1] as u32) << 8) | rgb[0] as u32;
+            }
+        }
+        ui.label(label);
+    });
+}
+
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
     ui.heading(text);
@@ -304,11 +335,29 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 
 /// Keep the GUI's own look in lockstep with Astur's theme setting. `auto`
 /// follows Windows; explicit dark/light win regardless of the OS theme.
+/// Also lifts text contrast: egui's dark default labels are ~gray(140) on a
+/// near-black panel — genuinely hard to read. Cheap + idempotent per frame.
 fn apply_gui_theme(ctx: &egui::Context, theme: &str) {
     ctx.set_theme(match theme {
         "light" => egui::ThemePreference::Light,
         "auto" => egui::ThemePreference::System,
         _ => egui::ThemePreference::Dark,
+    });
+    ctx.style_mut_of(egui::Theme::Dark, |s| {
+        let w = &mut s.visuals.widgets;
+        w.noninteractive.fg_stroke.color = egui::Color32::from_gray(222); // labels
+        w.inactive.fg_stroke.color = egui::Color32::from_gray(215); // idle widgets
+        w.hovered.fg_stroke.color = egui::Color32::from_gray(245);
+        w.active.fg_stroke.color = egui::Color32::WHITE;
+        w.open.fg_stroke.color = egui::Color32::from_gray(230);
+    });
+    ctx.style_mut_of(egui::Theme::Light, |s| {
+        let w = &mut s.visuals.widgets;
+        w.noninteractive.fg_stroke.color = egui::Color32::from_gray(25);
+        w.inactive.fg_stroke.color = egui::Color32::from_gray(35);
+        w.hovered.fg_stroke.color = egui::Color32::BLACK;
+        w.active.fg_stroke.color = egui::Color32::BLACK;
+        w.open.fg_stroke.color = egui::Color32::from_gray(30);
     });
 }
 
@@ -537,15 +586,20 @@ impl App {
         heading(ui, "Colours");
         ui.label(
             egui::RichText::new(
-                "Colours left at their defaults follow the theme (light theme retints them automatically); editing one here overrides the theme for it.",
+                "Auto = the colour follows the theme (General section) and flips with dark/light. Untick Auto to pin an explicit colour.",
             )
             .weak(),
         );
         ui.add_space(4.0);
-        color_row(ui, "Background", &mut self.cfg.bar_bg);
-        color_row(ui, "Text", &mut self.cfg.bar_fg);
-        color_row(ui, "Accent (active workspace)", &mut self.cfg.bar_accent);
-        color_row(ui, "Muted (empty workspaces, stats)", &mut self.cfg.bar_inactive);
+        theme_color_row(ui, "Background", &mut self.cfg.bar_bg, BAR_DARK[0]);
+        theme_color_row(ui, "Text", &mut self.cfg.bar_fg, BAR_DARK[1]);
+        theme_color_row(ui, "Accent (active workspace)", &mut self.cfg.bar_accent, BAR_DARK[2]);
+        theme_color_row(
+            ui,
+            "Muted (empty workspaces, stats)",
+            &mut self.cfg.bar_inactive,
+            BAR_DARK[3],
+        );
     }
 
     fn ui_widgets(&mut self, ui: &mut egui::Ui) {

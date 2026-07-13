@@ -2,6 +2,28 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-13 — RESOLVED: theme-vs-custom colours — heuristics dead, tri-state shipped
+
+Two heuristics for "did the user customise this bar colour?" failed in a row:
+per-field default-matching mixed presets with custom colours (black on black);
+all-or-nothing froze the bar dark forever once ANY colour had ever been touched
+by the GUI ("navbar doesn't update to light mode"). Lesson: NEVER infer intent
+from value-equals-default — the shipped template and the GUI both write the
+default values out literally. Now explicit tri-state: navbar colours are
+`auto` (follow the theme; resolves against the shared `BAR_DARK`/`BAR_LIGHT`
+presets in astur-config) or `#RRGGBB` (always wins). `Option<u32>` in Config,
+`auto` in the conf/template, an "Auto" checkbox per colour in the GUI.
+Migration: a colour equal to the OLD shipped dark default parses as auto, so
+pre-theme files pick up light mode; GUI-wiggled values stay custom (tick Auto).
+
+## 2026-07-13 — egui dark labels are ~gray(140) — restyle for contrast
+
+Default egui dark visuals render labels at ~55% grey on a near-black panel —
+users read it as broken ("settings text is so hard to read"). The settings GUI
+now lifts `widgets.*.fg_stroke` per theme (dark labels gray(222), light
+gray(25)) via `ctx.style_mut_of(Theme::Dark/Light, …)`. Do the same in any
+future egui surface.
+
 ## 2026-07-13 — RESOLVED: hidden-workspace windows untracked by our OWN hide events
 
 THE root cause of "windows on other workspaces died" (the crash-rescue below was

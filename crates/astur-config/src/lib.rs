@@ -33,10 +33,10 @@ pub struct Config {
     pub bar_show_clock: bool,       // show the clock
     pub bar_clock_24h: bool,        // 24-hour clock (false = 12-hour with am/pm)
     pub bar_show_layout: bool,      // show layout + tiling/floating state on the right
-    pub bar_bg: u32,                // COLORREF bar background
-    pub bar_fg: u32,                // COLORREF bar text
-    pub bar_accent: u32,            // COLORREF active-workspace highlight
-    pub bar_inactive: u32,          // COLORREF empty-workspace text
+    pub bar_bg: Option<u32>,        // COLORREF bar background; None = follow theme
+    pub bar_fg: Option<u32>,        // COLORREF bar text; None = follow theme
+    pub bar_accent: Option<u32>,    // COLORREF active-workspace highlight; None = theme
+    pub bar_inactive: Option<u32>,  // COLORREF empty-workspace text; None = theme
     pub bar_font_name: String,      // font family (default "Segoe UI")
     pub bar_hide_empty: bool,       // hide empty workspace pills
     pub bar_padding: i32,           // horizontal padding from each screen edge (px)
@@ -76,6 +76,21 @@ pub const BAR_WIDGETS: &[&str] = &[
     "date", "clock",
 ];
 
+/// Built-in bar palettes that `auto` colours resolve to: [bg, fg, accent,
+/// inactive] as COLORREFs. Single source for the WM and the settings GUI.
+pub const BAR_DARK: [u32; 4] = [
+    0x0026_1B1A, // #1A1B26
+    0x00F5_CAC0, // #C0CAF5
+    0x00FF_AA66, // #66AAFF
+    0x0089_5F56, // #565F89
+];
+pub const BAR_LIGHT: [u32; 4] = [
+    0x00F2_EEEC, // #ECEEF2
+    0x0024_1E1B, // #1B1E24
+    0x0082_6333, // #336382
+    0x0091_8277, // #778291
+];
+
 impl Config {
     pub fn defaults() -> Self {
         Config {
@@ -108,10 +123,10 @@ impl Config {
             bar_show_clock: true,
             bar_clock_24h: true,
             bar_show_layout: true,
-            bar_bg: parse_color("#1A1B26", 0x00261B1A),
-            bar_fg: parse_color("#C0CAF5", 0x00F5CAC0),
-            bar_accent: parse_color("#66AAFF", 0x00FFAA66),
-            bar_inactive: parse_color("#565F89", 0x00895F56),
+            bar_bg: None,       // follow theme
+            bar_fg: None,
+            bar_accent: None,
+            bar_inactive: None,
             bar_font_name: "Segoe UI".to_string(),
             bar_hide_empty: false,
             bar_padding: 8,
@@ -465,13 +480,14 @@ show_volume = true
 # App buttons: an icon per window on the active workspace; click focuses.  bool
 show_apps = false
 
-# Colours (#RRGGBB).
-bg = #1A1B26
-fg = #C0CAF5
+# Colours: 'auto' follows the theme (astur.conf 'theme' picks the dark or light
+# preset), or set an explicit #RRGGBB to override that colour permanently.
+bg = auto
+fg = auto
 # Active-workspace pill highlight.
-accent = #66AAFF
+accent = auto
 # Empty workspaces / layout / stats text.
-inactive = #565F89
+inactive = auto
 ";
 
 pub fn parse_bool(v: &str) -> bool {
@@ -527,6 +543,28 @@ fn parse_keys(v: &str) -> Vec<u32> {
             }
         })
         .collect()
+}
+
+/// Themeable colour: `#RRGGBB` = custom, `auto`/`theme`/empty = follow the
+/// theme presets. The key's OLD shipped dark default also maps to auto — every
+/// pre-theme config file spelled the defaults out literally, and treating them
+/// as customised froze those bars in dark forever (the "navbar doesn't update
+/// to light mode" bug). Malformed input keeps the previous value.
+fn parse_theme_color(v: &str, legacy_default: u32, prev: Option<u32>) -> Option<u32> {
+    let t = v.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("auto") || t.eq_ignore_ascii_case("theme") {
+        return None;
+    }
+    const SENTINEL: u32 = 0xFFFF_FFFF;
+    let c = parse_color(t, SENTINEL);
+    if c == SENTINEL {
+        return prev;
+    }
+    if c == legacy_default {
+        None
+    } else {
+        Some(c)
+    }
 }
 
 /// Parse a #RRGGBB hex string into a Win32 COLORREF (0x00BBGGRR). Falls back to
@@ -718,10 +756,14 @@ fn parse_into(c: &mut Config, text: &str) {
             "show_clock" | "bar_show_clock" => c.bar_show_clock = parse_bool(v),
             "clock_24h" | "bar_clock_24h" => c.bar_clock_24h = parse_bool(v),
             "show_layout" | "bar_show_layout" => c.bar_show_layout = parse_bool(v),
-            "bg" | "bar_bg" => c.bar_bg = parse_color(v, c.bar_bg),
-            "fg" | "bar_fg" => c.bar_fg = parse_color(v, c.bar_fg),
-            "accent" | "bar_accent" => c.bar_accent = parse_color(v, c.bar_accent),
-            "inactive" | "bar_inactive" => c.bar_inactive = parse_color(v, c.bar_inactive),
+            "bg" | "bar_bg" => c.bar_bg = parse_theme_color(v, BAR_DARK[0], c.bar_bg),
+            "fg" | "bar_fg" => c.bar_fg = parse_theme_color(v, BAR_DARK[1], c.bar_fg),
+            "accent" | "bar_accent" => {
+                c.bar_accent = parse_theme_color(v, BAR_DARK[2], c.bar_accent)
+            }
+            "inactive" | "bar_inactive" => {
+                c.bar_inactive = parse_theme_color(v, BAR_DARK[3], c.bar_inactive)
+            }
             "font_name" | "bar_font_name" => {
                 if !v.is_empty() {
                     c.bar_font_name = v.to_string();
@@ -1013,6 +1055,22 @@ mod tests {
     fn color_roundtrip() {
         let c = parse_color("#366382", 0);
         assert_eq!(color_to_hex(c), "#366382");
+    }
+
+    #[test]
+    fn theme_colors_auto_legacy_custom() {
+        let mut c = Config::defaults();
+        parse_into(&mut c, "bg = auto");
+        assert_eq!(c.bar_bg, None);
+        // The old shipped dark default reads as auto (pre-theme files spelled
+        // the defaults out; they must still pick up the light preset).
+        parse_into(&mut c, "bg = #1A1B26");
+        assert_eq!(c.bar_bg, None);
+        parse_into(&mut c, "bg = #123456");
+        assert_eq!(c.bar_bg, Some(parse_color("#123456", 0)));
+        // Malformed keeps the previous value.
+        parse_into(&mut c, "bg = #xyz");
+        assert_eq!(c.bar_bg, Some(parse_color("#123456", 0)));
     }
 
     #[test]

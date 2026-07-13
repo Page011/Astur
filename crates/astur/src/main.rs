@@ -1467,28 +1467,24 @@ fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
         .collect()
 }
 
-/// Light-theme bar palette, substituted AS A SET when `theme` resolves light and
-/// the user hasn't customised any bar colour. All-or-nothing on purpose: an
-/// earlier per-field substitution mixed a custom dark background with the light
-/// preset's near-black text — black on black. Either the whole light preset
-/// applies, or the user's own four colours do.
-const LIGHT_BAR_BG: u32 = 0x00F2_EEEC; // #ECEEF2
-const LIGHT_BAR_FG: u32 = 0x0024_1E1B; // #1B1E24 (near-black on the light strip)
-const LIGHT_BAR_ACCENT: u32 = LAUNCHER_SELBG; // Forte blue reads on light
-const LIGHT_BAR_INACTIVE: u32 = 0x0091_8277; // #778291 muted slate
-
-/// The four bar colours with the theme applied (see LIGHT_BAR_* above).
+/// The four bar colours with the theme applied. Each colour is independently
+/// `auto` (None — resolves to the shared dark/light preset in `astur-config`)
+/// or an explicit user COLORREF that always wins. Explicit tri-state replaced
+/// two failed heuristics: per-field default-matching mixed presets with custom
+/// colours (black on black), and all-or-nothing froze the bar dark forever the
+/// moment ANY colour had ever been touched.
 fn themed_bar_colors(cfg: &Config) -> (u32, u32, u32, u32) {
-    let d = Config::defaults();
-    let untouched = cfg.bar_bg == d.bar_bg
-        && cfg.bar_fg == d.bar_fg
-        && cfg.bar_accent == d.bar_accent
-        && cfg.bar_inactive == d.bar_inactive;
-    if THEME_LIGHT.load(Ordering::Relaxed) && untouched {
-        (LIGHT_BAR_BG, LIGHT_BAR_FG, LIGHT_BAR_ACCENT, LIGHT_BAR_INACTIVE)
+    let preset = if THEME_LIGHT.load(Ordering::Relaxed) {
+        config::BAR_LIGHT
     } else {
-        (cfg.bar_bg, cfg.bar_fg, cfg.bar_accent, cfg.bar_inactive)
-    }
+        config::BAR_DARK
+    };
+    (
+        cfg.bar_bg.unwrap_or(preset[0]),
+        cfg.bar_fg.unwrap_or(preset[1]),
+        cfg.bar_accent.unwrap_or(preset[2]),
+        cfg.bar_inactive.unwrap_or(preset[3]),
+    )
 }
 
 /// Everything the bars paint. Replaced wholesale by the manager each update.
@@ -8326,7 +8322,8 @@ fn main() {
         // Status bar on every monitor (waybar-style). Register the class once,
         // build the font, then create a bar window per monitor.
         if cfg.bar_enabled && cfg.bar_height > 0 {
-            let bar_brush = CreateSolidBrush(COLORREF(cfg.bar_bg));
+            // Class brush is a first-frame fallback only (paint is buffered).
+            let bar_brush = CreateSolidBrush(COLORREF(themed_bar_colors(&cfg).0));
             let bwc = WNDCLASSW {
                 lpfnWndProc: Some(bar_wndproc),
                 hInstance: hinst,
