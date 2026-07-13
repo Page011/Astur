@@ -2,6 +2,15 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-13 (3) — **Crash rescue**: hidden-workspace windows survive a hard kill.
+  Manager persists the hidden set to `~/.astur/rescue.lst` (hash-guarded, only on
+  change); next launch un-hides verified survivors (hwnd+pid+class) before window
+  adoption; graceful restores delete the file. Marker window now also handles
+  `WM_CLOSE`/`WM_QUERYENDSESSION`/`WM_ENDSESSION` (End task + logoff on the
+  no-console build restore-all first). Monitor-unplug collation confirmed working
+  as designed (windows keep workspace identity on the surviving monitor) — noted
+  a possible future `flatten` option. (`known-issues.md`)
+
 - 2026-07-13 (2) — Three user-reported fixes: (1) **follow app activation across
   workspaces** — a window surfaced/foregrounded on a HIDDEN workspace (browser
   link, taskbar click) now switches TO its workspace (`Cmd::Focused` else-branch +

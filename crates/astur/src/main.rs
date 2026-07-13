@@ -147,7 +147,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
     SPI_SETFOREGROUNDLOCKTIMEOUT,
     SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-    WM_CLOSE, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WM_USER, WS_CHILD,
+    WM_CLOSE, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_QUERYENDSESSION,
+    WM_TIMER, WM_USER, WS_CHILD,
 };
 
 // --- tunables -------------------------------------------------------------
@@ -508,6 +509,19 @@ fn drag_active() -> bool {
 
 /// WndProc for the marker window: nothing custom, the class brush paints it red.
 unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_CLOSE || msg == WM_QUERYENDSESSION || msg == WM_ENDSESSION {
+        // Graceful teardown paths for the no-console (windows-subsystem) build:
+        // Task Manager "End task" sends WM_CLOSE; logoff/shutdown sends
+        // WM_QUERYENDSESSION/WM_ENDSESSION. Reveal every managed window before
+        // the process dies so none stay hidden. (Hard kills skip all of this —
+        // the crash-rescue file covers those on the next launch.)
+        restore_all_windows();
+        if msg == WM_CLOSE {
+            PostQuitMessage(0);
+            return LRESULT(0);
+        }
+        return DefWindowProcW(h, msg, w, l);
+    }
     if msg == WM_DISPLAYCHANGE {
         // Reposition/create bars for the new monitor layout, then retile.
         ensure_bars();
@@ -1954,6 +1968,8 @@ unsafe fn restore_windows(list: &[isize]) {
 unsafe fn restore_all_windows() {
     let list = MANAGED.lock().unwrap().clone();
     restore_windows(&list);
+    // Everything is visible again — nothing left for the crash-rescue pass.
+    let _ = std::fs::remove_file(rescue_file());
 }
 
 /// Panic-path restore: a thread panic with `panic = "abort"` runs the panic hook
@@ -5366,6 +5382,104 @@ fn sync_managed(mgr: &Manager) {
         }
     }
     *INDEX.lock().unwrap() = Some(map);
+    drop(all);
+    persist_hidden(mgr);
+}
+
+// ---- crash rescue -------------------------------------------------------------
+// Astur hides inactive-workspace windows with SW_HIDE. Graceful exits restore
+// them, but a hard kill (taskkill /F, Task Manager End task, a crash that skips
+// the panic hook) cannot — the windows would stay hidden ("died"). So the
+// manager persists the CURRENTLY HIDDEN set to ~/.astur/rescue.lst whenever it
+// changes, and the next launch un-hides any verified survivors before adopting
+// windows. A graceful restore deletes the file.
+static LAST_RESCUE_HASH: AtomicU64 = AtomicU64::new(0);
+
+fn rescue_file() -> std::path::PathBuf {
+    config_path("ASTUR_RESCUE", "rescue.lst")
+}
+
+/// Write (or clear) the hidden-window rescue list. Cheap: hashes the hidden set
+/// and returns without touching the disk when nothing changed (the common case —
+/// it only actually writes on workspace switches and window moves).
+fn persist_hidden(mgr: &Manager) {
+    let mut hidden: Vec<isize> = Vec::new();
+    for m in &mgr.monitors {
+        for (wi, ws) in m.workspaces.iter().enumerate() {
+            if wi != m.active {
+                hidden.extend(ws.windows.iter().copied());
+            }
+        }
+    }
+    let mut hash: u64 = 0x9E37_79B9_7F4A_7C15 ^ hidden.len() as u64;
+    for &h in &hidden {
+        hash = hash.rotate_left(9) ^ (h as u64).wrapping_mul(0x0100_0000_01B3);
+    }
+    if LAST_RESCUE_HASH.swap(hash, Ordering::Relaxed) == hash {
+        return;
+    }
+    let path = rescue_file();
+    if hidden.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return;
+    }
+    let mut out = String::new();
+    for &h in &hidden {
+        unsafe {
+            let hw = hwnd_from(h);
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hw, Some(&mut pid));
+            let mut cls = [0u16; 64];
+            let n = GetClassNameW(hw, &mut cls) as usize;
+            // hwnd pid class — class may contain spaces, so it goes last.
+            out.push_str(&format!(
+                "{} {} {}\n",
+                h,
+                pid,
+                String::from_utf16_lossy(&cls[..n])
+            ));
+        }
+    }
+    if let Some(p) = path.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    let _ = std::fs::write(&path, out);
+}
+
+/// Un-hide windows a previous Astur instance hid and then failed to restore.
+/// Each entry is verified (same hwnd AND pid AND class) so a recycled HWND can
+/// never make us show a window some other app deliberately hid. Runs once at
+/// startup, before window adoption — rescued windows are then adopted normally
+/// onto the active workspace of their monitor.
+unsafe fn rescue_orphans() {
+    let path = rescue_file();
+    let Ok(text) = std::fs::read_to_string(&path) else { return };
+    let mut n = 0u32;
+    for line in text.lines() {
+        let mut it = line.splitn(3, ' ');
+        let (Some(hs), Some(ps), Some(cls)) = (it.next(), it.next(), it.next()) else {
+            continue;
+        };
+        let (Ok(h), Ok(pid)) = (hs.parse::<isize>(), ps.parse::<u32>()) else {
+            continue;
+        };
+        let hw = hwnd_from(h);
+        if !IsWindow(hw).as_bool() || IsWindowVisible(hw).as_bool() {
+            continue;
+        }
+        let mut p = 0u32;
+        GetWindowThreadProcessId(hw, Some(&mut p));
+        let mut c = [0u16; 64];
+        let cn = GetClassNameW(hw, &mut c) as usize;
+        if p == pid && String::from_utf16_lossy(&c[..cn]) == cls {
+            let _ = ShowWindow(hw, SW_SHOWNA);
+            n += 1;
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+    if n > 0 {
+        println!("rescued {n} window(s) hidden by a previous session");
+    }
 }
 
 /// WinEvent callback: translate OS window lifecycle/focus events into manager
@@ -8261,6 +8375,9 @@ fn main() {
         std::thread::spawn(sysmenu_thread);
         // Hot-reload config files on save.
         std::thread::spawn(config_watcher);
+        // Crash rescue: un-hide anything a previous (killed) instance left hidden
+        // BEFORE the manager adopts windows, so they're adopted visible.
+        rescue_orphans();
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
         std::thread::spawn(move || manager_loop(cfg));
 

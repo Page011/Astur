@@ -2,6 +2,33 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-13 — RESOLVED: hard kill orphaned hidden-workspace windows ("died")
+
+Astur hides inactive-workspace windows with SW_HIDE; graceful exits restore
+them, but taskkill /F, Task Manager "End task" on the no-console build, or a
+crash skipping the panic hook left them hidden forever. Fixes, layered:
+1. **Crash-rescue file** — the manager persists the currently-hidden set
+   (`~/.astur/rescue.lst`, hwnd+pid+class, written only when the set changes via
+   a hash guard in `sync_managed`); the next launch verifies each entry (same
+   hwnd AND pid AND class — a recycled HWND can never show someone else's
+   deliberately-hidden window) and `SW_SHOWNA`s survivors before adoption, so
+   they come back on the active workspace. Graceful restores delete the file.
+2. **Marker handles WM_CLOSE / WM_QUERYENDSESSION / WM_ENDSESSION** — the
+   release build is windows-subsystem, so the console ctrl handler never fires;
+   End-task's WM_CLOSE and logoff now restore-all before dying.
+Note: nothing can restore DURING a hard kill — the rescue runs at next launch.
+
+## 2026-07-13 — monitor unplug: windows collate to surviving monitor (by design)
+
+`refresh_monitors` already re-homes every window from an unplugged monitor onto
+the surviving ones, preserving its (global or per-monitor) workspace number, and
+normalizes visibility (active ws shown, others hidden). So after an unplug the
+windows ARE on the main monitor — some just live on its other workspaces
+(reachable via Alt+N / bar pills), which can read as "disappeared" if you expect
+Windows' flatten-everything behaviour. If that expectation wins, add a config
+(`unplug = collate|flatten`) that dumps gone-monitor windows onto the surviving
+ACTIVE workspace instead. Watch for user feedback before adding it.
+
 ## 2026-07-13 — RESOLVED: link/taskbar activation of a hidden-workspace window broke layout
 
 An app surfacing its own window on a hidden workspace (clicking a link activates
