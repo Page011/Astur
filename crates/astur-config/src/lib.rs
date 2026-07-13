@@ -282,10 +282,12 @@ window_anim = glide
 # Appearance: theme, window borders & dimming
 # ---------------------------------------------------------------------------
 
-# Colour theme for Astur's own surfaces (app launcher, system menu).
-#   dark  = dark surfaces (default)
-#   light = light surfaces
-#   auto  = follow the Windows app theme (Settings > Personalisation > Colours)
+# Colour theme for Astur's own surfaces (launcher, system menu, and any bar
+# colour left at its default — explicit navbar.conf colours always win).
+#   dark   = dark surfaces (default)
+#   light  = light surfaces
+#   auto   = follow the Windows app theme (Settings > Personalisation > Colours)
+#            ('system' also accepted)
 # values: dark | light | auto
 theme = dark
 
@@ -746,6 +748,8 @@ fn parse_into(c: &mut Config, text: &str) {
                 let m = v.trim().to_ascii_lowercase();
                 if matches!(m.as_str(), "dark" | "light" | "auto") {
                     c.theme = m;
+                } else if m == "system" {
+                    c.theme = "auto".to_string(); // friendly alias
                 }
             }
             "acrylic" => c.acrylic = parse_bool(v),

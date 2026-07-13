@@ -2,6 +2,26 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-13 — RESOLVED: link/taskbar activation of a hidden-workspace window broke layout
+
+An app surfacing its own window on a hidden workspace (clicking a link activates
+the browser on ws2 while ws1 is shown) made the window visible OVER the current
+workspace while the manager still tracked it on the hidden one — overlapping,
+"half-pulled" mess. Fix: FOLLOW the activation. `Cmd::Focused` on a tracked
+window whose workspace isn't active switches to that workspace; `Cmd::Add` for an
+already-tracked window does the same but only when it's visible AND foreground
+(so background self-shows — toasts, splash repaints — can't yank the workspace).
+Never move the window to the current workspace: that breaks both layouts.
+
+## 2026-07-13 — RESOLVED: Shift dead in the launcher (MAPVK_VK_TO_CHAR trap)
+
+`MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR)` returns the UNSHIFTED base character —
+Shift+8 gave '8' not '*', and the result was force-lowercased. No capitals, and
+the inline calculator's `+ * ( ) ^ %` were untypeable. Fix: the hook posts
+vk + scancode + shift + caps packed in `LA_KEY`; the launcher thread converts
+with `ToUnicode` + a synthetic 256-byte key state. Trap: do NOT call `ToUnicode`
+inside the LL hook itself — it can desync dead-key state for the foreground app.
+
 ## 2026-07-13 — RESOLVED: launcher icons flashed on every wheel scroll
 
 All three owner-drawn surfaces (launcher, sysmenu, bar) painted STRAIGHT to the

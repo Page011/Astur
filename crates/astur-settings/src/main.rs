@@ -370,6 +370,25 @@ impl eframe::App for App {
 
 impl App {
     fn ui_general(&mut self, ui: &mut egui::Ui) {
+        heading(ui, "Theme");
+        egui::ComboBox::from_label("Colour theme")
+            .selected_text(match self.cfg.theme.as_str() {
+                "light" => "Light",
+                "auto" => "System",
+                _ => "Dark",
+            })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.cfg.theme, "dark".to_string(), "Dark");
+                ui.selectable_value(&mut self.cfg.theme, "light".to_string(), "Light");
+                ui.selectable_value(&mut self.cfg.theme, "auto".to_string(), "System (follow Windows)");
+            });
+        ui.label(
+            egui::RichText::new(
+                "Sets the base palette for the launcher, menus and bar. Any colour you customise in a section below overrides the theme for that element.",
+            )
+            .weak(),
+        );
+
         heading(ui, "Workspaces");
         egui::ComboBox::from_label("Workspace mode")
             .selected_text(if self.cfg.per_monitor { "per monitor" } else { "shared" })
@@ -459,15 +478,11 @@ impl App {
     }
 
     fn ui_appearance(&mut self, ui: &mut egui::Ui) {
-        heading(ui, "Theme");
-        egui::ComboBox::from_label("Popup theme (launcher, system menu)")
-            .selected_text(&self.cfg.theme)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.cfg.theme, "dark".to_string(), "dark");
-                ui.selectable_value(&mut self.cfg.theme, "light".to_string(), "light");
-                ui.selectable_value(&mut self.cfg.theme, "auto".to_string(), "auto (follow Windows)");
-            });
+        heading(ui, "Popups");
         ui.checkbox(&mut self.cfg.acrylic, "Acrylic blur behind popups (experimental)");
+        ui.label(
+            egui::RichText::new("Popup colours follow the theme (General section).").weak(),
+        );
 
         heading(ui, "Windows");
         ui.add(
@@ -507,6 +522,13 @@ impl App {
         );
 
         heading(ui, "Colours");
+        ui.label(
+            egui::RichText::new(
+                "Colours left at their defaults follow the theme (light theme retints them automatically); editing one here overrides the theme for it.",
+            )
+            .weak(),
+        );
+        ui.add_space(4.0);
         color_row(ui, "Background", &mut self.cfg.bar_bg);
         color_row(ui, "Text", &mut self.cfg.bar_fg);
         color_row(ui, "Accent (active workspace)", &mut self.cfg.bar_accent);

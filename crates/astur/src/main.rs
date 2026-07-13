@@ -62,8 +62,9 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MAPVK_VK_TO_CHAR, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN,
+    GetAsyncKeyState, GetKeyState, SendInput, ToUnicode, INPUT, INPUT_0,
+    INPUT_KEYBOARD, KEYBDINPUT, VK_CAPITAL,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_BACK, VK_CONTROL, VK_DOWN,
     VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RBUTTON,
     VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
@@ -631,12 +632,17 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                             } else if vk == VK_SPACE.0 as u32 {
                                 post(LA_CHAR, ' ' as isize);
                             } else {
-                                let c = MapVirtualKeyW(vk, MAPVK_VK_TO_CHAR) & 0x7FFF;
-                                if c >= 0x20 {
-                                    if let Some(ch) = char::from_u32(c) {
-                                        post(LA_CHAR, ch.to_ascii_lowercase() as isize);
-                                    }
-                                }
+                                // Pack vk + scancode + Shift/CapsLock; the launcher
+                                // thread runs ToUnicode (honours Shift — capitals and
+                                // calculator symbols like + * ( ) — which
+                                // MAPVK_VK_TO_CHAR did not). No conversion on the hook.
+                                let shift = vk_down(VK_SHIFT);
+                                let caps = (GetKeyState(VK_CAPITAL.0 as i32) & 1) != 0;
+                                let packed = (vk as isize & 0xFFFF)
+                                    | ((kb.scanCode as isize & 0xFFFF) << 16)
+                                    | ((shift as isize) << 32)
+                                    | ((caps as isize) << 33);
+                                post(LA_KEY, packed);
                             }
                         }
                     }
@@ -1416,6 +1422,30 @@ fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
             _ => None,
         })
         .collect()
+}
+
+/// Light-theme bar palette, substituted for any bar colour the user left at its
+/// built-in DARK default while `theme` resolves light — so flipping the theme
+/// retints the whole bar, but explicit custom colours always win.
+const LIGHT_BAR_BG: u32 = 0x00F2_ECE9; // #E9ECF2
+const LIGHT_BAR_FG: u32 = 0x002E_2622; // #22262E
+const LIGHT_BAR_ACCENT: u32 = 0x0082_6333; // #366382 (Forte blue reads on light)
+const LIGHT_BAR_INACTIVE: u32 = 0x00B0_A098; // #98A0B0
+
+/// The four bar colours with the theme applied (see LIGHT_BAR_* above).
+fn themed_bar_colors(cfg: &Config) -> (u32, u32, u32, u32) {
+    let light = THEME_LIGHT.load(Ordering::Relaxed);
+    if !light {
+        return (cfg.bar_bg, cfg.bar_fg, cfg.bar_accent, cfg.bar_inactive);
+    }
+    let d = Config::defaults();
+    let pick = |cur: u32, def: u32, lightv: u32| if cur == def { lightv } else { cur };
+    (
+        pick(cfg.bar_bg, d.bar_bg, LIGHT_BAR_BG),
+        pick(cfg.bar_fg, d.bar_fg, LIGHT_BAR_FG),
+        pick(cfg.bar_accent, d.bar_accent, LIGHT_BAR_ACCENT),
+        pick(cfg.bar_inactive, d.bar_inactive, LIGHT_BAR_INACTIVE),
+    )
 }
 
 /// Everything the bars paint. Replaced wholesale by the manager each update.
@@ -3382,21 +3412,42 @@ fn focused_index(ws: &Workspace) -> Option<usize> {
 unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
     match cmd {
         Cmd::Add(h) => {
-            if mgr.locate(h).is_none() && is_manageable(hwnd_from(h)) {
-                // A terminal/browser we just launched lands on the cursor's monitor
-                // (consumed once); everything else goes by its spawn position.
-                let pending = std::mem::replace(&mut mgr.pending_launch_mon, 0);
-                let mi = mgr
-                    .mon_by_hmon(pending)
-                    .unwrap_or_else(|| monitor_index_for_window(mgr, hwnd_from(h)));
-                let a = mgr.monitors[mi].active;
-                mgr.monitors[mi].workspaces[a].windows.push(h);
-                if should_float(hwnd_from(h)) {
-                    mgr.monitors[mi].workspaces[a].floating.push(h);
+            match mgr.locate(h) {
+                Some((mi, wi)) => {
+                    // Already tracked. If an app just surfaced it on a HIDDEN
+                    // workspace (link click opening the browser, taskbar
+                    // activation, …), FOLLOW it: switch to its workspace. Never
+                    // pull the window out of its workspace — that half-shows it
+                    // over the active tiling. Foreground check keeps background
+                    // self-shows (toasts, splash refreshes) from yanking the
+                    // workspace.
+                    if wi != mgr.monitors[mi].active
+                        && IsWindowVisible(hwnd_from(h)).as_bool()
+                        && GetForegroundWindow() == hwnd_from(h)
+                    {
+                        mgr.monitors[mi].workspaces[wi].focused = h;
+                        mgr.focused_mon = mi;
+                        switch_monitor_workspace(mgr, mi, wi);
+                    }
                 }
-                mgr.monitors[mi].workspaces[a].focused = h;
-                mgr.focused_mon = mi;
-                retile_monitor(mgr, mi);
+                None if is_manageable(hwnd_from(h)) => {
+                    // A terminal/browser we just launched lands on the cursor's
+                    // monitor (consumed once); everything else goes by its spawn
+                    // position.
+                    let pending = std::mem::replace(&mut mgr.pending_launch_mon, 0);
+                    let mi = mgr
+                        .mon_by_hmon(pending)
+                        .unwrap_or_else(|| monitor_index_for_window(mgr, hwnd_from(h)));
+                    let a = mgr.monitors[mi].active;
+                    mgr.monitors[mi].workspaces[a].windows.push(h);
+                    if should_float(hwnd_from(h)) {
+                        mgr.monitors[mi].workspaces[a].floating.push(h);
+                    }
+                    mgr.monitors[mi].workspaces[a].focused = h;
+                    mgr.focused_mon = mi;
+                    retile_monitor(mgr, mi);
+                }
+                None => {}
             }
         }
         Cmd::Remove(h) => {
@@ -3417,6 +3468,12 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.focused_mon = mi;
                 if wi == mgr.monitors[mi].active {
                     mgr.monitors[mi].workspaces[wi].focused = h;
+                } else {
+                    // The OS foregrounded a window on a hidden workspace (an app
+                    // activated it — link opened in the browser, taskbar click).
+                    // Follow it there; pulling it out would break both layouts.
+                    mgr.monitors[mi].workspaces[wi].focused = h;
+                    switch_monitor_workspace(mgr, mi, wi);
                 }
             }
         }
@@ -4573,11 +4630,12 @@ unsafe fn update_bar(mgr: &Manager) {
             apps,
         });
     }
+    let (bg, fg, accent, inactive) = themed_bar_colors(&mgr.cfg);
     let new = BarData {
-        bg: mgr.cfg.bar_bg,
-        fg: mgr.cfg.bar_fg,
-        accent: mgr.cfg.bar_accent,
-        inactive: mgr.cfg.bar_inactive,
+        bg,
+        fg,
+        accent,
+        inactive,
         clock_24h: mgr.cfg.bar_clock_24h,
         date_format: mgr.cfg.bar_date_format.clone(),
         layout: mgr.cfg.layout.clone(),
@@ -5442,6 +5500,7 @@ const LA_CLOSE: usize = 6;
 const LA_TAB: usize = 7; // toggle the wide column view (modified / size / path)
 const LA_ACTIVATE_ALT: usize = 8; // Shift+Enter: open a file's containing folder
 const LA_SCROLL: usize = 9; // mouse wheel: lParam = +1 (up) / -1 (down)
+const LA_KEY: usize = 10; // raw key: lParam = vk | scan<<16 | shift<<32 | caps<<33
 
 // Theme (COLORREF is 0x00BBGGRR). Forte blue #366382 accent on a dark surface;
 // minimal chrome (thin frame, subtle divider) for a clean omarchy/rofi look.
@@ -6948,6 +7007,39 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     };
                     launcher_dispatch_search(&q);
                     let _ = InvalidateRect(h, None, BOOL(0));
+                }
+                LA_KEY => {
+                    // Raw key from the hook: vk | scan<<16 | shift<<32 | caps<<33.
+                    // ToUnicode here (off the hook thread) with a synthetic key
+                    // state, so Shift and CapsLock produce the right character —
+                    // capitals, and the calculator's + * ( ) ^ % symbols.
+                    let vk = (l.0 & 0xFFFF) as u32;
+                    let scan = ((l.0 >> 16) & 0xFFFF) as u32;
+                    let shift = (l.0 >> 32) & 1 != 0;
+                    let caps = (l.0 >> 33) & 1 != 0;
+                    let mut state = [0u8; 256];
+                    if shift {
+                        state[VK_SHIFT.0 as usize] = 0x80;
+                    }
+                    if caps {
+                        state[VK_CAPITAL.0 as usize] = 0x01;
+                    }
+                    let mut buf = [0u16; 8];
+                    let n = ToUnicode(vk, scan, Some(&state), &mut buf, 0);
+                    if n >= 1 {
+                        if let Some(c) = char::decode_utf16(buf[..n as usize].iter().copied())
+                            .next()
+                            .and_then(|r| r.ok())
+                            .filter(|c| *c >= ' ')
+                        {
+                            let _ = PostMessageW(
+                                h,
+                                WM_LAUNCHER,
+                                WPARAM(LA_CHAR),
+                                LPARAM(c as isize),
+                            );
+                        }
+                    }
                 }
                 LA_BACK => {
                     let q = {

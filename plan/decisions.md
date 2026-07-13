@@ -2,6 +2,19 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-13 (2) — Three user-reported fixes: (1) **follow app activation across
+  workspaces** — a window surfaced/foregrounded on a HIDDEN workspace (browser
+  link, taskbar click) now switches TO its workspace (`Cmd::Focused` else-branch +
+  tracked-window branch in `Cmd::Add`, foreground-gated so background self-shows
+  can't yank); never pulled out of its workspace anymore. (2) **Shift works in the
+  picker** — hook `MAPVK_VK_TO_CHAR` ignored Shift (no capitals, no calculator
+  `+ * ( ) ^ %`); now the hook posts vk+scan+shift+caps (`LA_KEY`) and the
+  launcher thread converts via `ToUnicode` with a synthetic key state. (3)
+  **theme retints the bar** — bar colours left at their dark defaults swap to a
+  light preset when `theme` resolves light (`themed_bar_colors`); explicit
+  navbar.conf colours always win. GUI: theme moved to General as
+  Dark/Light/System (`system` accepted as a conf alias for `auto`).
+
 - 2026-07-13 — Big Full-edition pass: (1) **all owner-drawn surfaces double-buffer**
   (launcher / sysmenu / bar render to a memory DC, one BitBlt — fixes the icon flash
   on wheel scroll; `WM_ERASEBKGND` suppressed on all three); (2) **bar v2** — three
