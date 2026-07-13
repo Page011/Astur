@@ -2,6 +2,37 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-13 — RESOLVED: hidden-workspace windows untracked by our OWN hide events
+
+THE root cause of "windows on other workspaces died" (the crash-rescue below was
+the safety net; this was the disease): `SUPPRESS` is a time-window flag, but
+WinEvents are OUT-OF-CONTEXT — queued to the main thread. The tail of a
+workspace switch's SW_HIDE batch could be delivered AFTER the manager cleared
+SUPPRESS, so `EVENT_OBJECT_HIDE` pushed `Cmd::Remove` for live windows → hidden
+AND untracked → orphaned. Intermittent (worse under load / many windows).
+Fix: `HIDDEN_BY_US` set — every workspace hide is marked BEFORE its ShowWindow;
+`EVENT_OBJECT_HIDE` is ignored for marked windows (app-driven hides still
+untrack); `EVENT_OBJECT_SHOW` unmarks (so a later app hide counts again);
+`EVENT_OBJECT_DESTROY` now ALWAYS untracks (a stray Remove is a no-op). Trap:
+never rely on a time-window flag to classify async WinEvents — mark the affected
+window identities instead.
+
+## 2026-07-13 — RESOLVED: theme colour failures (mixed presets, GUI stuck light)
+
+Three colour bugs from the first theming pass:
+1. **Bar preset substitution was per-field** — one customised colour (e.g. a
+   user-picked dark bg) + light-preset near-black text = black on black. Now
+   ALL-OR-NOTHING: the light bar preset applies only when all four bar colours
+   are still at their dark defaults; any customisation keeps the user's full set.
+2. **Settings GUI never set an egui theme** — it trusted eframe's system detect
+   (unreliable here). Now `ctx.set_theme` maps Astur's `theme` directly
+   (dark/light/auto→System), re-applied each frame so the combo previews live.
+3. **Acrylic's whole-window LWA_ALPHA in light mode** washed the light surface
+   into whatever light window sat underneath — read as "white on white". The
+   fade now applies in DARK theme only; light acrylic popups stay opaque.
+Also: light palettes re-tuned for contrast (popups #F2F4F7/#14161A, bar
+#ECEEF2/#1B1E24, dims darkened).
+
 ## 2026-07-13 — RESOLVED: hard kill orphaned hidden-workspace windows ("died")
 
 Astur hides inactive-workspace windows with SW_HIDE; graceful exits restore

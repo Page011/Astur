@@ -1193,6 +1193,35 @@ static CMDQ: Mutex<VecDeque<Cmd>> = Mutex::new(VecDeque::new());
 static CMDCV: Condvar = Condvar::new();
 // While true, programmatic show/hide must not be mistaken for app events.
 static SUPPRESS: AtomicBool = AtomicBool::new(false);
+// Windows Astur itself hid for a workspace switch. SUPPRESS alone is NOT enough
+// to filter their EVENT_OBJECT_HIDE: WinEvents are out-of-context (queued to the
+// main thread), so the tail of a hide batch can arrive AFTER the manager cleared
+// SUPPRESS — Cmd::Remove then untracked live windows, leaving them hidden and
+// orphaned ("windows on other workspaces died"). Membership here says "this hide
+// was ours — ignore it". Not touched by the LL input hooks, so a lock is fine.
+static HIDDEN_BY_US: Mutex<Option<std::collections::HashSet<isize>>> = Mutex::new(None);
+
+fn mark_hidden_by_us(h: isize) {
+    HIDDEN_BY_US
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .insert(h);
+}
+
+fn unmark_hidden_by_us(h: isize) {
+    if let Some(s) = HIDDEN_BY_US.lock().unwrap().as_mut() {
+        s.remove(&h);
+    }
+}
+
+fn was_hidden_by_us(h: isize) -> bool {
+    HIDDEN_BY_US
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|s| s.contains(&h))
+}
 // De-duplicates auto-repeat key-downs for our hotkeys.
 // Per-VK auto-repeat guard. Atomic (not a Mutex) so the keyboard hook — on the
 // OS-wide input path — never takes a lock to debounce a held hotkey.
@@ -1438,28 +1467,28 @@ fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
         .collect()
 }
 
-/// Light-theme bar palette, substituted for any bar colour the user left at its
-/// built-in DARK default while `theme` resolves light — so flipping the theme
-/// retints the whole bar, but explicit custom colours always win.
-const LIGHT_BAR_BG: u32 = 0x00F2_ECE9; // #E9ECF2
-const LIGHT_BAR_FG: u32 = 0x002E_2622; // #22262E
-const LIGHT_BAR_ACCENT: u32 = 0x0082_6333; // #366382 (Forte blue reads on light)
-const LIGHT_BAR_INACTIVE: u32 = 0x00B0_A098; // #98A0B0
+/// Light-theme bar palette, substituted AS A SET when `theme` resolves light and
+/// the user hasn't customised any bar colour. All-or-nothing on purpose: an
+/// earlier per-field substitution mixed a custom dark background with the light
+/// preset's near-black text — black on black. Either the whole light preset
+/// applies, or the user's own four colours do.
+const LIGHT_BAR_BG: u32 = 0x00F2_EEEC; // #ECEEF2
+const LIGHT_BAR_FG: u32 = 0x0024_1E1B; // #1B1E24 (near-black on the light strip)
+const LIGHT_BAR_ACCENT: u32 = LAUNCHER_SELBG; // Forte blue reads on light
+const LIGHT_BAR_INACTIVE: u32 = 0x0091_8277; // #778291 muted slate
 
 /// The four bar colours with the theme applied (see LIGHT_BAR_* above).
 fn themed_bar_colors(cfg: &Config) -> (u32, u32, u32, u32) {
-    let light = THEME_LIGHT.load(Ordering::Relaxed);
-    if !light {
-        return (cfg.bar_bg, cfg.bar_fg, cfg.bar_accent, cfg.bar_inactive);
-    }
     let d = Config::defaults();
-    let pick = |cur: u32, def: u32, lightv: u32| if cur == def { lightv } else { cur };
-    (
-        pick(cfg.bar_bg, d.bar_bg, LIGHT_BAR_BG),
-        pick(cfg.bar_fg, d.bar_fg, LIGHT_BAR_FG),
-        pick(cfg.bar_accent, d.bar_accent, LIGHT_BAR_ACCENT),
-        pick(cfg.bar_inactive, d.bar_inactive, LIGHT_BAR_INACTIVE),
-    )
+    let untouched = cfg.bar_bg == d.bar_bg
+        && cfg.bar_fg == d.bar_fg
+        && cfg.bar_accent == d.bar_accent
+        && cfg.bar_inactive == d.bar_inactive;
+    if THEME_LIGHT.load(Ordering::Relaxed) && untouched {
+        (LIGHT_BAR_BG, LIGHT_BAR_FG, LIGHT_BAR_ACCENT, LIGHT_BAR_INACTIVE)
+    } else {
+        (cfg.bar_bg, cfg.bar_fg, cfg.bar_accent, cfg.bar_inactive)
+    }
 }
 
 /// Everything the bars paint. Replaced wholesale by the manager each update.
@@ -1951,6 +1980,7 @@ unsafe fn restore_windows(list: &[isize]) {
         if !IsWindow(hwnd).as_bool() {
             continue;
         }
+        unmark_hidden_by_us(h);
         let _ = ShowWindow(hwnd, SW_SHOW);
         // Undo any dimming and restore the default border. Positions untouched.
         let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
@@ -3127,9 +3157,12 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     SUPPRESS.store(true, Ordering::Relaxed);
     // Iterate by index (no Vec clone per switch): the manager owns `mgr` on this
     // thread and ShowWindow touches no Astur state, so the borrow is safe to hold.
+    // Every hide is marked in HIDDEN_BY_US BEFORE the ShowWindow so the async
+    // EVENT_OBJECT_HIDE can never race the marker (see the static's comment).
     {
         let ws = &mgr.monitors[mi].workspaces[old].windows;
         for i in 0..ws.len() {
+            mark_hidden_by_us(ws[i]);
             let _ = ShowWindow(hwnd_from(ws[i]), SW_HIDE);
         }
     }
@@ -3137,6 +3170,7 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     {
         let ws = &mgr.monitors[mi].workspaces[n].windows;
         for i in 0..ws.len() {
+            unmark_hidden_by_us(ws[i]);
             let _ = ShowWindow(hwnd_from(ws[i]), SW_SHOW);
         }
     }
@@ -3405,9 +3439,14 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
     for mon in &mgr.monitors {
         let active = mon.active;
         for (wi, ws) in mon.workspaces.iter().enumerate() {
-            let cmd = if wi == active { SW_SHOWNA } else { SW_HIDE };
+            let show = wi == active;
             for &h in &ws.windows {
-                let _ = ShowWindow(hwnd_from(h), cmd);
+                if show {
+                    unmark_hidden_by_us(h);
+                } else {
+                    mark_hidden_by_us(h);
+                }
+                let _ = ShowWindow(hwnd_from(h), if show { SW_SHOWNA } else { SW_HIDE });
             }
         }
     }
@@ -3467,6 +3506,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
         }
         Cmd::Remove(h) => {
+            unmark_hidden_by_us(h); // untracked -> marker would only go stale
             if let Some((mi, wi)) = mgr.locate(h) {
                 let ws = &mut mgr.monitors[mi].workspaces[wi];
                 ws.windows.retain(|&x| x != h);
@@ -5498,8 +5538,12 @@ unsafe extern "system" fn win_event_proc(
     }
     match event {
         EVENT_OBJECT_SHOW => {
+            let h = hwnd.0 as isize;
+            // Someone made it visible — whoever hid it, the marker is stale now
+            // (and a later app-driven hide must untrack it again).
+            unmark_hidden_by_us(h);
             if !SUPPRESS.load(Ordering::Relaxed) {
-                push_cmd(Cmd::Add(hwnd.0 as isize));
+                push_cmd(Cmd::Add(h));
             }
         }
         EVENT_SYSTEM_FOREGROUND => {
@@ -5514,10 +5558,22 @@ unsafe extern "system" fn win_event_proc(
                 push_cmd(Cmd::Add(h));
             }
         }
-        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY => {
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                push_cmd(Cmd::Remove(hwnd.0 as isize));
+        EVENT_OBJECT_HIDE => {
+            // Untrack only hides the APP performed (close-to-tray etc.). Hides
+            // Astur performed for a workspace switch are marked in HIDDEN_BY_US;
+            // SUPPRESS alone misses the tail of the batch (async delivery), and
+            // untracking those orphaned live windows on hidden workspaces.
+            let h = hwnd.0 as isize;
+            if !SUPPRESS.load(Ordering::Relaxed) && !was_hidden_by_us(h) {
+                push_cmd(Cmd::Remove(h));
             }
+        }
+        EVENT_OBJECT_DESTROY => {
+            // A destroyed window is gone for real — always untrack (a Remove for
+            // an untracked hwnd is a no-op, so this is safe even mid-switch).
+            let h = hwnd.0 as isize;
+            unmark_hidden_by_us(h);
+            push_cmd(Cmd::Remove(h));
         }
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND => {
             push_cmd(Cmd::Retile);
@@ -5659,13 +5715,13 @@ const PAL_DARK: Pal = Pal {
     divider: LAUNCHER_DIVIDER,
 };
 const PAL_LIGHT: Pal = Pal {
-    bg: 0x00FA_F7F4,      // #F4F7FA — cool near-white surface
-    fg: 0x001E_1E1E,      // near-black text
-    dim: 0x0078_7878,     // muted grey
+    bg: 0x00F7_F4F2,      // #F2F4F7 — soft cool grey-white surface
+    fg: 0x001A_1614,      // #14161A near-black text (strong contrast)
+    dim: 0x0068_615C,     // #5C6168 readable muted grey
     selbg: LAUNCHER_SELBG, // same Forte-blue accent both themes
     selfg: 0x00FF_FFFF,
-    frame: 0x00D9_D2CC,   // #CCD2D9 cool border
-    divider: 0x00E6_E2DE, // #DEE2E6
+    frame: 0x00D4_CCC6,   // #C6CCD4 cool border
+    divider: 0x00E6_E1DD, // #DDE1E6
 };
 static THEME_LIGHT: AtomicBool = AtomicBool::new(false);
 fn pal() -> &'static Pal {
@@ -5744,7 +5800,7 @@ unsafe fn apply_acrylic(h: HWND, on: bool) {
     let mut ap = AccentPolicy {
         state: if on { 4 } else { 0 }, // 4 = ACCENT_ENABLE_ACRYLICBLURBEHIND
         flags: 2,
-        gradient: if dark { 0x99_10_10_10 } else { 0x99_F4_F0_EC }, // AABBGGRR tint
+        gradient: if dark { 0x99_10_10_10 } else { 0xCC_F2_EE_EC }, // AABBGGRR tint
         anim: 0,
     };
     let mut d = CompAttrData {
@@ -5753,11 +5809,15 @@ unsafe fn apply_acrylic(h: HWND, on: bool) {
         cb: core::mem::size_of::<AccentPolicy>() as u32,
     };
     let _ = f(h, &mut d);
-    // Slightly transparent window so the blur shows through the opaque GDI fill.
+    // Slightly transparent window so the blur shows through the opaque GDI fill —
+    // DARK theme only. In light mode the fade washes the light surface into
+    // whatever light window sits underneath (text became unreadable), so the
+    // popup stays fully opaque there and the accent is effectively cosmetic.
     let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    let alpha = if on && dark { 236 } else { 255 };
     if on {
         SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
-        let _ = SetLayeredWindowAttributes(h, COLORREF(0), 236, LWA_ALPHA);
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA);
     } else if ex & WS_EX_LAYERED.0 as isize != 0 {
         let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
     }

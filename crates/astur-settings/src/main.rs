@@ -302,8 +302,21 @@ fn heading(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
 }
 
+/// Keep the GUI's own look in lockstep with Astur's theme setting. `auto`
+/// follows Windows; explicit dark/light win regardless of the OS theme.
+fn apply_gui_theme(ctx: &egui::Context, theme: &str) {
+    ctx.set_theme(match theme {
+        "light" => egui::ThemePreference::Light,
+        "auto" => egui::ThemePreference::System,
+        _ => egui::ThemePreference::Dark,
+    });
+}
+
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Cheap and idempotent; re-applying each frame also makes the theme
+        // combo preview instantly (before Save).
+        apply_gui_theme(ctx, &self.cfg.theme);
         egui::TopBottomPanel::top("header").show(ctx, |ui| {
             ui.add_space(6.0);
             ui.horizontal(|ui| {

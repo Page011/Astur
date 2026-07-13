@@ -2,6 +2,14 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-13 (4) — **Root-caused the disappearing hidden-workspace windows**: our
+  own SW_HIDE batch's async `EVENT_OBJECT_HIDE` tail outlived the SUPPRESS window
+  and untracked live windows. New `HIDDEN_BY_US` identity set (marked before each
+  hide, cleared on show/destroy/remove) classifies hide events exactly; DESTROY
+  always untracks. Plus theme colour repairs: all-or-nothing light bar preset,
+  GUI theme forced from config via `ctx.set_theme`, acrylic alpha dark-only,
+  higher-contrast light palettes. (`known-issues.md`)
+
 - 2026-07-13 (3) — **Crash rescue**: hidden-workspace windows survive a hard kill.
   Manager persists the hidden set to `~/.astur/rescue.lst` (hash-guarded, only on
   change); next launch un-hides verified survivors (hwnd+pid+class) before window
