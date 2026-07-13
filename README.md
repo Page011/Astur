@@ -30,14 +30,14 @@ Astur comes in two editions from the same project:
 
 | | **Astur Lite** | **Astur** |
 |---|---|---|
-| Format | single portable `.exe`, no install | installer *(coming)* + tray app |
+| Format | single portable `.exe`, no install | **installer** + tray app |
 | Stop / control | console window (`Ctrl+C`) | **tray icon** — Settings / Quit |
-| Configuration | hand-edit `.conf` files | settings GUI *(coming)* + `.conf` |
+| Configuration | hand-edit `.conf` files | **settings GUI** + `.conf` |
 | RAM | ~1 MB, minimal | higher (launcher, search) |
 | Tiling · Alt-drag · bar · workspaces · animations | ✓ | ✓ |
-| **App launcher** (Alt+Space) | — | ✓ |
-| **File search** (Windows Search) | — | ✓ |
+| **App launcher + file search + calculator** (Alt+Space) | — | ✓ |
 | **Power menu** (Alt+Shift+Space) | — | ✓ |
+| **Bar widgets** (volume · network · app buttons) + light/dark theme | — | ✓ |
 
 **Astur Lite** is the lean ~1 MB keyboard/console WM for power users who want text
 config. **Astur** is the friendlier, installable app — launcher, file search, power
@@ -45,9 +45,10 @@ menu, tray, and a settings GUI — with the same motion polish and core tiling.
 
 ## Install
 
-- **Astur** — download `astur-windows-x64.exe` from
-  [Releases](../../releases/latest) and run it. (A proper installer with auto-start
-  and a Start-Menu entry is on the way.)
+- **Astur** — download `Astur-Setup-<version>.exe` from
+  [Releases](../../releases) and run it (per-user install, no admin, optional
+  start-on-login), or grab the portable `astur-windows-x64.exe` from the same
+  release.
 - **Astur Lite** — the minimal portable build from the
   [`lite`](https://github.com/Page011/Astur/tree/lite) branch / its release. One
   `.exe`, no install, console window.
@@ -61,22 +62,33 @@ Manager) too.
 - **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
 - **Tiling mode** — `dwindle` (spiral, default) or `master` layout across up to 10
   virtual workspaces
-- **Status bar** — a per-monitor bar with workspace pills, focused title, clock,
-  and optional date / CPU / RAM / battery widgets
+- **Status bar** — a per-monitor bar with three fully configurable widget zones
+  (left / center / right): workspace pills, focused title, app buttons (click to
+  focus), clock, date, CPU, RAM, battery, **network speed**, and **volume**
+  (scroll over it to adjust, click to mute). Scroll anywhere else on the bar to
+  cycle workspaces, click a pill to switch. Optional **floating rounded bar**
+  (margins + corner radius) and **auto-hide** (reveals on edge hover).
 - **Animations** — workspace switches animate with a composited overlay:
   `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`. Windows
   also **glide** to their tile slot on open / move / resize / re-tile, composited so
   the real windows land instantly underneath — smooth even with heavy apps.
 - **App launcher + file search** *(Astur)* — `Alt+Space` opens a fuzzy picker over
   your installed apps (Start Menu **and** Store/UWP apps like Notepad, with icons) and
-  your files (via the Windows Search index). `Tab` expands a wide view with
-  **Modified / Size / Path columns**; `Shift+Enter` opens a file's folder. Full mouse
-  support: hover to select, click to launch, scroll with the wheel, click outside to
-  dismiss — same on the power menu.
+  your files (via the Windows Search index). Type maths (`5*7+2`) for an **inline
+  calculator** (Enter copies the result); no matches falls back to a **web search**
+  row. `Tab` expands a wide view with **Modified / Size / Path columns**;
+  `Shift+Enter` opens a file's folder. Full mouse support: hover to select, click to
+  launch, scroll with the wheel, click outside to dismiss — same on the power menu.
 - **Power menu** *(Astur)* — `Alt+Shift+Space` opens a categorised menu: **Power**
   (Lock / Sleep / Sign out / Restart / Shut down, with a confirm step) and **Setup**.
+- **Settings GUI** *(Astur)* — every option in this README is editable in a native
+  settings app (tray icon → Settings, or the power menu → Setup). Saving applies
+  **live** — the window manager hot-reloads, no restart.
 - **Tray icon** *(Astur)* — no console window; left-click for Settings, right-click for
   Settings / Quit.
+- **Light / dark theme** *(Astur)* — the launcher and menus follow `theme = dark |
+  light | auto` (auto tracks the Windows app theme); optional experimental acrylic
+  blur behind the popups.
 - **Extras** — coloured window borders, unfocused-window dimming, focus-follows-mouse,
   per-app window rules, and live config hot-reload.
 
@@ -123,9 +135,9 @@ commented and **hot-reloaded on save**:
   rebindable letter hotkeys.
 - **`navbar.conf`** — the status bar.
 
-A **settings GUI** is in the works for the full Astur edition so you can configure
-everything without touching the `.conf` files (they remain the source of truth, and
-power users can keep editing them directly).
+The full Astur edition ships a **settings GUI** (`astur-settings.exe`) that edits
+both files for you — the `.conf` files remain the source of truth (comments and
+layout are preserved on save), and power users can keep editing them directly.
 
 ## Build from source
 
@@ -165,7 +177,7 @@ input path, so typing stays responsive.
 | Alt-drag move/resize anywhere | Yes | No | No | No |
 | Silky smooth animations | Yes | No | No | No |
 | App launcher + file search built in | Yes | No | No | No |
-| Settings GUI | Coming | No (CLI) | Partial | Yes |
+| Settings GUI | Yes | No (CLI) | Partial | Yes |
 | Single portable exe option | Yes (Lite) | No | No (installer) | Part of PowerToys |
 | Virtual workspaces | Yes | Yes | Yes | Via Windows |
 | Config file required to start | No | Yes | Yes | No |
@@ -185,7 +197,7 @@ power menu, with a single-exe (Lite) option and no required config file.
 
 **What's the difference between Astur and Astur Lite?** See [Editions](#editions) —
 Lite is the minimal ~1 MB console exe; Astur adds the launcher, file search, power
-menu, tray, and (soon) a settings GUI.
+menu, tray, extra bar widgets, theming, and a settings GUI.
 
 ## Disclaimer
 

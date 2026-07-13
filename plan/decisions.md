@@ -2,6 +2,26 @@
 
 One line each. Newest on top. Link detail elsewhere.
 
+- 2026-07-13 — Big Full-edition pass: (1) **all owner-drawn surfaces double-buffer**
+  (launcher / sysmenu / bar render to a memory DC, one BitBlt — fixes the icon flash
+  on wheel scroll; `WM_ERASEBKGND` suppressed on all three); (2) **bar v2** — three
+  configurable widget ZONES (`left`/`center`/`right` in navbar.conf), new widgets
+  (volume w/ wheel-adjust + click-mute, network up/down, app buttons w/ cached exe
+  icons), wheel-over-bar workspace cycling (LL-hook routed, lock-free `BARHIT_*`
+  atomics), floating rounded bar (margin + region radius), auto-hide (timer-driven
+  slide, no work-area reserve), pill anim now seeds INDICES not x's (zones move the
+  origin); (3) **theme** `dark|light|auto` for the popups (palette read at paint;
+  auto = AppsUseLightTheme) + experimental **acrylic** (undocumented
+  SetWindowCompositionAttribute, default off); (4) launcher **inline calculator**
+  (Enter copies) + **web-search fallback** row; (5) **settings GUI shipped** —
+  eframe/egui 0.31 app in `astur-settings`, edits both confs via `astur-config`'s
+  new comment-preserving writer (`set_conf_key` collapses duplicate keys since the
+  parser is last-write-wins), WM hot-reload applies live; sysmenu Setup gained a
+  Settings entry. Queued next (user-picked): Alt+Tab switcher, scratchpad terminal,
+  per-workspace wallpapers, clipboard history, emoji picker, media widget
+  (`roadmap-v2.md`). (`launcher.md`, `system-menu.md`, `win32-reference.md`,
+  `known-issues.md`, `architecture.md`, `optimization.md`)
+
 - 2026-07-10 — Quality pass on the Full popups + drag internals: (1) **icon pipeline
   v3** — exact-size `GetImage` → HICON, `SHIL_LARGE` fallback, generic-exe last
   resort, 1:1 `DrawIconEx` (the 07-08 jumbo pass REGRESSED quality: DrawIconEx

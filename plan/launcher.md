@@ -12,8 +12,29 @@ Win+Space, which is the Windows layout toggle).
 | v1 | Start Menu `.lnk`/`.url` shortcuts (installed apps) | **SHIPPED 2026-06-26** |
 | v2 | + shell `AppsFolder` (UWP/system apps: Notepad, Calculator, …), per-row icons, click-outside-to-dismiss | **SHIPPED 2026-06-26** |
 | v4 | Tab **wide column view** (Modified/Size/Path), full **mouse support** (hover/click/wheel), icon pipeline v3 | **SHIPPED 2026-07-10** |
+| v5 | **inline calculator** + **web-search fallback** rows; double-buffered paint (no icon flash on scroll); theme-aware palette | **SHIPPED 2026-07-13** |
 | later | Windows Search index (files, Everything-style) | planned (below) |
+| next | clipboard-history prefix, emoji-picker prefix (queued — `roadmap-v2.md`) | queued |
 | maybe | open-window switcher (focus a managed window) | backlog |
+
+### v5 as built (2026-07-13)
+
+- **Inline calculator**: a maths-looking query (`5*7+2`, `(1+2)^3`, calc chars only,
+  ≥1 digit + ≥1 operator — so app names never trigger it) pins `Hit::Calc` as the
+  first row showing `= result   (Enter copies)`; Enter copies via
+  `clipboard_set_text` (CF_UNICODETEXT; the copy happens BEFORE `launcher_close`
+  so the popup still owns the clipboard call). Recursive-descent `calc_eval`
+  (+ - * / % ^ parens unary-minus, div/mod-by-zero and trailing-garbage → None).
+- **Web-search fallback**: a non-empty query with NO app/file/calc matches shows a
+  single `Hit::Web` row (`Search the web for "…"`); Enter opens the default
+  browser via a percent-encoded Google search URL. Note: it can appear for
+  ~100-300ms while the async file search is still in flight — accepted (apps match
+  instantly in the common case).
+- **No more scroll flash**: paint goes through `backbuf_begin`/`backbuf_end`
+  (memory DC, one BitBlt) and `LA_SCROLL` skips repaints that change nothing.
+- **Theme**: the palette is `pal()` (dark/light/auto from `theme=` in astur.conf),
+  read at paint time so a hot-reload retints the popup live. Acrylic (opt-in) is
+  applied on every `launcher_show`.
 
 ### v4 as built (2026-07-10)
 

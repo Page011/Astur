@@ -45,9 +45,23 @@ published by `launcher_place`/`sysmenu_layout`); hover-select and click-activate
 are handled in `launcher_wndproc`/`sysmenu_wndproc` directly (the windows are
 NOACTIVATE but still receive mouse messages).
 
-Side threads, independent: `stats_worker` (CPU/RAM/battery ~2s), `config_watcher`
+The BAR takes mouse input the same way (2026-07-13): wheel is routed from the hook
+via lock-free `BARHIT_*` atomic rect arrays (`BARS_HOT` gates to one load when
+idle) → `WM_BAR_WHEEL`; the bar thread decides volume-adjust vs workspace-cycle
+from the paint-published `BAR_LAYOUTS` hit ranges (pills / app buttons / volume
+widget — same-thread map, written by `paint_bar`, read by `bar_wndproc`). Clicks
+arrive natively. Bar paint is zone-driven (`left`/`center`/`right` widget lists
+from navbar.conf, resolved in `update_bar` via `zone_widgets`) and double-buffered.
+Auto-hide runs on a 30ms bar-thread timer (`bar_autohide_tick`): cursor polling +
+eased y-slide; it moves ONLY the bar's own window, and an auto-hidden bar reserves
+no work area.
+
+Side threads, independent: `stats_worker` (CPU/RAM/battery + network rate +
+volume, ~2s, per-widget gated by `STATS_ON`/`NET_ON`/`VOL_ON`), `config_watcher`
 (file mtime → `WM_RELOAD`), `focus_follow_worker`, and one message-pump window per
-monitor for the status bar (`bar_wndproc`).
+monitor for the status bar (`bar_wndproc`). App-button icons are resolved on the
+manager thread through `bar_app_icon` (exe path → cached HICON via the launcher's
+shell-icon pipeline; one-time cost per new exe).
 
 `focus_follow_worker` polls the cursor every 16ms (~1 frame) for a snappy hover,
 but only runs the expensive `WindowFromPoint` + `MANAGED` lock when the cursor

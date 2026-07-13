@@ -264,3 +264,18 @@ on the snapshot-glide foundation, not on real-window interpolation.
 - `ease_out_back` — overshoot then settle. Spring. (To add.)
 - `ease_out_cubic` — fast then slow, no overshoot. Good for fade alpha ramp.
 - Linear — only for constant-velocity needs; reads "mechanical," avoid for motion.
+
+---
+
+## Bar motion (2026-07-13)
+
+- **Pill slide** now interpolates pill INDICES (`pill_anim_pos`, `from_i`/`to_i`)
+  and paint resolves them against the pills' current x-origin — required because
+  the configurable zones can move the workspaces widget anywhere on the bar. Same
+  160ms `ease_in_out_cubic`, driven by the existing 8ms bar timer.
+- **Auto-hide slide**: `bar_autohide_tick` (30ms timer) eases the bar's y toward
+  shown/hidden with exponential smoothing (`y += (target-y)*0.35`, ~90ms settle).
+  Cheap, frame-rate independent enough at this scale; swap for the eased-t pattern
+  if it ever needs to coordinate with other motion.
+- **All bar/popup repaints are double-buffered** — motion must never flicker; see
+  `known-issues.md` 2026-07-13.

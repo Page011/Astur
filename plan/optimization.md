@@ -34,6 +34,15 @@ Each item: location, the change, expected win, risk. Do them roughly top-down
 
 ## B. Animation smoothness
 
+- **DONE 2026-07-13 — all owner-drawn paints double-buffered.** Launcher, sysmenu
+  and bar rendered straight to the window DC; the bg fill wiped the previous frame
+  on screen before content landed → visible icon flash per wheel notch and shimmer
+  during the 120Hz pill slide. `backbuf_begin/backbuf_end` (memory DC + one
+  BitBlt) makes every repaint atomic; `WM_ERASEBKGND` suppressed on all three.
+  `LA_SCROLL` also skips repaints that change nothing (short lists / list ends).
+  Buffer is allocated per paint (GPU-side DDB, cheap); cache per-window only if a
+  profile ever shows it.
+
 - **Tune `COVER_HOLD_MS` (Phase 1) against real apps.** 48ms is a guess; once the
   user confirms the first-visit flash is gone, try lowering toward ~32ms (snappier)
   or raising if a slow app still flashes. Note the landed value here.

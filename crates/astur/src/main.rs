@@ -48,7 +48,8 @@ use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BLENDFUNCTION, StretchBlt, SetStretchBltMode, HALFTONE,
     BeginPaint, BitBlt, CombineRgn, CreateBitmap, CreateCompatibleBitmap, CreateCompatibleDC,
     CreateFontW,
-    CreateRectRgn, CreateSolidBrush, CreatePen, DeleteDC, DeleteObject, DrawTextW, EndPaint,
+    CreateRectRgn, CreateRoundRectRgn, CreateSolidBrush, CreatePen, DeleteDC, DeleteObject,
+    DrawTextW, EndPaint,
     RoundRect, PS_SOLID, UpdateWindow,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
     MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
@@ -58,7 +59,7 @@ use windows::Win32::Graphics::Gdi::{
     OUT_DEFAULT_PRECIS,
     PAINTSTRUCT, RGN_DIFF, RGN_OR, SRCCOPY, TRANSPARENT,
 };
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, MapVirtualKeyW, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
@@ -82,8 +83,18 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use std::os::windows::ffi::OsStrExt;
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
+    COINIT_APARTMENTTHREADED,
 };
+use windows::Win32::System::Registry::{RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD};
+use windows::Win32::Media::Audio::{
+    eConsole, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator,
+};
+use windows::Win32::NetworkManagement::IpHelper::{FreeMibTable, GetIfTable2, MIB_IF_TABLE2};
+use windows::Win32::System::DataExchange::{
+    CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
+};
+use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
 use windows::Win32::System::Search::{
     IDataInitialize, IDBInitialize, IDBCreateSession, IDBCreateCommand, ICommandText, ICommand,
     IRowset, IAccessor, DBBINDING, HACCESSOR, MSDAINITIALIZE, DBPART_VALUE, DBPART_STATUS,
@@ -118,8 +129,11 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
-    AttachThreadInput, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcessToken,
+    AttachThreadInput, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId, OpenProcess,
+    OpenProcessToken, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
+    PROCESS_QUERY_LIMITED_INFORMATION,
 };
+use windows::core::s;
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -850,6 +864,33 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
         }
     }
+    // Wheel over a status bar: route to that bar (volume widget / workspace
+    // cycle). The bar is NOACTIVATE so the wheel would otherwise go to the
+    // focused app. Idle cost: one atomic load; per-slot checks are plain loads
+    // (the hook may not lock). Eaten so the app underneath doesn't also scroll.
+    if msg == WM_MOUSEWHEEL && BARS_HOT.load(Ordering::Relaxed) {
+        for i in 0..MAX_BARS {
+            let hb = BARHIT_HWND[i].load(Ordering::Relaxed);
+            if hb == 0 {
+                continue;
+            }
+            if pt.x >= BARHIT_L[i].load(Ordering::Relaxed)
+                && pt.x < BARHIT_R[i].load(Ordering::Relaxed)
+                && pt.y >= BARHIT_T[i].load(Ordering::Relaxed)
+                && pt.y < BARHIT_B[i].load(Ordering::Relaxed)
+            {
+                let delta = ((info.mouseData >> 16) as u16 as i16) as i32;
+                let up = (delta > 0) as usize;
+                let _ = PostMessageW(
+                    hwnd_from(hb),
+                    WM_BAR_WHEEL,
+                    WPARAM(up),
+                    LPARAM(pt.x as isize),
+                );
+                return suppress;
+            }
+        }
+    }
 
     match msg {
         WM_LBUTTONDOWN if left_alt_down() && !drag_active() => {
@@ -1123,6 +1164,8 @@ enum Cmd {
     MoveGeo(Dir),               // Alt+Shift+arrow: move the window in a direction
     FocusMouse(isize),          // focus-follows-mouse: cursor hovered this window
     BarClick(isize, usize),     // bar pill clicked: (monitor hmon, local workspace)
+    BarFocus(isize),            // bar app-button clicked: focus this window
+    BarCycle(isize, i32),       // bar wheel: (monitor hmon, +1 next / -1 prev workspace)
     Reload(Box<Config>),        // config file changed on disk; apply live
 }
 
@@ -1203,25 +1246,101 @@ static STATS_ON: AtomicBool = AtomicBool::new(false);
 static STAT_CPU: AtomicIsize = AtomicIsize::new(-1);
 static STAT_MEM: AtomicIsize = AtomicIsize::new(-1);
 static STAT_BAT: AtomicIsize = AtomicIsize::new(-1);
+// Network rates in bytes/s (-1 = unavailable) and speaker volume (0..100 / -1),
+// polled by stats_worker; volume also updates instantly on a bar wheel/click.
+static NET_ON: AtomicBool = AtomicBool::new(false);
+static VOL_ON: AtomicBool = AtomicBool::new(false);
+static STAT_NET_D: AtomicIsize = AtomicIsize::new(-1);
+static STAT_NET_U: AtomicIsize = AtomicIsize::new(-1);
+static STAT_VOL: AtomicIsize = AtomicIsize::new(-1);
+static STAT_MUTE: AtomicBool = AtomicBool::new(false);
+
+// ---- bar v2 style/behaviour (ensure_bars + the mouse hook read these) ----
+static BAR_FLOATING: AtomicBool = AtomicBool::new(false);
+static BAR_MARGIN: AtomicIsize = AtomicIsize::new(8);
+static BAR_RADIUS: AtomicIsize = AtomicIsize::new(12);
+static BAR_AUTOHIDE: AtomicBool = AtomicBool::new(false);
+static BAR_WHEEL_WS: AtomicBool = AtomicBool::new(true);
+
+// Hook-visible bar hit rects, lock-free (the mouse hook may not take locks).
+// Slot i is bar i's on-screen rect while it accepts wheel input; hwnd 0 = empty.
+// BARS_HOT short-circuits the whole check to one atomic load when idle.
+const MAX_BARS: usize = 8;
+static BARS_HOT: AtomicBool = AtomicBool::new(false);
+static BARHIT_HWND: [AtomicIsize; MAX_BARS] = [const { AtomicIsize::new(0) }; MAX_BARS];
+static BARHIT_L: [AtomicI32; MAX_BARS] = [const { AtomicI32::new(0) }; MAX_BARS];
+static BARHIT_T: [AtomicI32; MAX_BARS] = [const { AtomicI32::new(0) }; MAX_BARS];
+static BARHIT_R: [AtomicI32; MAX_BARS] = [const { AtomicI32::new(0) }; MAX_BARS];
+static BARHIT_B: [AtomicI32; MAX_BARS] = [const { AtomicI32::new(0) }; MAX_BARS];
+
+/// Publish (or clear, with w=0 rects) a bar's wheel hit rect for the hook.
+fn barhit_publish(hwnd: isize, r: Option<RECT>) {
+    // Reuse the slot already holding this hwnd, else the first empty one.
+    let slot = (0..MAX_BARS)
+        .find(|&i| BARHIT_HWND[i].load(Ordering::Relaxed) == hwnd)
+        .or_else(|| (0..MAX_BARS).find(|&i| BARHIT_HWND[i].load(Ordering::Relaxed) == 0));
+    let Some(i) = slot else { return };
+    match r {
+        Some(r) => {
+            BARHIT_L[i].store(r.left, Ordering::Relaxed);
+            BARHIT_T[i].store(r.top, Ordering::Relaxed);
+            BARHIT_R[i].store(r.right, Ordering::Relaxed);
+            BARHIT_B[i].store(r.bottom, Ordering::Relaxed);
+            BARHIT_HWND[i].store(hwnd, Ordering::Relaxed);
+        }
+        None => {
+            BARHIT_HWND[i].store(0, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Per-bar paint layout published for same-thread mouse hit-testing (pill /
+/// app-button / volume-widget ranges move with the configurable zones).
+#[derive(Default, Clone)]
+struct BarLayout {
+    pills_x0: i32,
+    cell: i32,
+    npills: usize,
+    apps: Vec<(i32, i32, isize)>, // (x0, x1, hwnd)
+    vol: (i32, i32),              // volume widget x-range (0,0 = not shown)
+}
+static BAR_LAYOUTS: Mutex<Option<HashMap<isize, BarLayout>>> = Mutex::new(None);
+
+/// Auto-hide runtime state per bar window (bar/main thread only). `y_cur` eases
+/// toward shown/hidden each AH_TIMER tick, so the bar slides rather than pops.
+/// `strip` is the reveal band on the bar's docked screen edge.
+struct AhBar {
+    x: i32,
+    w: i32,
+    h: i32,
+    y_shown: i32,
+    y_hidden: i32,
+    y_cur: f64,
+    shown: bool,
+    strip: RECT,
+}
+static AH_BARS: Mutex<Option<HashMap<isize, AhBar>>> = Mutex::new(None);
+const AH_TIMER_ID: usize = 4;
 
 /// Sliding workspace-pill highlight. While an entry is present for a monitor,
-/// paint_bar draws the accent pill at an interpolated x between the old and new
-/// pill instead of snapping. Keyed by HMONITOR, driven by a fast WM_TIMER on the
-/// bar window.
+/// paint_bar draws the accent pill at an interpolated position between the old
+/// and new pill INDEX instead of snapping (indices, not x's: with configurable
+/// zones the pills' origin is only known at paint time). Keyed by HMONITOR,
+/// driven by a fast WM_TIMER on the bar window.
 struct PillAnim {
-    from_x: i32,
-    to_x: i32,
+    from_i: i32,
+    to_i: i32,
     start: Instant,
 }
 static PILL_ANIM: Mutex<Option<HashMap<isize, PillAnim>>> = Mutex::new(None);
 const PILL_ANIM_MS: f64 = 160.0;
 
-fn pill_anim_set(hmon: isize, from_x: i32, to_x: i32) {
+fn pill_anim_set(hmon: isize, from_i: i32, to_i: i32) {
     PILL_ANIM.lock().unwrap().get_or_insert_with(HashMap::new).insert(
         hmon,
         PillAnim {
-            from_x,
-            to_x,
+            from_i,
+            to_i,
             start: Instant::now(),
         },
     );
@@ -1233,14 +1352,14 @@ fn pill_anim_clear(hmon: isize) {
     }
 }
 
-/// Current highlight left-x for a monitor's pill animation and whether it's done.
-/// None = no animation running for this monitor (paint at the static active pill).
-fn pill_anim_x(hmon: isize) -> Option<(i32, bool)> {
+/// Current highlight position (in pill units) for a monitor's pill animation and
+/// whether it's done. None = no animation running (paint at the active pill).
+fn pill_anim_pos(hmon: isize) -> Option<(f64, bool)> {
     let g = PILL_ANIM.lock().unwrap();
     let a = g.as_ref()?.get(&hmon)?;
     let t = (a.start.elapsed().as_secs_f64() * 1000.0 / PILL_ANIM_MS).min(1.0);
-    let x = (a.from_x as f64 + (a.to_x - a.from_x) as f64 * ease_in_out_cubic(t)).round() as i32;
-    Some((x, t >= 1.0))
+    let pos = a.from_i as f64 + (a.to_i - a.from_i) as f64 * ease_in_out_cubic(t);
+    Some((pos, t >= 1.0))
 }
 
 /// Per-monitor paint data. One entry per drawn pill: `slots[i]` is the local
@@ -1248,6 +1367,8 @@ fn pill_anim_x(hmon: isize) -> Option<(i32, bool)> {
 /// workspace even when empty pills are hidden), `labels[i]` is the number to
 /// print, `occupied` bit i marks a pill whose workspace has windows, and
 /// `active` is the pill index of the shown workspace (usize::MAX if none).
+/// `apps` lists the active workspace's windows (hwnd + cached exe HICON) for
+/// the app-buttons widget.
 #[derive(Clone, PartialEq)]
 struct MonBar {
     hmon: isize,
@@ -1256,6 +1377,45 @@ struct MonBar {
     active: usize,
     occupied: u64,
     title: String,
+    apps: Vec<(isize, isize)>,
+}
+
+/// One bar widget slot; the navbar zone lists resolve to these at update time.
+#[derive(Clone, Copy, PartialEq)]
+enum BarWidget {
+    Workspaces,
+    Apps,
+    Title,
+    Layout,
+    Cpu,
+    Mem,
+    Net,
+    Volume,
+    Battery,
+    Date,
+    Clock,
+}
+
+/// Resolve one configured zone: widget names -> widgets, honouring the show_*
+/// toggles (a widget must be listed AND enabled to draw).
+fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
+    names
+        .iter()
+        .filter_map(|n| match n.as_str() {
+            "workspaces" => Some(BarWidget::Workspaces),
+            "apps" if cfg.bar_show_apps => Some(BarWidget::Apps),
+            "title" if cfg.bar_show_title => Some(BarWidget::Title),
+            "layout" if cfg.bar_show_layout => Some(BarWidget::Layout),
+            "cpu" if cfg.bar_show_cpu => Some(BarWidget::Cpu),
+            "mem" if cfg.bar_show_mem => Some(BarWidget::Mem),
+            "net" if cfg.bar_show_net => Some(BarWidget::Net),
+            "volume" if cfg.bar_show_volume => Some(BarWidget::Volume),
+            "battery" if cfg.bar_show_battery => Some(BarWidget::Battery),
+            "date" if cfg.bar_show_date => Some(BarWidget::Date),
+            "clock" if cfg.bar_show_clock => Some(BarWidget::Clock),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Everything the bars paint. Replaced wholesale by the manager each update.
@@ -1265,17 +1425,13 @@ struct BarData {
     fg: u32,
     accent: u32,
     inactive: u32,
-    show_title: bool,
-    show_clock: bool,
     clock_24h: bool,
-    show_layout: bool,
-    show_date: bool,
     date_format: String,
-    show_cpu: bool,
-    show_mem: bool,
-    show_battery: bool,
     layout: String,
     tiling: bool,
+    left: Vec<BarWidget>,
+    center: Vec<BarWidget>,
+    right: Vec<BarWidget>,
     mons: Vec<MonBar>,
 }
 
@@ -1286,17 +1442,13 @@ impl BarData {
             fg: 0x00F5CAC0,
             accent: 0x00FFAA66,
             inactive: 0x00895F56,
-            show_title: true,
-            show_clock: true,
             clock_24h: true,
-            show_layout: true,
-            show_date: false,
             date_format: String::new(),
-            show_cpu: false,
-            show_mem: false,
-            show_battery: false,
             layout: String::new(),
             tiling: true,
+            left: Vec::new(),
+            center: Vec::new(),
+            right: Vec::new(),
             mons: Vec::new(),
         }
     }
@@ -1305,8 +1457,12 @@ impl BarData {
 static BAR: Mutex<BarData> = Mutex::new(BarData::new());
 // Custom message: manager asks a bar to repaint.
 const WM_BAR_REFRESH: u32 = WM_USER + 1;
-// Custom message: manager seeds a pill-highlight slide (wparam=from_x, lparam=to_x).
+// Custom message: manager seeds a pill-highlight slide (wparam=from pill index,
+// lparam=to pill index — paint resolves indices to x's, zones move the origin).
 const WM_PILL_ANIM: u32 = WM_USER + 3;
+// Custom message from the LL mouse hook: wheel over this bar (wparam: 1=up,
+// 0=down; lparam = screen x of the cursor).
+const WM_BAR_WHEEL: u32 = WM_USER + 4;
 // SetTimer id for the pill-slide animation (distinct from the clock tick).
 const PILL_TIMER_ID: usize = 2;
 // Custom message (to the marker window): config changed, rebuild bars on the
@@ -1666,11 +1822,15 @@ fn distribute_workspaces(monitors: &mut [Monitor], primary: usize, total: usize,
 unsafe fn reserve_bar(monitors: &mut [Monitor], cfg: &Config) {
     for m in monitors.iter_mut() {
         m.work_area = m.base_work;
-        if cfg.bar_enabled && cfg.bar_height > 0 {
+        // Auto-hide bars reserve nothing (they overlay on reveal). A floating
+        // bar reserves its height plus the margin on both sides so tiles clear
+        // the detached pill.
+        if cfg.bar_enabled && cfg.bar_height > 0 && !cfg.bar_autohide {
+            let extra = if cfg.bar_floating { cfg.bar_margin * 2 } else { 0 };
             if cfg.bar_bottom {
-                m.work_area.bottom -= cfg.bar_height;
+                m.work_area.bottom -= cfg.bar_height + extra;
             } else {
-                m.work_area.top += cfg.bar_height;
+                m.work_area.top += cfg.bar_height + extra;
             }
         }
     }
@@ -3288,6 +3448,24 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
             }
         }
+        Cmd::BarFocus(h) => {
+            // App button clicked: focus that window (same effect as clicking it).
+            if IsWindow(hwnd_from(h)).as_bool() {
+                focus_window(h);
+            }
+        }
+        Cmd::BarCycle(hmon, dir) => {
+            // Wheel over the bar: previous/next workspace on that monitor (wraps).
+            if let Some(mi) = mgr.mon_by_hmon(hmon) {
+                let count = mgr.monitors[mi].workspaces.len();
+                if count > 1 {
+                    let cur = mgr.monitors[mi].active as i32;
+                    let next = (cur + dir).rem_euclid(count as i32) as usize;
+                    mgr.focused_mon = mi;
+                    switch_monitor_workspace(mgr, mi, next);
+                }
+            }
+        }
         Cmd::Reload(cfg) => {
             mgr.cfg = *cfg;
             // Gaps/opacity may have changed — cached snapshots are now stale.
@@ -3841,12 +4019,82 @@ unsafe fn make_bar_font(height: i32, font_size: i32) {
 /// Create or reposition one bar window per monitor. Safe to call repeatedly
 /// (startup and on display changes); runs only on the main thread because the
 /// bars' message loop is the main thread.
+/// One AH_TIMER tick (~30ms): decide shown/hidden from the cursor and ease the
+/// bar's y toward the target (slide-in/out). Runs on the bar's own thread and
+/// only ever moves the bar window itself — never a managed window.
+unsafe fn bar_autohide_tick(h: HWND) {
+    let key = h.0 as isize;
+    let mut pt = POINT::default();
+    let _ = GetCursorPos(&mut pt);
+    let mut g = AH_BARS.lock().unwrap();
+    let Some(ab) = g.as_mut().and_then(|m| m.get_mut(&key)) else { return };
+    let yc = ab.y_cur as i32;
+    let over_bar = pt.x >= ab.x
+        && pt.x < ab.x + ab.w
+        && pt.y >= yc - 8
+        && pt.y < yc + ab.h + 8;
+    let in_strip = pt.x >= ab.strip.left
+        && pt.x < ab.strip.right
+        && pt.y >= ab.strip.top
+        && pt.y < ab.strip.bottom;
+    let want = over_bar || in_strip;
+    if want != ab.shown {
+        ab.shown = want;
+        // Wheel routing only while the bar is on screen.
+        if want {
+            barhit_publish(
+                key,
+                Some(RECT {
+                    left: ab.x,
+                    top: ab.y_shown,
+                    right: ab.x + ab.w,
+                    bottom: ab.y_shown + ab.h,
+                }),
+            );
+        } else {
+            barhit_publish(key, None);
+        }
+    }
+    let target = if ab.shown { ab.y_shown } else { ab.y_hidden } as f64;
+    if (ab.y_cur - target).abs() > 0.5 {
+        ab.y_cur += (target - ab.y_cur) * 0.35;
+        if (ab.y_cur - target).abs() <= 0.5 {
+            ab.y_cur = target;
+        }
+        let x = ab.x;
+        let y = ab.y_cur.round() as i32;
+        drop(g); // release before the (same-process) window move
+        let _ = SetWindowPos(
+            h,
+            HWND_TOPMOST,
+            x,
+            y,
+            0,
+            0,
+            SWP_NOACTIVATE | SWP_NOSIZE,
+        );
+    }
+}
+
 unsafe fn ensure_bars() {
     let height = BAR_HEIGHT.load(Ordering::Relaxed) as i32;
     if height <= 0 {
+        // Bar disabled: silence the hook's wheel routing.
+        for i in 0..MAX_BARS {
+            BARHIT_HWND[i].store(0, Ordering::Relaxed);
+        }
+        BARS_HOT.store(false, Ordering::Relaxed);
         return;
     }
     let bottom = BAR_BOTTOM.load(Ordering::Relaxed);
+    let floating = BAR_FLOATING.load(Ordering::Relaxed);
+    let margin = if floating {
+        BAR_MARGIN.load(Ordering::Relaxed) as i32
+    } else {
+        0
+    };
+    let radius = BAR_RADIUS.load(Ordering::Relaxed) as i32;
+    let autohide = BAR_AUTOHIDE.load(Ordering::Relaxed);
     let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
 
     let mut raw: Vec<(isize, RECT)> = Vec::new();
@@ -3859,12 +4107,17 @@ unsafe fn ensure_bars() {
 
     let mut bars = BARS.lock().unwrap();
     for &(hmon, rcm) in &raw {
-        let x = rcm.left;
-        let y = if bottom { rcm.bottom - height } else { rcm.top };
-        let w = rcm.right - rcm.left;
-        if let Some(b) = bars.iter().find(|b| b.hmon == hmon) {
+        let x = rcm.left + margin;
+        let w = (rcm.right - rcm.left) - margin * 2;
+        let y = if bottom {
+            rcm.bottom - height - margin
+        } else {
+            rcm.top + margin
+        };
+        let hb = if let Some(b) = bars.iter().find(|b| b.hmon == hmon) {
+            let hb = hwnd_from(b.hwnd);
             let _ = SetWindowPos(
-                hwnd_from(b.hwnd),
+                hb,
                 HWND_TOPMOST,
                 x,
                 y,
@@ -3872,6 +4125,7 @@ unsafe fn ensure_bars() {
                 height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
+            hb
         } else {
             let hb = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -3895,15 +4149,82 @@ unsafe fn ensure_bars() {
                 hwnd: hb.0 as isize,
                 hmon,
             });
+            hb
+        };
+        // Floating bars get rounded corners via a window region (works on
+        // Windows 10 and 11 alike). Classic bars clear any leftover region.
+        if floating && radius > 0 {
+            let rgn = CreateRoundRectRgn(0, 0, w + 1, height + 1, radius * 2, radius * 2);
+            let _ = SetWindowRgn(hb, rgn, true); // system owns the region now
+        } else {
+            let _ = SetWindowRgn(hb, None, true);
+        }
+        // Publish the wheel hit rect for the LL mouse hook.
+        barhit_publish(
+            hb.0 as isize,
+            Some(RECT {
+                left: x,
+                top: y,
+                right: x + w,
+                bottom: y + height,
+            }),
+        );
+        // Auto-hide state: reveal band on the docked screen edge.
+        if autohide {
+            let strip = if bottom {
+                RECT {
+                    left: rcm.left,
+                    top: rcm.bottom - 2,
+                    right: rcm.right,
+                    bottom: rcm.bottom,
+                }
+            } else {
+                RECT {
+                    left: rcm.left,
+                    top: rcm.top,
+                    right: rcm.right,
+                    bottom: rcm.top + 2,
+                }
+            };
+            let y_hidden = if bottom {
+                rcm.bottom + 2
+            } else {
+                rcm.top - height - 2
+            };
+            AH_BARS
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(
+                    hb.0 as isize,
+                    AhBar {
+                        x,
+                        w,
+                        h: height,
+                        y_shown: y,
+                        y_hidden,
+                        y_cur: y as f64,
+                        shown: true,
+                        strip,
+                    },
+                );
+            SetTimer(hb, AH_TIMER_ID, 30, None);
+        } else {
+            if let Some(m) = AH_BARS.lock().unwrap().as_mut() {
+                m.remove(&(hb.0 as isize));
+            }
+            let _ = KillTimer(hb, AH_TIMER_ID);
         }
     }
-    // Hide bars whose monitor disappeared.
+    // Hide bars whose monitor disappeared (and stop routing wheel to them).
     let present: Vec<isize> = raw.iter().map(|(h, _)| *h).collect();
     for b in bars.iter() {
         if !present.contains(&b.hmon) {
             let _ = ShowWindow(hwnd_from(b.hwnd), SW_HIDE);
+            barhit_publish(b.hwnd, None);
         }
     }
+    BARS_HOT.store(!bars.is_empty(), Ordering::Relaxed);
 }
 
 /// Convert a 24-hour hour to (12-hour, "am"/"pm").
@@ -3959,6 +4280,116 @@ fn format_date(fmt: &str, st: &SYSTEMTIME) -> String {
     out
 }
 
+// ---- bar app-button icons ----------------------------------------------------
+// Cached per exe path (loaded once via the launcher's HQ shell-icon pipeline at
+// exactly the drawn size, then reused for every window of that app).
+const BAR_ICON_PX: i32 = 20;
+static BAR_ICONS: Mutex<Option<HashMap<String, isize>>> = Mutex::new(None);
+
+/// Full exe path of a window's process (for the app-buttons icon cache key).
+unsafe fn window_exe(hwnd: HWND) -> Option<String> {
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return None;
+    }
+    let proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+    let mut buf = [0u16; 512];
+    let mut len = buf.len() as u32;
+    let ok = QueryFullProcessImageNameW(
+        proc,
+        PROCESS_NAME_WIN32,
+        windows::core::PWSTR(buf.as_mut_ptr()),
+        &mut len,
+    );
+    let _ = CloseHandle(proc);
+    ok.ok()?;
+    Some(String::from_utf16_lossy(&buf[..len as usize]))
+}
+
+/// HICON for a window's exe at BAR_ICON_PX (cached; -1 = none). Manager thread.
+unsafe fn bar_app_icon(hwnd: HWND) -> isize {
+    let Some(path) = window_exe(hwnd) else { return -1 };
+    {
+        let cache = BAR_ICONS.lock().unwrap();
+        if let Some(m) = cache.as_ref() {
+            if let Some(&ic) = m.get(&path) {
+                return ic;
+            }
+        }
+    }
+    let ic = shell_item_hicon(&path, BAR_ICON_PX)
+        .map(|h| h.0 as isize)
+        .unwrap_or(-1);
+    BAR_ICONS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(path, ic);
+    ic
+}
+
+/// Compact bytes/s for the net widget: 0K / 340K / 1.2M.
+fn fmt_rate(bps: isize) -> String {
+    if bps < 0 {
+        return String::new();
+    }
+    let k = bps as f64 / 1024.0;
+    if k < 1000.0 {
+        format!("{:.0}K", k)
+    } else {
+        format!("{:.1}M", k / 1024.0)
+    }
+}
+
+// ---- speaker volume (bar widget) ----------------------------------------------
+
+/// Default render endpoint's volume interface. Created per call — cheap COM
+/// activation, and it always tracks the CURRENT default device.
+unsafe fn endpoint_volume() -> Option<IAudioEndpointVolume> {
+    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+    let en: IMMDeviceEnumerator = CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL).ok()?;
+    let dev = en.GetDefaultAudioEndpoint(eRender, eConsole).ok()?;
+    dev.Activate::<IAudioEndpointVolume>(CLSCTX_ALL, None).ok()
+}
+
+unsafe fn volume_poll() {
+    match endpoint_volume() {
+        Some(v) => {
+            if let Ok(s) = v.GetMasterVolumeLevelScalar() {
+                STAT_VOL.store((s * 100.0).round() as isize, Ordering::Relaxed);
+            }
+            if let Ok(m) = v.GetMute() {
+                STAT_MUTE.store(m.as_bool(), Ordering::Relaxed);
+            }
+        }
+        None => STAT_VOL.store(-1, Ordering::Relaxed),
+    }
+}
+
+/// Nudge the master volume (wheel over the volume widget). Updates the cached
+/// stat immediately so the bar repaint shows the new value without waiting for
+/// the 2s poll.
+unsafe fn volume_adjust(delta: f32) {
+    if let Some(v) = endpoint_volume() {
+        if let Ok(s) = v.GetMasterVolumeLevelScalar() {
+            let ns = (s + delta).clamp(0.0, 1.0);
+            let _ = v.SetMasterVolumeLevelScalar(ns, std::ptr::null());
+            STAT_VOL.store((ns * 100.0).round() as isize, Ordering::Relaxed);
+        }
+    }
+}
+
+unsafe fn volume_toggle_mute() {
+    if let Some(v) = endpoint_volume() {
+        if let Ok(m) = v.GetMute() {
+            let nm = !m.as_bool();
+            let _ = v.SetMute(nm, std::ptr::null());
+            STAT_MUTE.store(nm, Ordering::Relaxed);
+        }
+    }
+}
+
 /// Poll CPU / RAM / battery into the STAT_* atomics every ~2s for the bar's
 /// stats widgets. Idles cheaply while no stat widget is enabled (STATS_ON). Runs
 /// off the input/manager threads so it can never add latency to either.
@@ -3970,8 +4401,10 @@ fn stats_worker() {
     let ticks = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
     let mut prev_idle = 0u64;
     let mut prev_total = 0u64;
+    let mut prev_net: Option<(u64, u64, Instant)> = None;
     loop {
         if !STATS_ON.load(Ordering::Relaxed) {
+            prev_net = None;
             std::thread::sleep(std::time::Duration::from_millis(500));
             continue;
         }
@@ -4008,6 +4441,45 @@ fn stats_worker() {
                 STAT_BAT.store(ps.BatteryLifePercent as isize, Ordering::Relaxed);
             } else {
                 STAT_BAT.store(-1, Ordering::Relaxed);
+            }
+            // Network: total octets across up ethernet/wifi interfaces; the rate
+            // is the delta over the poll interval.
+            if NET_ON.load(Ordering::Relaxed) {
+                let mut table: *mut MIB_IF_TABLE2 = std::ptr::null_mut();
+                if GetIfTable2(&mut table).is_ok() && !table.is_null() {
+                    let t = &*table;
+                    let rows =
+                        std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize);
+                    let mut tin: u64 = 0;
+                    let mut tout: u64 = 0;
+                    for r in rows {
+                        // 6 = ethernet, 71 = 802.11; OperStatus 1 = up.
+                        if r.OperStatus.0 == 1 && (r.Type == 6 || r.Type == 71) {
+                            tin = tin.saturating_add(r.InOctets);
+                            tout = tout.saturating_add(r.OutOctets);
+                        }
+                    }
+                    FreeMibTable(table as *const c_void);
+                    let now = Instant::now();
+                    if let Some((pin, pout, pt)) = prev_net {
+                        let dt = now.duration_since(pt).as_secs_f64().max(0.1);
+                        STAT_NET_D.store(
+                            (tin.saturating_sub(pin) as f64 / dt) as isize,
+                            Ordering::Relaxed,
+                        );
+                        STAT_NET_U.store(
+                            (tout.saturating_sub(pout) as f64 / dt) as isize,
+                            Ordering::Relaxed,
+                        );
+                    }
+                    prev_net = Some((tin, tout, now));
+                }
+            } else {
+                prev_net = None;
+            }
+            // Speaker volume + mute for the volume widget.
+            if VOL_ON.load(Ordering::Relaxed) {
+                volume_poll();
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(2000));
@@ -4075,6 +4547,22 @@ unsafe fn update_bar(mgr: &Manager) {
         } else {
             String::new()
         };
+        // App buttons: the active workspace's windows with their exe icons
+        // (cached per exe, so this is a HashMap hit after the first sighting).
+        let apps: Vec<(isize, isize)> = if mgr.cfg.bar_show_apps {
+            m.workspaces
+                .get(m.active)
+                .map(|ws| {
+                    ws.windows
+                        .iter()
+                        .filter(|h| IsWindow(hwnd_from(**h)).as_bool())
+                        .map(|&h| (h, bar_app_icon(hwnd_from(h))))
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         mons.push(MonBar {
             hmon: m.hmon,
             slots,
@@ -4082,6 +4570,7 @@ unsafe fn update_bar(mgr: &Manager) {
             active,
             occupied,
             title,
+            apps,
         });
     }
     let new = BarData {
@@ -4089,25 +4578,19 @@ unsafe fn update_bar(mgr: &Manager) {
         fg: mgr.cfg.bar_fg,
         accent: mgr.cfg.bar_accent,
         inactive: mgr.cfg.bar_inactive,
-        show_title: mgr.cfg.bar_show_title,
-        show_clock: mgr.cfg.bar_show_clock,
         clock_24h: mgr.cfg.bar_clock_24h,
-        show_layout: mgr.cfg.bar_show_layout,
-        show_date: mgr.cfg.bar_show_date,
         date_format: mgr.cfg.bar_date_format.clone(),
-        show_cpu: mgr.cfg.bar_show_cpu,
-        show_mem: mgr.cfg.bar_show_mem,
-        show_battery: mgr.cfg.bar_show_battery,
         layout: mgr.cfg.layout.clone(),
         tiling: mgr.tiling,
+        left: zone_widgets(&mgr.cfg.bar_left, &mgr.cfg),
+        center: zone_widgets(&mgr.cfg.bar_center, &mgr.cfg),
+        right: zone_widgets(&mgr.cfg.bar_right, &mgr.cfg),
         mons,
     };
 
     // Diff against the previous snapshot so only changed monitors repaint, and
     // seed a pill-highlight slide on any monitor whose active workspace moved.
     let animate_pills = mgr.cfg.animations;
-    let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
-    let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
     let mut changed: Vec<isize> = Vec::new();
     let mut anim_seeds: Vec<(isize, i32, i32)> = Vec::new();
     {
@@ -4116,17 +4599,13 @@ unsafe fn update_bar(mgr: &Manager) {
             || old.fg != new.fg
             || old.accent != new.accent
             || old.inactive != new.inactive
-            || old.show_title != new.show_title
-            || old.show_clock != new.show_clock
             || old.clock_24h != new.clock_24h
-            || old.show_layout != new.show_layout
-            || old.show_date != new.show_date
             || old.date_format != new.date_format
-            || old.show_cpu != new.show_cpu
-            || old.show_mem != new.show_mem
-            || old.show_battery != new.show_battery
             || old.layout != new.layout
             || old.tiling != new.tiling
+            || old.left != new.left
+            || old.center != new.center
+            || old.right != new.right
             || old.mons.len() != new.mons.len();
         for nm in &new.mons {
             let om = old.mons.iter().find(|om| om.hmon == nm.hmon);
@@ -4138,7 +4617,9 @@ unsafe fn update_bar(mgr: &Manager) {
                 changed.push(nm.hmon);
             }
             // Animate only when the pill layout is unchanged (so indices are
-            // comparable) and a different, real pill became active.
+            // comparable) and a different, real pill became active. Seeds are
+            // pill INDICES — paint knows the pills' x origin, update_bar doesn't
+            // (it moves with the configurable zones).
             if animate_pills {
                 if let Some(om) = om {
                     if om.slots == nm.slots
@@ -4146,11 +4627,7 @@ unsafe fn update_bar(mgr: &Manager) {
                         && nm.active != usize::MAX
                         && om.active != nm.active
                     {
-                        anim_seeds.push((
-                            nm.hmon,
-                            pad + om.active as i32 * cell,
-                            pad + nm.active as i32 * cell,
-                        ));
+                        anim_seeds.push((nm.hmon, om.active as i32, nm.active as i32));
                     }
                 }
             }
@@ -4192,46 +4669,253 @@ unsafe fn text_width(hdc: HDC, s: &str) -> i32 {
     r.right - r.left
 }
 
-/// Draw one right-cluster widget flush against the running `right` edge, then
-/// move the edge left by the text width plus a gap. Skips empty strings so a
-/// disabled / unavailable widget leaves no hole.
 const BAR_WIDGET_GAP: i32 = 16;
-unsafe fn draw_right(hdc: HDC, right: &mut i32, h_px: i32, s: &str, color: u32) {
-    let w = text_width(hdc, s);
-    if w <= 0 {
-        return;
+const BAR_APP_BTN_W: i32 = BAR_ICON_PX + 10; // app-button cell (icon + breathing room)
+
+/// Text + colour-class for the simple text widgets (None = widget renders
+/// nothing right now, e.g. no battery present). bool = draw dim.
+unsafe fn bar_widget_text(wgt: BarWidget, data: &BarData, mb: Option<&MonBar>) -> Option<(String, bool)> {
+    match wgt {
+        BarWidget::Clock => {
+            let st: SYSTEMTIME = GetLocalTime();
+            let s = if data.clock_24h {
+                format!("{:02}:{:02}", st.wHour, st.wMinute)
+            } else {
+                let (h12, ap) = to_12h(st.wHour);
+                format!("{}:{:02} {}", h12, st.wMinute, ap)
+            };
+            Some((s, false))
+        }
+        BarWidget::Date => {
+            let st: SYSTEMTIME = GetLocalTime();
+            Some((format_date(&data.date_format, &st), false))
+        }
+        BarWidget::Battery => {
+            let b = STAT_BAT.load(Ordering::Relaxed);
+            (b >= 0).then(|| (format!("BAT {}%", b), false))
+        }
+        BarWidget::Mem => {
+            let v = STAT_MEM.load(Ordering::Relaxed);
+            (v >= 0).then(|| (format!("RAM {}%", v), false))
+        }
+        BarWidget::Cpu => {
+            let v = STAT_CPU.load(Ordering::Relaxed);
+            (v >= 0).then(|| (format!("CPU {}%", v), false))
+        }
+        BarWidget::Net => {
+            let d = STAT_NET_D.load(Ordering::Relaxed);
+            let u = STAT_NET_U.load(Ordering::Relaxed);
+            (d >= 0 && u >= 0)
+                .then(|| (format!("\u{2193}{} \u{2191}{}", fmt_rate(d), fmt_rate(u)), false))
+        }
+        BarWidget::Volume => {
+            let v = STAT_VOL.load(Ordering::Relaxed);
+            if v < 0 {
+                return None;
+            }
+            if STAT_MUTE.load(Ordering::Relaxed) {
+                Some(("MUTE".to_string(), true))
+            } else {
+                Some((format!("VOL {}%", v), false))
+            }
+        }
+        BarWidget::Layout => {
+            let s = if data.tiling {
+                format!("[{}]", data.layout)
+            } else {
+                "[float]".to_string()
+            };
+            Some((s, true))
+        }
+        BarWidget::Title => {
+            let t = mb.map(|m| m.title.as_str()).unwrap_or("");
+            (!t.is_empty()).then(|| (t.to_string(), false))
+        }
+        BarWidget::Workspaces | BarWidget::Apps => None, // composite, drawn separately
     }
-    let mut r = RECT {
-        left: *right - w,
-        top: 0,
-        right: *right,
-        bottom: h_px,
-    };
-    SetTextColor(hdc, COLORREF(color));
-    let mut v: Vec<u16> = s.encode_utf16().collect();
-    DrawTextW(
-        hdc,
-        &mut v,
-        &mut r,
-        DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-    );
-    *right -= w + BAR_WIDGET_GAP;
 }
 
-/// Paint one monitor's bar in three clusters: workspace pills (left), focused
-/// title (centre), and the widget cluster (right): clock, date, battery, mem,
-/// cpu, layout — drawn right-to-left and measured so each only takes the room it
-/// needs. The owning monitor's HMONITOR is in GWLP_USERDATA so each bar paints
-/// its own data.
+/// Width one widget will occupy (0 = skipped). `avail` caps the flexible title.
+unsafe fn bar_widget_width(
+    hdc: HDC,
+    wgt: BarWidget,
+    data: &BarData,
+    mb: Option<&MonBar>,
+    cell: i32,
+    avail: i32,
+) -> i32 {
+    match wgt {
+        BarWidget::Workspaces => mb.map(|m| m.labels.len() as i32 * cell).unwrap_or(0),
+        BarWidget::Apps => mb.map(|m| m.apps.len() as i32 * BAR_APP_BTN_W).unwrap_or(0),
+        _ => match bar_widget_text(wgt, data, mb) {
+            Some((s, _)) => text_width(hdc, &s).min(avail.max(0)),
+            None => 0,
+        },
+    }
+}
+
+/// Paint one widget with its left edge at `x`; returns the width consumed.
+/// Records hit ranges (pills / app buttons / volume) into `lay` for the
+/// wndproc's mouse handling.
+unsafe fn bar_widget_draw(
+    hdc: HDC,
+    wgt: BarWidget,
+    x: i32,
+    h_px: i32,
+    avail: i32,
+    data: &BarData,
+    mb: Option<&MonBar>,
+    lay: &mut BarLayout,
+    cell: i32,
+) -> i32 {
+    match wgt {
+        BarWidget::Workspaces => {
+            let Some(mb) = mb else { return 0 };
+            let n = mb.labels.len() as i32;
+            if n == 0 || cell <= 0 {
+                return 0;
+            }
+            lay.pills_x0 = x;
+            lay.npills = mb.labels.len();
+            // Numbers first, in their resting colours...
+            for (i, label) in mb.labels.iter().enumerate() {
+                let x0 = x + i as i32 * cell;
+                let mut cr = RECT {
+                    left: x0,
+                    top: 0,
+                    right: x0 + cell,
+                    bottom: h_px,
+                };
+                let occ = mb.occupied & (1 << i) != 0;
+                SetTextColor(hdc, COLORREF(if occ { data.fg } else { data.inactive }));
+                let mut s: Vec<u16> = format!("{}", label).encode_utf16().collect();
+                DrawTextW(
+                    hdc,
+                    &mut s,
+                    &mut cr,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            }
+            // ...then the accent highlight, at the animated position while a
+            // slide is in flight, otherwise snapped to the active pill.
+            let hl = match pill_anim_pos(mb.hmon) {
+                Some((pos, _)) => Some(x + (pos * cell as f64).round() as i32),
+                None if mb.active != usize::MAX => Some(x + mb.active as i32 * cell),
+                None => None,
+            };
+            if let Some(hx) = hl {
+                let ipad = (h_px / 6).clamp(2, 6);
+                let pill = RECT {
+                    left: hx + 3,
+                    top: ipad,
+                    right: hx + cell - 3,
+                    bottom: h_px - ipad,
+                };
+                let ab = CreateSolidBrush(COLORREF(data.accent));
+                FillRect(hdc, &pill, ab);
+                let _ = DeleteObject(HGDIOBJ(ab.0));
+                let nearest = (((hx - x) as f32 / cell as f32).round() as i32)
+                    .clamp(0, n - 1) as usize;
+                let mut cr = RECT {
+                    left: hx,
+                    top: 0,
+                    right: hx + cell,
+                    bottom: h_px,
+                };
+                SetTextColor(hdc, COLORREF(data.bg));
+                let mut s: Vec<u16> = format!("{}", mb.labels[nearest]).encode_utf16().collect();
+                DrawTextW(
+                    hdc,
+                    &mut s,
+                    &mut cr,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            }
+            n * cell
+        }
+        BarWidget::Apps => {
+            let Some(mb) = mb else { return 0 };
+            if mb.apps.is_empty() {
+                return 0;
+            }
+            let iy = (h_px - BAR_ICON_PX) / 2;
+            for (i, &(hwnd, icon)) in mb.apps.iter().enumerate() {
+                let bx = x + i as i32 * BAR_APP_BTN_W;
+                if icon > 0 {
+                    let _ = DrawIconEx(
+                        hdc,
+                        bx + (BAR_APP_BTN_W - BAR_ICON_PX) / 2,
+                        iy,
+                        HICON(icon as *mut c_void),
+                        BAR_ICON_PX,
+                        BAR_ICON_PX,
+                        0,
+                        None,
+                        DI_NORMAL,
+                    );
+                } else {
+                    // No icon resolved: a dim placeholder square.
+                    let mk = CreateSolidBrush(COLORREF(data.inactive));
+                    let g = RECT {
+                        left: bx + (BAR_APP_BTN_W - 10) / 2,
+                        top: (h_px - 10) / 2,
+                        right: bx + (BAR_APP_BTN_W - 10) / 2 + 10,
+                        bottom: (h_px - 10) / 2 + 10,
+                    };
+                    FillRect(hdc, &g, mk);
+                    let _ = DeleteObject(HGDIOBJ(mk.0));
+                }
+                lay.apps.push((bx, bx + BAR_APP_BTN_W, hwnd));
+            }
+            mb.apps.len() as i32 * BAR_APP_BTN_W
+        }
+        _ => {
+            let Some((s, dim)) = bar_widget_text(wgt, data, mb) else { return 0 };
+            let tw = text_width(hdc, &s).min(avail.max(0));
+            if tw <= 0 {
+                return 0;
+            }
+            let mut r = RECT {
+                left: x,
+                top: 0,
+                right: x + tw,
+                bottom: h_px,
+            };
+            SetTextColor(hdc, COLORREF(if dim { data.inactive } else { data.fg }));
+            let mut v: Vec<u16> = s.encode_utf16().collect();
+            DrawTextW(
+                hdc,
+                &mut v,
+                &mut r,
+                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+            );
+            if wgt == BarWidget::Volume {
+                lay.vol = (x, x + tw);
+            }
+            tw
+        }
+    }
+}
+
+/// Paint one monitor's bar from the three configurable zones (navbar.conf
+/// `left` / `center` / `right`): the left zone flows left-to-right, the right
+/// zone hugs the right edge (listed order still reads left-to-right), and the
+/// center zone is centred in the remaining gap (the title flexes to fill).
+/// The owning monitor's HMONITOR is in GWLP_USERDATA so each bar paints its own
+/// data; the hit ranges land in BAR_LAYOUTS for the mouse handlers.
 unsafe fn paint_bar(h: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(h, &mut ps);
+    let win_hdc = BeginPaint(h, &mut ps);
     let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
     let data = BAR.lock().unwrap().clone();
 
     let mut rc = RECT::default();
     let _ = GetClientRect(h, &mut rc);
     let h_px = rc.bottom - rc.top;
+    let w = rc.right - rc.left;
+    // Double buffer: the pill slide repaints at ~120Hz; direct painting flickers.
+    let bb = backbuf_begin(win_hdc, w, h_px);
+    let hdc = bb.as_ref().map(|b| b.dc).unwrap_or(win_hdc);
 
     let bg_brush = CreateSolidBrush(COLORREF(data.bg));
     FillRect(hdc, &rc, bg_brush);
@@ -4247,136 +4931,74 @@ unsafe fn paint_bar(h: HWND) {
 
     let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
     let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
-    let mut right_edge = rc.right - pad;
+    let mb = data.mons.iter().find(|m| m.hmon == hmon);
+    let mut lay = BarLayout {
+        cell,
+        ..Default::default()
+    };
 
-    // ---- right cluster (right-to-left): clock, date, battery, mem, cpu, layout
-    if data.show_clock {
-        let st: SYSTEMTIME = GetLocalTime();
-        let clock = if data.clock_24h {
-            format!("{:02}:{:02}", st.wHour, st.wMinute)
-        } else {
-            let (h12, ap) = to_12h(st.wHour);
-            format!("{}:{:02} {}", h12, st.wMinute, ap)
-        };
-        draw_right(hdc, &mut right_edge, h_px, &clock, data.fg);
-    }
-    if data.show_date {
-        let st: SYSTEMTIME = GetLocalTime();
-        let date = format_date(&data.date_format, &st);
-        draw_right(hdc, &mut right_edge, h_px, &date, data.fg);
-    }
-    if data.show_battery {
-        let b = STAT_BAT.load(Ordering::Relaxed);
-        if b >= 0 {
-            draw_right(hdc, &mut right_edge, h_px, &format!("BAT {}%", b), data.fg);
+    // ---- left zone: flows left-to-right from the padding.
+    let mut x = pad;
+    for wgt in &data.left {
+        let drew = bar_widget_draw(hdc, *wgt, x, h_px, w, &data, mb, &mut lay, cell);
+        if drew > 0 {
+            x += drew + BAR_WIDGET_GAP;
         }
     }
-    if data.show_mem {
-        let v = STAT_MEM.load(Ordering::Relaxed);
-        if v >= 0 {
-            draw_right(hdc, &mut right_edge, h_px, &format!("RAM {}%", v), data.fg);
+    let left_end = x;
+
+    // ---- right zone: anchored to the right edge; iterate reversed so the
+    // configured order reads left-to-right on screen.
+    let mut right = w - pad;
+    for wgt in data.right.iter().rev() {
+        let ww = bar_widget_width(hdc, *wgt, &data, mb, cell, w);
+        if ww <= 0 {
+            continue;
         }
-    }
-    if data.show_cpu {
-        let v = STAT_CPU.load(Ordering::Relaxed);
-        if v >= 0 {
-            draw_right(hdc, &mut right_edge, h_px, &format!("CPU {}%", v), data.fg);
-        }
-    }
-    if data.show_layout {
-        let s = if data.tiling {
-            format!("[{}]", data.layout)
-        } else {
-            "[float]".to_string()
-        };
-        draw_right(hdc, &mut right_edge, h_px, &s, data.inactive);
+        let wx = right - ww;
+        let _ = bar_widget_draw(hdc, *wgt, wx, h_px, ww, &data, mb, &mut lay, cell);
+        right = wx - BAR_WIDGET_GAP;
     }
 
-    if let Some(mb) = data.mons.iter().find(|m| m.hmon == hmon) {
-        // ---- left cluster: workspace pills, offset by the edge padding.
-        // Numbers first, all in their resting colours...
-        for (i, label) in mb.labels.iter().enumerate() {
-            let x0 = pad + i as i32 * cell;
-            let mut cr = RECT {
-                left: x0,
-                top: 0,
-                right: x0 + cell,
-                bottom: h_px,
-            };
-            let occ = mb.occupied & (1 << i) != 0;
-            SetTextColor(hdc, COLORREF(if occ { data.fg } else { data.inactive }));
-            let mut s: Vec<u16> = format!("{}", label).encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                &mut s,
-                &mut cr,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        }
-        // ...then the accent highlight on top, at the animated x while a slide is
-        // in flight, otherwise snapped to the active pill. The number it sits over
-        // is redrawn in the bg colour so it reads through the fill.
-        let hl = match pill_anim_x(hmon) {
-            Some((x, _)) => Some(x),
-            None if mb.active != usize::MAX => Some(pad + mb.active as i32 * cell),
-            None => None,
-        };
-        if let (Some(x), true) = (hl, !mb.labels.is_empty() && cell > 0) {
-            let ipad = (h_px / 6).clamp(2, 6);
-            let pill = RECT {
-                left: x + 3,
-                top: ipad,
-                right: x + cell - 3,
-                bottom: h_px - ipad,
-            };
-            let ab = CreateSolidBrush(COLORREF(data.accent));
-            FillRect(hdc, &pill, ab);
-            let _ = DeleteObject(HGDIOBJ(ab.0));
-            let nearest = (((x - pad) as f32 / cell as f32).round() as i32)
-                .clamp(0, mb.labels.len() as i32 - 1) as usize;
-            let mut cr = RECT {
-                left: x,
-                top: 0,
-                right: x + cell,
-                bottom: h_px,
-            };
-            SetTextColor(hdc, COLORREF(data.bg));
-            let mut s: Vec<u16> = format!("{}", mb.labels[nearest]).encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                &mut s,
-                &mut cr,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-            );
-        }
-
-        // ---- centre cluster: focused window title, centred in the gap between
-        // the pills and the right cluster (ellipsised if it doesn't fit).
-        if data.show_title && !mb.title.is_empty() {
-            let left = pad + mb.labels.len() as i32 * cell + 14;
-            let right = right_edge - 8;
-            if right > left {
-                let mut tr = RECT {
-                    left,
-                    top: 0,
-                    right,
-                    bottom: h_px,
-                };
-                SetTextColor(hdc, COLORREF(data.fg));
-                let mut s: Vec<u16> = mb.title.encode_utf16().collect();
-                DrawTextW(
-                    hdc,
-                    &mut s,
-                    &mut tr,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-                );
+    // ---- center zone: centred in the remaining gap; the title flexes.
+    let gap_l = left_end;
+    let gap_r = right;
+    if gap_r > gap_l && !data.center.is_empty() {
+        let avail = gap_r - gap_l;
+        let mut widths: Vec<i32> = Vec::with_capacity(data.center.len());
+        let mut total = 0;
+        for wgt in &data.center {
+            let ww = bar_widget_width(hdc, *wgt, &data, mb, cell, avail - total);
+            widths.push(ww);
+            if ww > 0 {
+                total += ww + BAR_WIDGET_GAP;
             }
+        }
+        if total > 0 {
+            total -= BAR_WIDGET_GAP;
+        }
+        let mut cx = gap_l + ((avail - total).max(0)) / 2;
+        for (wgt, ww) in data.center.iter().zip(widths) {
+            if ww <= 0 {
+                continue;
+            }
+            let _ = bar_widget_draw(hdc, *wgt, cx, h_px, ww, &data, mb, &mut lay, cell);
+            cx += ww + BAR_WIDGET_GAP;
         }
     }
 
     if let Some(of) = old_font {
         SelectObject(hdc, of);
     }
+    if let Some(b) = bb {
+        backbuf_end(win_hdc, b);
+    }
+    // Publish this bar's hit ranges for the wndproc mouse handlers.
+    BAR_LAYOUTS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(h.0 as isize, lay);
     let _ = EndPaint(h, &ps);
 }
 
@@ -4396,11 +5018,15 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
         }
+        WM_TIMER if w.0 == AH_TIMER_ID => {
+            bar_autohide_tick(h);
+            LRESULT(0)
+        }
         WM_TIMER => {
             if w.0 == PILL_TIMER_ID {
                 let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
                 // Stop the fast timer once the slide finishes (or vanished).
-                if pill_anim_x(hmon).map(|(_, done)| done).unwrap_or(true) {
+                if pill_anim_pos(hmon).map(|(_, done)| done).unwrap_or(true) {
                     let _ = KillTimer(h, PILL_TIMER_ID);
                     pill_anim_clear(hmon);
                 }
@@ -4412,13 +5038,47 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
         }
+        WM_BAR_WHEEL => {
+            // Routed from the LL mouse hook (the bar is NOACTIVATE, so the wheel
+            // never reaches it natively). wparam: 1 = up, 0 = down; lparam =
+            // screen x. Over the volume widget the wheel adjusts volume;
+            // anywhere else it cycles workspaces (if enabled).
+            let up = w.0 == 1;
+            let mut wr = RECT::default();
+            let _ = GetWindowRect(h, &mut wr);
+            let cx = l.0 as i32 - wr.left;
+            let lay = BAR_LAYOUTS
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|m| m.get(&(h.0 as isize)).cloned())
+                .unwrap_or_default();
+            if lay.vol.1 > lay.vol.0 && cx >= lay.vol.0 && cx < lay.vol.1 {
+                volume_adjust(if up { 0.02 } else { -0.02 });
+                let _ = InvalidateRect(h, None, BOOL(0));
+            } else if BAR_WHEEL_WS.load(Ordering::Relaxed) {
+                let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
+                push_cmd(Cmd::BarCycle(hmon, if up { -1 } else { 1 }));
+            }
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
+            // Hit-test against the painted layout: workspace pills switch, app
+            // buttons focus, the volume widget toggles mute.
             let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
-            let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
-            let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
-            if cell > 0 && x >= pad {
-                let pill = ((x - pad) / cell) as usize;
+            let lay = BAR_LAYOUTS
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|m| m.get(&(h.0 as isize)).cloned())
+                .unwrap_or_default();
+            if lay.npills > 0
+                && lay.cell > 0
+                && x >= lay.pills_x0
+                && x < lay.pills_x0 + lay.npills as i32 * lay.cell
+            {
+                let pill = ((x - lay.pills_x0) / lay.cell) as usize;
                 // Map the clicked pill back to its real local workspace via slots
                 // (pills and workspaces diverge when empty pills are hidden).
                 let local = BAR
@@ -4431,9 +5091,18 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                 if let Some(local) = local {
                     push_cmd(Cmd::BarClick(hmon, local));
                 }
+            } else if let Some(&(_, _, hw)) =
+                lay.apps.iter().find(|&&(x0, x1, _)| x >= x0 && x < x1)
+            {
+                push_cmd(Cmd::BarFocus(hw));
+            } else if lay.vol.1 > lay.vol.0 && x >= lay.vol.0 && x < lay.vol.1 {
+                volume_toggle_mute();
+                let _ = InvalidateRect(h, None, BOOL(0));
             }
             LRESULT(0)
         }
+        // Paint is double-buffered; a background erase would only add flicker.
+        WM_ERASEBKGND => LRESULT(1),
         WM_DISPLAYCHANGE => {
             push_cmd(Cmd::RefreshMonitors);
             DefWindowProcW(h, msg, w, l)
@@ -4516,8 +5185,19 @@ fn apply_bar_statics(cfg: &Config) {
     BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
     BAR_PADDING.store(cfg.bar_padding as isize, Ordering::Relaxed);
     *BAR_FONT_NAME.lock().unwrap() = cfg.bar_font_name.clone();
+    BAR_FLOATING.store(cfg.bar_floating, Ordering::Relaxed);
+    BAR_MARGIN.store(cfg.bar_margin as isize, Ordering::Relaxed);
+    BAR_RADIUS.store(cfg.bar_radius as isize, Ordering::Relaxed);
+    BAR_AUTOHIDE.store(cfg.bar_autohide, Ordering::Relaxed);
+    BAR_WHEEL_WS.store(cfg.bar_wheel_ws, Ordering::Relaxed);
+    NET_ON.store(cfg.bar_show_net, Ordering::Relaxed);
+    VOL_ON.store(cfg.bar_show_volume, Ordering::Relaxed);
     STATS_ON.store(
-        cfg.bar_show_cpu || cfg.bar_show_mem || cfg.bar_show_battery,
+        cfg.bar_show_cpu
+            || cfg.bar_show_mem
+            || cfg.bar_show_battery
+            || cfg.bar_show_net
+            || cfg.bar_show_volume,
         Ordering::Relaxed,
     );
 }
@@ -4555,6 +5235,7 @@ fn config_watcher() {
             hk.close_window = cfg.key_close_window;
         }
         apply_bar_statics(&cfg);
+        apply_theme(&cfg);
         // Manager applies the rest; the marker (main thread) rebuilds the bars.
         push_cmd(Cmd::Reload(Box::new(cfg)));
         let marker = MARKER_HWND.load(Ordering::Relaxed);
@@ -4783,6 +5464,342 @@ const LAUNCHER_HEADER: i32 = 54; // query row height
 const LAUNCHER_ICON_PX: i32 = 32; // per-row app icon box (Start-Menu-ish size)
 const LAUNCHER_SEL_RADIUS: i32 = 12; // rounded selection pill
 
+// ---- popup theme (dark / light / auto) -------------------------------------
+// The popups (launcher + system menu) read their palette at paint time, so a
+// theme change in astur.conf hot-reloads without touching the windows.
+struct Pal {
+    bg: u32,
+    fg: u32,
+    dim: u32,
+    selbg: u32,
+    selfg: u32,
+    frame: u32,
+    divider: u32,
+}
+const PAL_DARK: Pal = Pal {
+    bg: LAUNCHER_BG,
+    fg: LAUNCHER_FG,
+    dim: LAUNCHER_DIM,
+    selbg: LAUNCHER_SELBG,
+    selfg: LAUNCHER_SELFG,
+    frame: LAUNCHER_FRAME,
+    divider: LAUNCHER_DIVIDER,
+};
+const PAL_LIGHT: Pal = Pal {
+    bg: 0x00FA_F7F4,      // #F4F7FA — cool near-white surface
+    fg: 0x001E_1E1E,      // near-black text
+    dim: 0x0078_7878,     // muted grey
+    selbg: LAUNCHER_SELBG, // same Forte-blue accent both themes
+    selfg: 0x00FF_FFFF,
+    frame: 0x00D9_D2CC,   // #CCD2D9 cool border
+    divider: 0x00E6_E2DE, // #DEE2E6
+};
+static THEME_LIGHT: AtomicBool = AtomicBool::new(false);
+fn pal() -> &'static Pal {
+    if THEME_LIGHT.load(Ordering::Relaxed) {
+        &PAL_LIGHT
+    } else {
+        &PAL_DARK
+    }
+}
+
+/// Windows "apps use light theme" flag (Settings > Personalisation > Colours).
+fn windows_apps_light() -> bool {
+    unsafe {
+        let sub: Vec<u16> = r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let val: Vec<u16> = "AppsUseLightTheme"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut data: u32 = 0;
+        let mut cb: u32 = core::mem::size_of::<u32>() as u32;
+        RegGetValueW(
+            HKEY_CURRENT_USER,
+            PCWSTR(sub.as_ptr()),
+            PCWSTR(val.as_ptr()),
+            RRF_RT_REG_DWORD,
+            None,
+            Some(&mut data as *mut u32 as *mut c_void),
+            Some(&mut cb),
+        )
+        .is_ok()
+            && data == 1
+    }
+}
+
+/// Resolve `theme = dark|light|auto` into THEME_LIGHT (startup + hot-reload).
+fn apply_theme(cfg: &Config) {
+    let light = match cfg.theme.as_str() {
+        "light" => true,
+        "auto" => windows_apps_light(),
+        _ => false,
+    };
+    THEME_LIGHT.store(light, Ordering::Relaxed);
+    ACRYLIC_ON.store(cfg.acrylic, Ordering::Relaxed);
+}
+
+// ---- acrylic backdrop (experimental) ---------------------------------------
+// Undocumented user32!SetWindowCompositionAttribute with ACCENT_ENABLE_
+// ACRYLICBLURBEHIND. The popup also gets whole-window alpha (layered) so the
+// blur reads through the GDI-painted surface. Config-gated, default off.
+static ACRYLIC_ON: AtomicBool = AtomicBool::new(false);
+#[repr(C)]
+struct AccentPolicy {
+    state: u32,
+    flags: u32,
+    gradient: u32, // AABBGGRR tint
+    anim: u32,
+}
+#[repr(C)]
+struct CompAttrData {
+    attr: u32,
+    pdata: *mut c_void,
+    cb: u32,
+}
+
+/// Apply (or remove) the acrylic accent + layered alpha on a popup window.
+/// Safe to call on every show — cheap, idempotent.
+unsafe fn apply_acrylic(h: HWND, on: bool) {
+    type SetWca = unsafe extern "system" fn(HWND, *mut CompAttrData) -> i32;
+    let Ok(user32) = GetModuleHandleW(w!("user32.dll")) else { return };
+    let Some(f) = GetProcAddress(user32, s!("SetWindowCompositionAttribute")) else { return };
+    let f: SetWca = core::mem::transmute(f);
+    let dark = !THEME_LIGHT.load(Ordering::Relaxed);
+    let mut ap = AccentPolicy {
+        state: if on { 4 } else { 0 }, // 4 = ACCENT_ENABLE_ACRYLICBLURBEHIND
+        flags: 2,
+        gradient: if dark { 0x99_10_10_10 } else { 0x99_F4_F0_EC }, // AABBGGRR tint
+        anim: 0,
+    };
+    let mut d = CompAttrData {
+        attr: 19, // WCA_ACCENT_POLICY
+        pdata: &mut ap as *mut _ as *mut c_void,
+        cb: core::mem::size_of::<AccentPolicy>() as u32,
+    };
+    let _ = f(h, &mut d);
+    // Slightly transparent window so the blur shows through the opaque GDI fill.
+    let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    if on {
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED.0 as isize);
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), 236, LWA_ALPHA);
+    } else if ex & WS_EX_LAYERED.0 as isize != 0 {
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+    }
+}
+
+// ---- GDI back buffer --------------------------------------------------------
+// All owner-drawn surfaces (launcher, system menu, bar) render into a memory DC
+// and blit once. Painting straight to the window DC flashes: the bg fill wipes
+// the previous frame on screen before the content lands (the launcher icons
+// visibly blinked on every wheel scroll).
+struct BackBuf {
+    dc: HDC,
+    bmp: windows::Win32::Graphics::Gdi::HBITMAP,
+    old: HGDIOBJ,
+    w: i32,
+    h: i32,
+}
+
+unsafe fn backbuf_begin(win: HDC, w: i32, h: i32) -> Option<BackBuf> {
+    let dc = CreateCompatibleDC(win);
+    if dc.0.is_null() {
+        return None;
+    }
+    let bmp = CreateCompatibleBitmap(win, w.max(1), h.max(1));
+    if bmp.0.is_null() {
+        let _ = DeleteDC(dc);
+        return None;
+    }
+    let old = SelectObject(dc, HGDIOBJ(bmp.0));
+    Some(BackBuf { dc, bmp, old, w, h })
+}
+
+unsafe fn backbuf_end(win: HDC, b: BackBuf) {
+    let _ = BitBlt(win, 0, 0, b.w, b.h, b.dc, 0, 0, SRCCOPY);
+    SelectObject(b.dc, b.old);
+    let _ = DeleteObject(HGDIOBJ(b.bmp.0));
+    let _ = DeleteDC(b.dc);
+}
+
+// ---- clipboard --------------------------------------------------------------
+
+/// Put UTF-16 text on the clipboard (calculator result copy).
+unsafe fn clipboard_set_text(h: HWND, s: &str) {
+    let wide: Vec<u16> = s.encode_utf16().chain(std::iter::once(0)).collect();
+    if OpenClipboard(h).is_err() {
+        return;
+    }
+    let _ = EmptyClipboard();
+    let bytes = wide.len() * 2;
+    if let Ok(hg) = GlobalAlloc(GMEM_MOVEABLE, bytes) {
+        let p = GlobalLock(hg) as *mut u16;
+        if !p.is_null() {
+            std::ptr::copy_nonoverlapping(wide.as_ptr(), p, wide.len());
+            let _ = GlobalUnlock(hg);
+            // 13 = CF_UNICODETEXT. On success the system owns the memory.
+            if SetClipboardData(13, HANDLE(hg.0)).is_err() {
+                let _ = windows::Win32::Foundation::GlobalFree(hg);
+            }
+        } else {
+            let _ = windows::Win32::Foundation::GlobalFree(hg);
+        }
+    }
+    let _ = CloseClipboard();
+}
+
+// ---- inline calculator --------------------------------------------------------
+// Tiny recursive-descent evaluator: + - * / % ^ parentheses, unary minus,
+// decimals. Returns None on any parse error, so a non-maths query never shows
+// a calc row.
+
+struct CalcParser<'a> {
+    b: &'a [u8],
+    i: usize,
+}
+
+impl<'a> CalcParser<'a> {
+    fn skip(&mut self) {
+        while self.i < self.b.len() && self.b[self.i] == b' ' {
+            self.i += 1;
+        }
+    }
+    fn expr(&mut self) -> Option<f64> {
+        let mut v = self.term()?;
+        loop {
+            self.skip();
+            match self.b.get(self.i) {
+                Some(b'+') => {
+                    self.i += 1;
+                    v += self.term()?;
+                }
+                Some(b'-') => {
+                    self.i += 1;
+                    v -= self.term()?;
+                }
+                _ => return Some(v),
+            }
+        }
+    }
+    fn term(&mut self) -> Option<f64> {
+        let mut v = self.pow()?;
+        loop {
+            self.skip();
+            match self.b.get(self.i) {
+                Some(b'*') => {
+                    self.i += 1;
+                    v *= self.pow()?;
+                }
+                Some(b'/') => {
+                    self.i += 1;
+                    let d = self.pow()?;
+                    if d == 0.0 {
+                        return None;
+                    }
+                    v /= d;
+                }
+                Some(b'%') => {
+                    self.i += 1;
+                    let d = self.pow()?;
+                    if d == 0.0 {
+                        return None;
+                    }
+                    v %= d;
+                }
+                _ => return Some(v),
+            }
+        }
+    }
+    fn pow(&mut self) -> Option<f64> {
+        let base = self.unary()?;
+        self.skip();
+        if self.b.get(self.i) == Some(&b'^') {
+            self.i += 1;
+            let e = self.pow()?; // right-associative
+            return Some(base.powf(e));
+        }
+        Some(base)
+    }
+    fn unary(&mut self) -> Option<f64> {
+        self.skip();
+        if self.b.get(self.i) == Some(&b'-') {
+            self.i += 1;
+            return Some(-self.unary()?);
+        }
+        self.atom()
+    }
+    fn atom(&mut self) -> Option<f64> {
+        self.skip();
+        if self.b.get(self.i) == Some(&b'(') {
+            self.i += 1;
+            let v = self.expr()?;
+            self.skip();
+            if self.b.get(self.i) != Some(&b')') {
+                return None;
+            }
+            self.i += 1;
+            return Some(v);
+        }
+        let start = self.i;
+        while self.b.get(self.i).is_some_and(|c| c.is_ascii_digit() || *c == b'.') {
+            self.i += 1;
+        }
+        if self.i == start {
+            return None;
+        }
+        std::str::from_utf8(&self.b[start..self.i]).ok()?.parse().ok()
+    }
+}
+
+/// Evaluate a maths query. Only fires when the text looks like an expression
+/// (calc characters only, at least one operator, at least one digit) so app
+/// names never trigger it.
+fn calc_eval(q: &str) -> Option<f64> {
+    let t = q.trim();
+    if t.is_empty()
+        || !t.bytes().all(|c| c.is_ascii_digit() || b"+-*/%^(). ".contains(&c))
+        || !t.bytes().any(|c| c.is_ascii_digit())
+        || !t.bytes().any(|c| b"+-*/%^".contains(&c))
+    {
+        return None;
+    }
+    let mut p = CalcParser { b: t.as_bytes(), i: 0 };
+    let v = p.expr()?;
+    p.skip();
+    if p.i != p.b.len() || !v.is_finite() {
+        return None;
+    }
+    Some(v)
+}
+
+/// Format a calc result: integers plainly, otherwise up to 10 significant
+/// decimals with trailing zeros trimmed.
+fn calc_fmt(v: f64) -> String {
+    if v == v.trunc() && v.abs() < 1e15 {
+        format!("{}", v as i64)
+    } else {
+        let s = format!("{v:.10}");
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+}
+
+/// Open the default browser on a web search for `q`.
+unsafe fn launcher_web_search(q: &str) {
+    let mut url = String::from("https://www.google.com/search?q=");
+    for b in q.trim().bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                url.push(b as char)
+            }
+            b' ' => url.push('+'),
+            _ => url.push_str(&format!("%{b:02X}")),
+        }
+    }
+    launcher_launch(&url);
+}
+
 static LAUNCHER_OPEN: AtomicBool = AtomicBool::new(false);
 static LAUNCHER_HWND: AtomicIsize = AtomicIsize::new(0);
 static LAUNCHER_FONT: AtomicIsize = AtomicIsize::new(0);
@@ -4817,17 +5834,21 @@ struct FileHit {
     size: i64,  // bytes (-1 = unknown / folder)
     date: f64,  // OLE automation date (days since 1899-12-30); 0 = unknown
 }
-/// A visible result row: an app (index into `all`) or a file (index into `files`).
+/// A visible result row: an app (index into `all`), a file (index into `files`),
+/// the inline calculator result, or the web-search fallback.
 #[derive(Clone, Copy)]
 enum Hit {
     App(usize),
     File(usize),
+    Calc, // pinned first row when the query evaluates as maths (Enter copies)
+    Web,  // "Search the web" fallback when nothing else matched
 }
 struct LauncherState {
     query: String,
     all: Vec<AppEntry>,
     files: Vec<FileHit>,   // current file-search results (top-N, replaced per query)
     filtered: Vec<Hit>,    // merged app + file rows, best first
+    calc: Option<String>,  // formatted calculator result for the current query
     sel: usize,
     scroll: usize,         // first visible row (wheel scrolls; keyboard keeps sel visible)
     loaded: bool,
@@ -4839,6 +5860,7 @@ static LAUNCHER_STATE: Mutex<LauncherState> = Mutex::new(LauncherState {
     all: Vec::new(),
     files: Vec::new(),
     filtered: Vec::new(),
+    calc: None,
     sel: 0,
     scroll: 0,
     loaded: false,
@@ -5167,6 +6189,12 @@ fn fuzzy_score(query: &str, cand: &str) -> Option<i32> {
 /// Recompute `filtered` (and clamp `sel`) for the current query.
 fn launcher_refilter(st: &mut LauncherState) {
     let q = st.query.to_ascii_lowercase();
+    // Inline calculator: a maths-looking query pins its result as the first row.
+    st.calc = calc_eval(&st.query).map(calc_fmt);
+    let mut filtered: Vec<Hit> = Vec::new();
+    if st.calc.is_some() {
+        filtered.push(Hit::Calc);
+    }
     let mut scored: Vec<(i32, usize)> = st
         .all
         .iter()
@@ -5175,11 +6203,15 @@ fn launcher_refilter(st: &mut LauncherState) {
         .collect();
     // Best score first; ties keep alphabetical order (all is pre-sorted, stable).
     scored.sort_by(|a, b| b.0.cmp(&a.0));
-    let mut filtered: Vec<Hit> = scored.into_iter().map(|(_, i)| Hit::App(i)).collect();
+    filtered.extend(scored.into_iter().map(|(_, i)| Hit::App(i)));
     // File results (from the async index worker, already query-filtered) after apps —
     // apps are instant and the common case, so they never wait on the index.
     for i in 0..st.files.len() {
         filtered.push(Hit::File(i));
+    }
+    // Nothing matched a non-empty query: offer a web search as the only row.
+    if filtered.is_empty() && !st.query.trim().is_empty() {
+        filtered.push(Hit::Web);
     }
     st.filtered = filtered;
     if st.sel >= st.filtered.len() {
@@ -5523,6 +6555,7 @@ unsafe fn launcher_show(h: HWND) {
     // move after this may hover-select.
     LAUNCHER_LAST_MX.store(pt.x, Ordering::Relaxed);
     LAUNCHER_LAST_MY.store(pt.y, Ordering::Relaxed);
+    apply_acrylic(h, ACRYLIC_ON.load(Ordering::Relaxed));
     let _ = ShowWindow(h, SW_SHOWNA);
 }
 
@@ -5535,6 +6568,7 @@ unsafe fn launcher_close(h: HWND) {
     st.sel = 0;
     st.scroll = 0;
     st.files.clear();
+    st.calc = None;
     st.wide = false;
 }
 
@@ -5605,15 +6639,19 @@ fn launcher_row_hit(st: &LauncherState, ht: i32, y: i32) -> Option<usize> {
 
 unsafe fn launcher_paint(h: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(h, &mut ps);
+    let win_hdc = BeginPaint(h, &mut ps);
     let mut rc = RECT::default();
     let _ = GetClientRect(h, &mut rc);
     let w = rc.right - rc.left;
     let ht = rc.bottom - rc.top;
+    // Double buffer: render off-screen, blit once (no bg-wipe flash on scroll).
+    let bb = backbuf_begin(win_hdc, w, ht);
+    let hdc = bb.as_ref().map(|b| b.dc).unwrap_or(win_hdc);
+    let p = pal();
 
-    // Thin 1px frame, then the dark surface inset inside it (DWM rounds the outer
+    // Thin 1px frame, then the surface inset inside it (DWM rounds the outer
     // corners, so this reads as a clean bordered card).
-    let frame = CreateSolidBrush(COLORREF(LAUNCHER_FRAME));
+    let frame = CreateSolidBrush(COLORREF(p.frame));
     FillRect(hdc, &rc, frame);
     let _ = DeleteObject(HGDIOBJ(frame.0));
     let inner = RECT {
@@ -5622,7 +6660,7 @@ unsafe fn launcher_paint(h: HWND) {
         right: rc.right - 1,
         bottom: rc.bottom - 1,
     };
-    let bg = CreateSolidBrush(COLORREF(LAUNCHER_BG));
+    let bg = CreateSolidBrush(COLORREF(p.bg));
     FillRect(hdc, &inner, bg);
     let _ = DeleteObject(HGDIOBJ(bg.0));
 
@@ -5644,11 +6682,11 @@ unsafe fn launcher_paint(h: HWND) {
         bottom: LAUNCHER_HEADER,
     };
     if st.query.is_empty() {
-        SetTextColor(hdc, COLORREF(LAUNCHER_DIM));
+        SetTextColor(hdc, COLORREF(p.dim));
         let mut v: Vec<u16> = "Search apps and files…".encode_utf16().collect();
         DrawTextW(hdc, &mut v, &mut qr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
     } else {
-        SetTextColor(hdc, COLORREF(LAUNCHER_FG));
+        SetTextColor(hdc, COLORREF(p.fg));
         // Trailing caret marks the input (the picker is owner-drawn, no edit ctrl).
         let mut v: Vec<u16> = format!("{}\u{258f}", st.query).encode_utf16().collect();
         DrawTextW(hdc, &mut v, &mut qr, DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
@@ -5660,7 +6698,7 @@ unsafe fn launcher_paint(h: HWND) {
         right: w - LAUNCHER_PAD,
         bottom: LAUNCHER_HEADER + 1,
     };
-    let dbrush = CreateSolidBrush(COLORREF(LAUNCHER_DIVIDER));
+    let dbrush = CreateSolidBrush(COLORREF(p.divider));
     FillRect(hdc, &div, dbrush);
     let _ = DeleteObject(HGDIOBJ(dbrush.0));
 
@@ -5677,7 +6715,7 @@ unsafe fn launcher_paint(h: HWND) {
     let date_x = size_x - COL_DATE_W;
     if st.wide {
         // Dim column headers in the band under the query divider.
-        SetTextColor(hdc, COLORREF(LAUNCHER_DIM));
+        SetTextColor(hdc, COLORREF(p.dim));
         let hdr = |x0: i32, x1: i32, label: &str, extra: DRAW_TEXT_FORMAT| {
             let mut r = RECT {
                 left: x0,
@@ -5709,8 +6747,8 @@ unsafe fn launcher_paint(h: HWND) {
         };
         if idx == st.sel {
             // Rounded accent pill, inset from the row edges (omarchy-style).
-            let sel = CreateSolidBrush(COLORREF(LAUNCHER_SELBG));
-            let pen = CreatePen(PS_SOLID, 1, COLORREF(LAUNCHER_SELBG));
+            let sel = CreateSolidBrush(COLORREF(p.selbg));
+            let pen = CreatePen(PS_SOLID, 1, COLORREF(p.selbg));
             let ob = SelectObject(hdc, HGDIOBJ(sel.0));
             let op = SelectObject(hdc, HGDIOBJ(pen.0));
             let _ = RoundRect(
@@ -5726,9 +6764,45 @@ unsafe fn launcher_paint(h: HWND) {
             SelectObject(hdc, op);
             let _ = DeleteObject(HGDIOBJ(sel.0));
             let _ = DeleteObject(HGDIOBJ(pen.0));
-            SetTextColor(hdc, COLORREF(LAUNCHER_SELFG));
+            SetTextColor(hdc, COLORREF(p.selfg));
         } else {
-            SetTextColor(hdc, COLORREF(LAUNCHER_FG));
+            SetTextColor(hdc, COLORREF(p.fg));
+        }
+        // Calculator / web-search rows: a marker glyph in the icon box + one line
+        // of text; no wide-mode meta cells.
+        match hit {
+            Hit::Calc | Hit::Web => {
+                let glyph = if matches!(hit, Hit::Calc) { "=" } else { "\u{2192}" };
+                let mut gr = RECT {
+                    left: row.left + 6,
+                    top,
+                    right: row.left + 6 + LAUNCHER_ICON_PX,
+                    bottom: top + LAUNCHER_ROW_H,
+                };
+                let keep = if idx == st.sel { p.selfg } else { p.dim };
+                SetTextColor(hdc, COLORREF(keep));
+                let mut gv: Vec<u16> = glyph.encode_utf16().collect();
+                DrawTextW(hdc, &mut gv, &mut gr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+                let text = if matches!(hit, Hit::Calc) {
+                    format!(
+                        "{}   (Enter copies)",
+                        st.calc.as_deref().unwrap_or("")
+                    )
+                } else {
+                    format!("Search the web for \u{201c}{}\u{201d}", st.query.trim())
+                };
+                SetTextColor(hdc, COLORREF(if idx == st.sel { p.selfg } else { p.fg }));
+                let mut tr = RECT { left: text_left, ..row };
+                let mut v: Vec<u16> = text.encode_utf16().collect();
+                DrawTextW(
+                    hdc,
+                    &mut v,
+                    &mut tr,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
+                continue;
+            }
+            _ => {}
         }
         // Resolve name + wide-mode meta cells (+ apps' lazy icon).
         let (name, date_s, size_s, path_s): (&str, String, String, &str) = match hit {
@@ -5761,7 +6835,7 @@ unsafe fn launcher_paint(h: HWND) {
                 // File rows: a small dim square marks them (no shell icon yet); the
                 // wide view carries date/size/path in columns.
                 if idx != st.sel {
-                    let mk = CreateSolidBrush(COLORREF(LAUNCHER_DIM));
+                    let mk = CreateSolidBrush(COLORREF(p.dim));
                     let g = RECT {
                         left: row.left + 6 + (LAUNCHER_ICON_PX - 14) / 2,
                         top: top + (LAUNCHER_ROW_H - 14) / 2,
@@ -5779,6 +6853,8 @@ unsafe fn launcher_paint(h: HWND) {
                     f.path.as_str(),
                 )
             }
+            // Drawn above (with an early continue).
+            Hit::Calc | Hit::Web => unreachable!(),
         };
         let mut tr = RECT {
             left: text_left,
@@ -5796,7 +6872,7 @@ unsafe fn launcher_paint(h: HWND) {
             // Meta cells: dim normally, selection-white on the accent pill.
             SetTextColor(
                 hdc,
-                COLORREF(if idx == st.sel { LAUNCHER_SELFG } else { LAUNCHER_DIM }),
+                COLORREF(if idx == st.sel { p.selfg } else { p.dim }),
             );
             let cell = |x0: i32, x1: i32, s: &str, extra: DRAW_TEXT_FORMAT| {
                 if s.is_empty() {
@@ -5821,6 +6897,9 @@ unsafe fn launcher_paint(h: HWND) {
         SelectObject(hdc, of);
     }
     drop(st);
+    if let Some(b) = bb {
+        backbuf_end(win_hdc, b);
+    }
     // Queue any visible rows still missing an icon; the icon worker resolves them.
     if !want.is_empty() {
         let mut q = ICON_QUEUE.lock().unwrap();
@@ -5915,18 +6994,40 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     let _ = InvalidateRect(h, None, BOOL(0));
                 }
                 LA_ACTIVATE => {
-                    // Enter: launch the selected app, or open the selected file.
+                    // Enter: launch the app / open the file / copy the calc result /
+                    // run the web-search fallback.
+                    enum Act {
+                        Open(String),
+                        Copy(String),
+                        Web(String),
+                        None,
+                    }
                     let action = {
                         let st = LAUNCHER_STATE.lock().unwrap();
                         match st.filtered.get(st.sel) {
-                            Some(Hit::App(i)) => st.all.get(*i).map(|e| e.path.clone()),
-                            Some(Hit::File(i)) => st.files.get(*i).map(|f| f.path.clone()),
-                            None => None,
+                            Some(Hit::App(i)) => {
+                                st.all.get(*i).map(|e| Act::Open(e.path.clone())).unwrap_or(Act::None)
+                            }
+                            Some(Hit::File(i)) => {
+                                st.files.get(*i).map(|f| Act::Open(f.path.clone())).unwrap_or(Act::None)
+                            }
+                            Some(Hit::Calc) => {
+                                st.calc.clone().map(Act::Copy).unwrap_or(Act::None)
+                            }
+                            Some(Hit::Web) => Act::Web(st.query.trim().to_string()),
+                            None => Act::None,
                         }
                     };
+                    // Copy needs the window alive as the clipboard owner; do it
+                    // before closing.
+                    if let Act::Copy(s) = &action {
+                        clipboard_set_text(h, s);
+                    }
                     launcher_close(h);
-                    if let Some(p) = action {
-                        launcher_launch(&p);
+                    match action {
+                        Act::Open(p) => launcher_launch(&p),
+                        Act::Web(q) => launcher_web_search(&q),
+                        _ => {}
                     }
                 }
                 LA_ACTIVATE_ALT => {
@@ -5965,22 +7066,27 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                 }
                 LA_SCROLL => {
                     // Mouse wheel: scroll the viewport; drag the selection along so
-                    // Enter always acts on a visible row.
+                    // Enter always acts on a visible row. Skip the repaint entirely
+                    // when nothing changed (short list, or already at either end).
                     let mut rc = RECT::default();
                     let _ = GetClientRect(h, &mut rc);
-                    {
+                    let changed = {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
                         let rows = launcher_rows(&st, rc.bottom);
                         let maxs = st.filtered.len().saturating_sub(rows);
                         let cur = launcher_scroll(&st, rows);
                         let next = if l.0 > 0 { cur.saturating_sub(1) } else { (cur + 1).min(maxs) };
+                        let old_sel = st.sel;
                         st.scroll = next;
                         if !st.filtered.is_empty() {
                             let last = st.filtered.len() - 1;
                             st.sel = st.sel.clamp(next, (next + rows - 1).min(last));
                         }
+                        next != cur || st.sel != old_sel
+                    };
+                    if changed {
+                        let _ = InvalidateRect(h, None, BOOL(0));
                     }
-                    let _ = InvalidateRect(h, None, BOOL(0));
                 }
                 LA_CLOSE => launcher_close(h),
                 _ => {}
@@ -6157,6 +7263,7 @@ enum SysAct {
     Restart,
     Shutdown,
     OpenConfig,
+    OpenSettings,
 }
 
 // A row is either a category (drills into a submenu) or an action (the bool = needs a
@@ -6178,6 +7285,7 @@ const POWER: &[SysItem] = &[
     SysItem { label: "Shut down", kind: SysKind::Action(SysAct::Shutdown, true) },
 ];
 const SETUP: &[SysItem] = &[
+    SysItem { label: "Settings", kind: SysKind::Action(SysAct::OpenSettings, false) },
     SysItem { label: "Open config folder", kind: SysKind::Action(SysAct::OpenConfig, false) },
 ];
 const SYS_ROOT: &[SysItem] = &[
@@ -6247,6 +7355,7 @@ unsafe fn sysmenu_exec(act: SysAct) {
             enable_shutdown_priv();
             let _ = ExitWindowsEx(EWX_SHUTDOWN | EWX_FORCEIFHUNG, SHUTDOWN_REASON(0));
         }
+        SysAct::OpenSettings => tray_open_settings(),
         SysAct::OpenConfig => {
             if let Ok(home) = std::env::var("USERPROFILE") {
                 let dir = format!(r"{home}\.astur");
@@ -6306,6 +7415,7 @@ unsafe fn sysmenu_show(h: HWND) {
         st.at_root = true;
     }
     sysmenu_layout(h);
+    apply_acrylic(h, ACRYLIC_ON.load(Ordering::Relaxed));
     let _ = ShowWindow(h, SW_SHOWNA);
 }
 
@@ -6322,12 +7432,16 @@ unsafe fn sysmenu_close(h: HWND) {
 
 unsafe fn sysmenu_paint(h: HWND) {
     let mut ps = PAINTSTRUCT::default();
-    let hdc = BeginPaint(h, &mut ps);
+    let win_hdc = BeginPaint(h, &mut ps);
     let mut rc = RECT::default();
     let _ = GetClientRect(h, &mut rc);
     let w = rc.right - rc.left;
+    // Double buffer (see launcher_paint) — no bg-wipe flash on wheel/hover.
+    let bb = backbuf_begin(win_hdc, w, rc.bottom - rc.top);
+    let hdc = bb.as_ref().map(|b| b.dc).unwrap_or(win_hdc);
+    let p = pal();
 
-    let frame = CreateSolidBrush(COLORREF(LAUNCHER_FRAME));
+    let frame = CreateSolidBrush(COLORREF(p.frame));
     FillRect(hdc, &rc, frame);
     let _ = DeleteObject(HGDIOBJ(frame.0));
     let inner = RECT {
@@ -6336,7 +7450,7 @@ unsafe fn sysmenu_paint(h: HWND) {
         right: rc.right - 1,
         bottom: rc.bottom - 1,
     };
-    let bg = CreateSolidBrush(COLORREF(LAUNCHER_BG));
+    let bg = CreateSolidBrush(COLORREF(p.bg));
     FillRect(hdc, &inner, bg);
     let _ = DeleteObject(HGDIOBJ(bg.0));
 
@@ -6349,7 +7463,7 @@ unsafe fn sysmenu_paint(h: HWND) {
     SetBkMode(hdc, TRANSPARENT);
 
     let st = SYSMENU_STATE.lock().unwrap();
-    SetTextColor(hdc, COLORREF(LAUNCHER_DIM));
+    SetTextColor(hdc, COLORREF(p.dim));
     let mut tr = RECT {
         left: LAUNCHER_PAD,
         top: 0,
@@ -6364,7 +7478,7 @@ unsafe fn sysmenu_paint(h: HWND) {
         right: w - LAUNCHER_PAD,
         bottom: SYSMENU_HEADER + 1,
     };
-    let db = CreateSolidBrush(COLORREF(LAUNCHER_DIVIDER));
+    let db = CreateSolidBrush(COLORREF(p.divider));
     FillRect(hdc, &div, db);
     let _ = DeleteObject(HGDIOBJ(db.0));
 
@@ -6377,8 +7491,8 @@ unsafe fn sysmenu_paint(h: HWND) {
             bottom: top + LAUNCHER_ROW_H,
         };
         if i == st.sel {
-            let sel = CreateSolidBrush(COLORREF(LAUNCHER_SELBG));
-            let pen = CreatePen(PS_SOLID, 1, COLORREF(LAUNCHER_SELBG));
+            let sel = CreateSolidBrush(COLORREF(p.selbg));
+            let pen = CreatePen(PS_SOLID, 1, COLORREF(p.selbg));
             let ob = SelectObject(hdc, HGDIOBJ(sel.0));
             let op = SelectObject(hdc, HGDIOBJ(pen.0));
             let _ = RoundRect(
@@ -6394,9 +7508,9 @@ unsafe fn sysmenu_paint(h: HWND) {
             SelectObject(hdc, op);
             let _ = DeleteObject(HGDIOBJ(sel.0));
             let _ = DeleteObject(HGDIOBJ(pen.0));
-            SetTextColor(hdc, COLORREF(LAUNCHER_SELFG));
+            SetTextColor(hdc, COLORREF(p.selfg));
         } else {
-            SetTextColor(hdc, COLORREF(LAUNCHER_FG));
+            SetTextColor(hdc, COLORREF(p.fg));
         }
         let mut r = RECT {
             left: row.left + 14,
@@ -6428,7 +7542,7 @@ unsafe fn sysmenu_paint(h: HWND) {
     } else {
         "Up/Down  \u{2022}  Enter run  \u{2022}  \u{2190}/Esc back".to_string()
     };
-    SetTextColor(hdc, COLORREF(if st.confirm { LAUNCHER_SELBG } else { LAUNCHER_DIM }));
+    SetTextColor(hdc, COLORREF(if st.confirm { p.selbg } else { p.dim }));
     let mut fr = RECT {
         left: LAUNCHER_PAD,
         top: fy,
@@ -6442,6 +7556,9 @@ unsafe fn sysmenu_paint(h: HWND) {
         SelectObject(hdc, of);
     }
     drop(st);
+    if let Some(b) = bb {
+        backbuf_end(win_hdc, b);
+    }
     let _ = EndPaint(h, &ps);
 }
 
@@ -6838,6 +7955,7 @@ fn main() {
         }
         BAR_HINST.store(hinst.0 as isize, Ordering::Relaxed);
         apply_bar_statics(&cfg);
+        apply_theme(&cfg);
 
         // Red, click-through, topmost corner-marker overlay.
         let brush = CreateSolidBrush(COLORREF(0x000000FF)); // 0x00BBGGRR -> red

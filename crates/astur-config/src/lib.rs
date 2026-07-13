@@ -2,7 +2,7 @@
 //! templates, and the key/value parser. No Win32 — pure data and string work.
 
 /// Runtime configuration, loaded from astur.conf + navbar.conf at startup.
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct Config {
     pub per_monitor: bool,          // true: Alt+1..9 switches focused monitor only
     pub start_tiled: bool,          // tile automatically on launch
@@ -55,7 +55,26 @@ pub struct Config {
     pub key_toggle_tiling: u32,     // Alt+<key> toggle tiling on/off (default T)
     pub key_toggle_float: u32,      // Alt+<key> toggle floating for focused window (default F)
     pub key_close_window: u32,      // Alt+<key> close the focused window (default W)
+    pub theme: String,              // popup palette: dark | light | auto (follows Windows)
+    pub acrylic: bool,              // experimental acrylic blur behind the popups
+    pub bar_floating: bool,         // detached rounded bar (margins from the screen edges)
+    pub bar_margin: i32,            // gap between a floating bar and the screen edges (px)
+    pub bar_radius: i32,            // floating-bar corner radius (px)
+    pub bar_autohide: bool,         // slide the bar away; reveal on screen-edge hover
+    pub bar_wheel_ws: bool,         // mouse wheel over the bar cycles workspaces
+    pub bar_show_net: bool,         // show network up/down speed
+    pub bar_show_volume: bool,      // show volume % (wheel adjusts, click mutes)
+    pub bar_show_apps: bool,        // show app buttons for the active workspace's windows
+    pub bar_left: Vec<String>,      // widget names, left zone (drawn left-to-right)
+    pub bar_center: Vec<String>,    // widget names, centered in the remaining gap
+    pub bar_right: Vec<String>,     // widget names, right zone (listed left-to-right)
 }
+
+/// Widget names accepted in the navbar `left` / `center` / `right` zone lists.
+pub const BAR_WIDGETS: &[&str] = &[
+    "workspaces", "apps", "title", "layout", "cpu", "mem", "net", "volume", "battery",
+    "date", "clock",
+];
 
 impl Config {
     pub fn defaults() -> Self {
@@ -111,6 +130,28 @@ impl Config {
             key_toggle_tiling: 0x54,  // T
             key_toggle_float: 0x46,   // F
             key_close_window: 0x57,   // W
+            theme: "dark".to_string(),
+            acrylic: false,
+            bar_floating: false,
+            bar_margin: 8,
+            bar_radius: 12,
+            bar_autohide: false,
+            bar_wheel_ws: true,
+            bar_show_net: false,
+            bar_show_volume: true,
+            bar_show_apps: false,
+            bar_left: vec!["workspaces".into(), "apps".into()],
+            bar_center: vec!["title".into()],
+            bar_right: vec![
+                "layout".into(),
+                "cpu".into(),
+                "mem".into(),
+                "net".into(),
+                "volume".into(),
+                "battery".into(),
+                "date".into(),
+                "clock".into(),
+            ],
         }
     }
 }
@@ -238,8 +279,20 @@ workspace_slide = true
 window_anim = glide
 
 # ---------------------------------------------------------------------------
-# Appearance: window borders & dimming
+# Appearance: theme, window borders & dimming
 # ---------------------------------------------------------------------------
+
+# Colour theme for Astur's own surfaces (app launcher, system menu).
+#   dark  = dark surfaces (default)
+#   light = light surfaces
+#   auto  = follow the Windows app theme (Settings > Personalisation > Colours)
+# values: dark | light | auto
+theme = dark
+
+# EXPERIMENTAL: acrylic blur behind the launcher and system menu (frosted-glass
+# look). Uses an undocumented Windows API; if popups render oddly, turn it off.
+# bool
+acrylic = false
 
 # Dim unfocused windows to this opacity.  float 0.10 - 1.00  (1.0 = disabled)
 unfocused_opacity = 0.8
@@ -333,7 +386,7 @@ enabled = true
 height = 28
 # Dock the bars at the bottom of each screen instead of the top.  bool
 bottom = false
-# Horizontal padding from each screen edge, in px.  int 0 - 200
+# Horizontal padding from each bar edge, in px.  int 0 - 200
 padding = 8
 # Font family for all bar text.  text  (e.g. Segoe UI, Cascadia Code, Consolas)
 font_name = Segoe UI
@@ -341,18 +394,53 @@ font_name = Segoe UI
 font_size = 0
 
 # ---------------------------------------------------------------------------
-# Workspaces
+# Style
 # ---------------------------------------------------------------------------
+# Floating bar: detached from the screen edge with a margin and rounded
+# corners (waybar/Hyprland style). false = classic full-width strip.  bool
+floating = false
+# Gap between a floating bar and the screen edges, in px.  int 0 - 200
+margin = 8
+# Floating-bar corner radius, in px.  int 0 - 40
+radius = 12
+# Auto-hide: the bar slides away and stops reserving screen space; move the
+# mouse to the bar's screen edge to reveal it.  bool
+autohide = false
+
+# ---------------------------------------------------------------------------
+# Layout: three zones. List widget names per zone (space separated, drawn in
+# order). Available widgets:
+#   workspaces  the workspace pills (click to switch)
+#   apps        app buttons for the active workspace's windows (click focuses)
+#   title       focused window title
+#   layout      layout name + tiling/floating state
+#   cpu / mem   live CPU / RAM percent
+#   net         network down/up speed
+#   volume      speaker volume (wheel over it adjusts, click mutes)
+#   battery     battery percent
+#   date        the date (see date_format)
+#   clock       the time
+# A widget only shows if it is BOTH listed in a zone and its show_* toggle
+# below is true (so you can flip widgets without re-ordering).
+# ---------------------------------------------------------------------------
+left = workspaces apps
+center = title
+right = layout cpu mem net volume battery date clock
+
+# ---------------------------------------------------------------------------
+# Behaviour
+# ---------------------------------------------------------------------------
+# Mouse wheel over the bar switches to the previous/next workspace (the wheel
+# over the volume widget always adjusts volume instead).  bool
+wheel_workspaces = true
 # Hide empty workspace pills, showing only the active one and those with
-# windows (spiral style). false = show every workspace the monitor
-# owns.  bool
+# windows. false = show every workspace the monitor owns.  bool
 hide_empty_workspaces = false
 
 # ---------------------------------------------------------------------------
-# Widgets (right-hand cluster, drawn right-to-left in this order:
-#   clock, date, battery, mem, cpu, layout)
+# Widget toggles
 # ---------------------------------------------------------------------------
-# Show the focused window title (centre).  bool
+# Show the focused window title.  bool
 show_title = true
 # Show the layout name + tiling/floating state.  bool
 show_layout = true
@@ -368,6 +456,12 @@ date_format = ddd dd MMM
 show_cpu = true
 show_mem = true
 show_battery = true
+# Network down/up speed (updated every ~2s).  bool
+show_net = false
+# Speaker volume %. Wheel over it adjusts; click toggles mute.  bool
+show_volume = true
+# App buttons: an icon per window on the active workspace; click focuses.  bool
+show_apps = false
 
 # Colours (#RRGGBB).
 bg = #1A1B26
@@ -408,6 +502,15 @@ pub fn key_to_vk(name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Parse a space/comma-separated navbar zone list, keeping only known widget
+/// names (typos vanish rather than erroring, matching the rest of the parser).
+fn parse_widgets(v: &str) -> Vec<String> {
+    v.split([',', ' ', '\t'])
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| BAR_WIDGETS.contains(&s.as_str()))
+        .collect()
 }
 
 /// Parse a space/comma-separated list of key names into VK codes.
@@ -639,8 +742,123 @@ fn parse_into(c: &mut Config, text: &str) {
             "show_cpu" | "bar_show_cpu" => c.bar_show_cpu = parse_bool(v),
             "show_mem" | "show_memory" | "bar_show_mem" => c.bar_show_mem = parse_bool(v),
             "show_battery" | "bar_show_battery" => c.bar_show_battery = parse_bool(v),
+            "theme" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "dark" | "light" | "auto") {
+                    c.theme = m;
+                }
+            }
+            "acrylic" => c.acrylic = parse_bool(v),
+            "floating" | "bar_floating" => c.bar_floating = parse_bool(v),
+            "margin" | "bar_margin" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_margin = n.clamp(0, 200);
+                }
+            }
+            "radius" | "bar_radius" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_radius = n.clamp(0, 40);
+                }
+            }
+            "autohide" | "bar_autohide" => c.bar_autohide = parse_bool(v),
+            "wheel_workspaces" | "bar_wheel_ws" => c.bar_wheel_ws = parse_bool(v),
+            "show_net" | "show_network" | "bar_show_net" => c.bar_show_net = parse_bool(v),
+            "show_volume" | "bar_show_volume" => c.bar_show_volume = parse_bool(v),
+            "show_apps" | "bar_show_apps" => c.bar_show_apps = parse_bool(v),
+            "left" | "bar_left" => c.bar_left = parse_widgets(v),
+            "center" | "centre" | "bar_center" => c.bar_center = parse_widgets(v),
+            "right" | "bar_right" => c.bar_right = parse_widgets(v),
             _ => {}
         }
+    }
+}
+
+/// Rewrite one `key = value` assignment in conf text, preserving every other
+/// line (comments and layout included). The first active (non-comment)
+/// assignment of `key` is replaced in place; later duplicates are left alone
+/// (the parser is last-write-wins, so the GUI also normalises: see
+/// `apply_updates`). If the key is missing, `key = value` is appended.
+pub fn set_conf_key(text: &str, key: &str, value: &str) -> String {
+    let mut out: Vec<String> = Vec::new();
+    let mut replaced = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if !t.is_empty() && !t.starts_with('#') {
+            if let Some((k, _)) = t.split_once('=') {
+                if k.trim() == key {
+                    if replaced {
+                        // Drop later duplicates: the parser is last-write-wins,
+                        // so a stale duplicate below would silently override the
+                        // value we just set.
+                        continue;
+                    }
+                    out.push(format!("{key} = {value}"));
+                    replaced = true;
+                    continue;
+                }
+            }
+        }
+        out.push(line.to_string());
+    }
+    if !replaced {
+        out.push(format!("{key} = {value}"));
+    }
+    let mut s = out.join("\n");
+    if text.ends_with('\n') || !replaced {
+        s.push('\n');
+    }
+    s
+}
+
+/// Apply many `(key, value)` updates onto conf text (see `set_conf_key`).
+pub fn apply_updates(text: &str, updates: &[(&str, String)]) -> String {
+    let mut s = text.to_string();
+    for (k, v) in updates {
+        s = set_conf_key(&s, k, v);
+    }
+    s
+}
+
+/// The built-in template for astur.conf (used to regenerate a fresh file).
+pub fn default_config_text() -> &'static str {
+    DEFAULT_CONFIG
+}
+
+/// The built-in template for navbar.conf (used to regenerate a fresh file).
+pub fn default_navbar_text() -> &'static str {
+    DEFAULT_NAVBAR
+}
+
+/// Parse arbitrary conf text onto defaults — used by the settings GUI to load
+/// one file at a time (WM keys and navbar keys are both recognised).
+pub fn parse_text(text: &str) -> Config {
+    let mut c = Config::defaults();
+    parse_into(&mut c, text);
+    c
+}
+
+/// Parse both files' text in load order (astur.conf then navbar.conf).
+pub fn parse_pair(wm_text: &str, nav_text: &str) -> Config {
+    let mut c = Config::defaults();
+    parse_into(&mut c, wm_text);
+    parse_into(&mut c, nav_text);
+    c
+}
+
+/// Format a COLORREF (0x00BBGGRR) back to a `#RRGGBB` config string.
+pub fn color_to_hex(c: u32) -> String {
+    let r = c & 0xFF;
+    let g = (c >> 8) & 0xFF;
+    let b = (c >> 16) & 0xFF;
+    format!("#{r:02X}{g:02X}{b:02X}")
+}
+
+/// Map a VK code back to its config key name ("A".."Z", "0".."9", "F1".."F24").
+pub fn vk_to_key(vk: u32) -> String {
+    match vk {
+        0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk).unwrap_or('?').to_string(),
+        0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
+        _ => String::new(),
     }
 }
 
@@ -726,5 +944,78 @@ mod tests {
         parse_into(&mut c, "workspace_mode = per_monitor\nlayout = MASTER");
         assert!(c.per_monitor);
         assert_eq!(c.layout, "master"); // lowercased
+    }
+
+    #[test]
+    fn parse_into_theme_validated() {
+        let mut c = Config::defaults();
+        parse_into(&mut c, "theme = LIGHT");
+        assert_eq!(c.theme, "light");
+        parse_into(&mut c, "theme = neon"); // invalid -> keeps previous
+        assert_eq!(c.theme, "light");
+    }
+
+    #[test]
+    fn parse_into_zones_filter_unknown() {
+        let mut c = Config::defaults();
+        parse_into(&mut c, "left = workspaces bogus apps\nright = clock");
+        assert_eq!(c.bar_left, vec!["workspaces", "apps"]);
+        assert_eq!(c.bar_right, vec!["clock"]);
+        parse_into(&mut c, "center ="); // explicit empty zone
+        assert!(c.bar_center.is_empty());
+    }
+
+    #[test]
+    fn parse_into_bar_style_clamped() {
+        let mut c = Config::defaults();
+        parse_into(&mut c, "floating = yes\nmargin = 999\nradius = -3\nautohide = on");
+        assert!(c.bar_floating);
+        assert_eq!(c.bar_margin, 200);
+        assert_eq!(c.bar_radius, 0);
+        assert!(c.bar_autohide);
+    }
+
+    #[test]
+    fn set_conf_key_replaces_in_place() {
+        let text = "# comment\nheight = 28\nbottom = false\n";
+        let out = set_conf_key(text, "height", "40");
+        assert_eq!(out, "# comment\nheight = 40\nbottom = false\n");
+    }
+
+    #[test]
+    fn set_conf_key_appends_when_missing() {
+        let text = "height = 28\n";
+        let out = set_conf_key(text, "radius", "16");
+        assert_eq!(out, "height = 28\nradius = 16\n");
+    }
+
+    #[test]
+    fn set_conf_key_ignores_commented_lines() {
+        let text = "# height = 99\nheight = 28\n";
+        let out = set_conf_key(text, "height", "40");
+        assert_eq!(out, "# height = 99\nheight = 40\n");
+    }
+
+    #[test]
+    fn set_conf_key_drops_duplicates() {
+        // Last-write-wins parser: a stale duplicate below would override the
+        // value we set, so duplicates are collapsed into the first slot.
+        let text = "height = 28\nfont_size = 0\nheight = 30\n";
+        let out = set_conf_key(text, "height", "40");
+        assert_eq!(out, "height = 40\nfont_size = 0\n");
+    }
+
+    #[test]
+    fn color_roundtrip() {
+        let c = parse_color("#366382", 0);
+        assert_eq!(color_to_hex(c), "#366382");
+    }
+
+    #[test]
+    fn vk_roundtrip() {
+        for name in ["A", "Z", "0", "9", "F1", "F24"] {
+            let vk = key_to_vk(name).unwrap();
+            assert_eq!(vk_to_key(vk), name);
+        }
     }
 }

@@ -45,4 +45,11 @@ features = [
     "Win32_System_Search",
     "Win32_System_Shutdown",
     "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_Media_Audio",
+    "Win32_Media_Audio_Endpoints",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
 ]

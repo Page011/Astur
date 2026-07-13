@@ -2,6 +2,32 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-13 — RESOLVED: launcher icons flashed on every wheel scroll
+
+All three owner-drawn surfaces (launcher, sysmenu, bar) painted STRAIGHT to the
+window DC: the background `FillRect` wiped the previous frame on screen before the
+icons/text landed, so every repaint (wheel scroll, hover, 120Hz pill slide) visibly
+blinked. Trap: `InvalidateRect(…, erase=FALSE)` + `WM_ERASEBKGND => 1` is NOT
+enough — the paint itself must be atomic. Fix: `backbuf_begin`/`backbuf_end`
+(memory DC + compatible bitmap, single `BitBlt`) wraps all three paints; also
+`LA_SCROLL` now skips the repaint entirely when scroll+selection didn't change.
+
+## 2026-07-13 — NOACTIVATE windows never receive WM_MOUSEWHEEL
+
+The wheel goes to the FOCUSED window; the bar/popups are `WS_EX_NOACTIVATE` and
+never take focus, so wheel input must be routed from the LL mouse hook (rect
+check + `PostMessageW`). The bar's rects live in lock-free `BARHIT_*` atomic
+arrays (hooks may not lock); `BARS_HOT` short-circuits to ONE atomic load when
+idle. Same pattern as the launcher/sysmenu wheel routing.
+
+## 2026-07-13 — acrylic on plain GDI popups is best-effort (experimental)
+
+`SetWindowCompositionAttribute` + `ACCENT_ENABLE_ACRYLICBLURBEHIND` is
+undocumented; opaque GDI paint covers the accent, so the popups also get
+whole-window `LWA_ALPHA` (236) to let the blur read through. Acceptable for an
+opt-in; a real acrylic surface needs DirectComposition. Config-gated
+(`acrylic = false` default) so it can't hurt anyone who didn't ask for it.
+
 ## 2026-07-08 — RESOLVED: ghost tile (a dead window still held a slot)
 
 A destroyed window whose `EVENT_OBJECT_DESTROY` was missed (WinEvent hooks drop

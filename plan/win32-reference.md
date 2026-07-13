@@ -33,6 +33,23 @@ APIs Astur leans on, where the docs are, and which calls are slow/buggy traps.
 
 ## Known-slow / known-buggy — use with care
 
+- **Direct-to-window GDI paint flickers** (2026-07-13) — `FillRect` background +
+  incremental draws on the window DC show intermediate states on screen (launcher
+  icons blinked every wheel notch). `InvalidateRect(erase=FALSE)` +
+  `WM_ERASEBKGND=>1` does NOT fix it; the paint must be atomic. Pattern:
+  `backbuf_begin/backbuf_end` (CreateCompatibleDC + CreateCompatibleBitmap, draw
+  everything, one `BitBlt`). Used by launcher/sysmenu/bar paints.
+- **`WS_EX_NOACTIVATE` windows never get `WM_MOUSEWHEEL`** (2026-07-13) — the wheel
+  targets the focused window only. Route it from the LL mouse hook with published
+  rect atomics + `PostMessageW` (launcher `LA_SCROLL`, sysmenu `SM_UP/DOWN`, bar
+  `WM_BAR_WHEEL`). Rects must be lock-free (hook rule): fixed atomic arrays
+  (`BARHIT_*`), gated by one `BARS_HOT` load when idle.
+- **`SetWindowCompositionAttribute`** (2026-07-13) — undocumented user32 export
+  used for the opt-in acrylic accent (attr 19 / accent state 4). Resolved via
+  `GetProcAddress` at call time; may silently stop working on future Windows.
+  Never rely on it for correctness — cosmetic only, config default off.
+- **`GlobalFree` lives in `Win32::Foundation`** in windows-rs 0.58 (not
+  `System::Memory` where GlobalAlloc/Lock are) — clipboard code trap.
 - **`PrintWindow`** — used to grab window/wallpaper pixels. Slow on some apps;
   GPU-accelerated apps (Chrome with certain flags, some games) return black.
   `PW_RENDERFULLCONTENT` (flag 2) helps but is still per-window expensive. Keep it

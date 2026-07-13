@@ -2,12 +2,17 @@
 name = "astur-settings"
 version = "2.0.0-dev"
 edition = "2021"
-description = "Astur settings GUI — friendly editor for astur.conf (egui, WIP)"
+description = "Astur settings GUI — friendly editor for astur.conf / navbar.conf"
 license = "Apache-2.0"
 
 [[bin]]
 name = "astur-settings"
 path = "src/main.rs"
 
-# egui/eframe + the shared astur-config dependency get added when the GUI is built
-# (see plan/roadmap-v2.md). Kept dependency-free for now so the workspace stays fast.
+[build-dependencies]
+# Embeds the Astur hawk icon into the exe (same icon as the WM).
+embed-resource = "2"
+
+[dependencies]
+astur-config = { path = "../astur-config" }
+eframe = "0.31"

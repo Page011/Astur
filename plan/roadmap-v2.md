@@ -120,8 +120,36 @@ a strong candidate to live in the v2 experience.
 3. (done 2026-06-28) Workspace restructure — `crates/astur` (WM),
    `crates/astur-config` (shared, Win32-free), `crates/astur-settings` (egui stub).
    Astur Lite stays the frozen `v1.0.0` tag.
-4. **Settings GUI MVP** (`astur-settings` egui app editing the conf via `astur-config`)
-   — the big adoption win. Separate process; never link into the WM.
-5. winget/installer packaging (bundle WM + GUI + autostart; keep the portable exe too).
-6. Tab sortable columns.
+4. (done 2026-07-13) **Settings GUI shipped** — eframe/egui 0.31 app: sidebar
+   sections (General / Layout / Focus / Animations / Appearance / Bar / Widgets /
+   Hotkeys / Rules / About), edits BOTH confs via `astur-config`'s
+   comment-preserving `set_conf_key`/`apply_updates` writer (replaces the value in
+   place, collapses duplicate keys, appends missing ones), WM hot-reload applies
+   live. Launched from the tray AND sysmenu Setup → Settings. Dirty-tracking via
+   `Config: PartialEq` + text mirrors; invalid key names flagged inline and dropped
+   on save (never writes what the parser wouldn't accept).
+5. (done 2026-07-08, Inno Setup) installer packaging; winget manifest still open.
+6. Tab wide columns shipped 2026-07-10; sortable ordering still open (below).
 7. MFT index (feature-gated `astur-index` crate) for true instant + big result sets.
+
+## Feature queue (user-picked 2026-07-13, in rough order)
+
+All 16 proposed features were accepted. Shipped in the 2026-07-13 pass: inline
+calculator, web-search fallback, volume widget, network widget, app buttons,
+wheel-cycles-workspaces, floating rounded bar, auto-hide bar, configurable widget
+zones, theme dark/light/auto, acrylic (experimental), settings GUI. Still queued:
+
+1. **Alt+Tab replacement** — workspace-aware switcher, live DWM thumbnails
+   (`DwmRegisterThumbnail` per candidate into a launcher-styled popup), hook eats
+   Alt+Tab while enabled (config-gated; keep the pass-through default until solid).
+2. **Clipboard history** — `AddClipboardFormatListener` on a message-only window,
+   ring buffer of recent text entries, launcher prefix (e.g. `;`) lists + Enter
+   re-copies/pastes.
+3. **Scratchpad terminal** — Alt+` drops the configured terminal from the top edge
+   (adopt-by-class, park off-screen when dismissed — same parking trick as drags).
+4. **Emoji picker** — `:` prefix in the launcher over a curated static table.
+5. **Per-workspace wallpapers** — `IDesktopWallpaper` COM on switch; wallpaper_dir
+   config + sysmenu Theme category.
+6. **Media / now-playing widget** — needs WinRT
+   (`GlobalSystemMediaTransportControlsSessionManager`); weigh the `windows`
+   WinRT feature cost before committing.
