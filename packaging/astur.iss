@@ -9,12 +9,10 @@
 ;         `cargo build --release` so target\release\*.exe exist)
 ; Output: dist\Astur-Setup-<version>.exe
 ;
-; TODO (see plan/editions.md): embed a custom .ico in astur.exe (build.rs +
-; embed-resource) so Explorer / taskbar / this shortcut show the Astur logo
-; instead of the default exe icon. Not blocking for testing.
+; (The hawk .ico is embedded in both exes via build.rs + embed-resource.)
 
 #define AppName "Astur"
-#define AppVersion "2.0.0-alpha.1"
+#define AppVersion "2.0.0-alpha.2"
 #define AppPublisher "Astur"
 #define AppURL "https://astur.app"
 #define AppExe "Astur.exe"
@@ -55,7 +53,7 @@ Name: "startup"; Description: "Start Astur automatically when I sign in"; GroupD
 [Files]
 ; The window manager. Renamed to Astur.exe on install (release binary is astur.exe).
 Source: "..\target\release\astur.exe"; DestDir: "{app}"; DestName: "{#AppExe}"; Flags: ignoreversion
-; The settings GUI (WIP stub for now) — the tray "Settings" item launches this sibling.
+; The settings GUI — the tray "Settings" item and the power menu launch this sibling.
 Source: "..\target\release\astur-settings.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
