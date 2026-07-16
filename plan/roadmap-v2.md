@@ -134,22 +134,20 @@ a strong candidate to live in the v2 experience.
 
 ## Feature queue (user-picked 2026-07-13, in rough order)
 
-All 16 proposed features were accepted. Shipped in the 2026-07-13 pass: inline
-calculator, web-search fallback, volume widget, network widget, app buttons,
-wheel-cycles-workspaces, floating rounded bar, auto-hide bar, configurable widget
-zones, theme dark/light/auto, acrylic (experimental), settings GUI. Still queued:
+All 16 proposed features now have usable implementations. 2026-07-16 pass shipped:
 
-1. **Alt+Tab replacement** — workspace-aware switcher, live DWM thumbnails
-   (`DwmRegisterThumbnail` per candidate into a launcher-styled popup), hook eats
-   Alt+Tab while enabled (config-gated; keep the pass-through default until solid).
-2. **Clipboard history** — `AddClipboardFormatListener` on a message-only window,
-   ring buffer of recent text entries, launcher prefix (e.g. `;`) lists + Enter
-   re-copies/pastes.
-3. **Scratchpad terminal** — Alt+` drops the configured terminal from the top edge
-   (adopt-by-class, park off-screen when dismissed — same parking trick as drags).
-4. **Emoji picker** — `:` prefix in the launcher over a curated static table.
-5. **Per-workspace wallpapers** — `IDesktopWallpaper` COM on switch; wallpaper_dir
-   config + sysmenu Theme category.
-6. **Media / now-playing widget** — needs WinRT
-   (`GlobalSystemMediaTransportControlsSessionManager`); weigh the `windows`
-   WinRT feature cost before committing.
+1. **Alt+Tab replacement** — optional workspace-aware, MRU-ordered title/icon picker.
+   Live DWM thumbnails remain open.
+2. **Clipboard history** — opt-in text ring buffer from `AddClipboardFormatListener`,
+   prefix-filtered in launcher, paste on activation. Runtime-memory only.
+3. **Scratchpad terminal** — default Alt+Grave extra binding when enabled; command and
+   class configurable; failed-launch adoption expires after five seconds.
+4. **Emoji picker** — configurable launcher prefix over curated static table.
+5. **Workspace wallpapers** — async global wallpaper changes on workspace switch plus
+   configurable system-menu directory. True independent per-monitor wallpaper remains
+   open because current backend uses `SystemParametersInfoW`, not `IDesktopWallpaper`.
+6. **Media / now-playing widget** — best-effort known-player window-title backend.
+   WinRT media sessions and controls remain open.
+7. **Customization platform** — popup styling, custom launcher/menu actions and icons,
+   five layouts, named/icon workspaces, rich rules, arbitrary Alt chords, active-
+   workspace/MRU state, and local named-pipe command IPC.

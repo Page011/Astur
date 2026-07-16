@@ -21,7 +21,7 @@ Loose. Promote to a real plan doc or a commit when picked up.
 
 ## Features
 - [ ] Optional socket/CLI control (komorebi-style) for scripting.
-- [ ] More layouts (columns, grid) — keep `layout.rs` pure.
+- [x] More layouts — columns/grid/monocle shipped; `layout.rs` remains pure.
 - [ ] Named/persistent workspaces.
 - [ ] Per-monitor independent animation settings.
 

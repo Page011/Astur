@@ -12,7 +12,7 @@
 ; (The hawk .ico is embedded in both exes via build.rs + embed-resource.)
 
 #define AppName "Astur"
-#define AppVersion "2.0.0-alpha.2"
+#define AppVersion "2.1.1"
 #define AppPublisher "Astur"
 #define AppURL "https://astur.app"
 #define AppExe "Astur.exe"
@@ -56,6 +56,7 @@ Source: "..\target\release\astur.exe"; DestDir: "{app}"; DestName: "{#AppExe}"; 
 ; The settings GUI — the tray "Settings" item and the power menu launch this sibling.
 Source: "..\target\release\astur-settings.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

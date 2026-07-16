@@ -1,10 +1,11 @@
 # Astur — Tiling Window Manager for Windows
 
 **Astur** is a fast, free, open-source **tiling window manager for Windows** —
-**Alt-drag** window movement, nearest-corner resize, dwindle/master tiling, a
+**Alt-drag** window movement, nearest-corner resize, five tiling layouts, a
 per-monitor status bar, up to 10 virtual workspaces, and silky composited
-animations. The full edition adds an **app launcher + file search** (Alt+Space),
-a **power menu** (Alt+Shift+Space), and a tray icon. A keyboard-driven,
+animations. Full edition adds a configurable **app launcher + file search**
+(Alt+Space), **system menu** (Alt+Shift+Space), desktop tools, settings GUI, and
+tray icon. A keyboard-driven,
 i3-style alternative to
 [komorebi](https://github.com/LGUG2Z/komorebi),
 [GlazeWM](https://github.com/glzr-io/glazewm), and PowerToys FancyZones on
@@ -38,6 +39,7 @@ Astur comes in two editions from the same project:
 | **App launcher + file search + calculator** (Alt+Space) | — | ✓ |
 | **Power menu** (Alt+Shift+Space) | — | ✓ |
 | **Bar widgets** (volume · network · app buttons) + light/dark theme | — | ✓ |
+| Optional switcher · scratchpad · clipboard · emoji · wallpapers · media · IPC | — | ✓ |
 
 **Astur Lite** is the lean ~1 MB keyboard/console WM for power users who want text
 config. **Astur** is the friendlier, installable app — launcher, file search, power
@@ -60,40 +62,49 @@ Manager) too.
 
 - **Alt + left-drag** — move any window by clicking anywhere on it, no title bar needed
 - **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
-- **Tiling mode** — `dwindle` (spiral, default) or `master` layout across up to 10
-  virtual workspaces
+- **Tiling mode** — `dwindle` (spiral), `master`, equal `columns`, balanced `grid`,
+  or stacked `monocle` across up to 10 named/icon-labelled virtual workspaces
 - **Status bar** — a per-monitor bar with three fully configurable widget zones
   (left / center / right): workspace pills, focused title, app buttons (click to
   focus), clock, date, CPU, RAM, battery, **network speed**, and **volume**
   (scroll over it to adjust, click to mute). Scroll anywhere else on the bar to
   cycle workspaces, click a pill to switch. Optional **floating rounded bar**
-  (margins + corner radius) and **auto-hide** (reveals on edge hover).
+  (margins + corner radius) and **auto-hide** (reveals on edge hover). Widget gaps,
+  app labels/tooltips, stat labels, formats, icon-font glyphs, and media text are
+  configurable.
 - **Animations** — workspace switches animate with a composited overlay:
   `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`. Windows
   also **glide** to their tile slot on open / move / resize / re-tile, composited so
   the real windows land instantly underneath — smooth even with heavy apps.
-- **App launcher + file search** *(Astur)* — `Alt+Space` opens a fuzzy picker over
-  your installed apps (Start Menu **and** Store/UWP apps like Notepad, with icons) and
-  your files (via the Windows Search index). Type maths (`5*7+2`) for an **inline
-  calculator** (Enter copies the result); no matches falls back to a **web search**
-  row. `Tab` expands a wide view with **Modified / Size / Path columns**;
-  `Shift+Enter` opens a file's folder. Full mouse support: hover to select, click to
-  launch, scroll with the wheel, click outside to dismiss — same on the power menu.
-- **Power menu** *(Astur)* — `Alt+Shift+Space` opens a categorised menu: **Power**
-  (Lock / Sleep / Sign out / Restart / Shut down, with a confirm step) and **Setup**.
-- **Settings GUI** *(Astur)* — every option in this README is editable in a native
-  settings app (tray icon → Settings, or the power menu → Setup). Saving applies
-  **live** — the window manager hot-reloads, no restart.
+- **App launcher + file search** *(Astur)* — `Alt+Space` opens a fuzzy, MRU-ranked
+  picker over installed apps (Start Menu and Store/UWP), custom commands/URLs, open
+  windows, and indexed files. Optional prefix providers expose in-memory clipboard
+  history and a curated emoji catalog. Inline calculator, configurable web fallback,
+  file scope/excludes, result limit, placement, size, rows, font, colours, opacity,
+  radius, icons, and mouse navigation are configurable. `Tab` shows Modified / Size /
+  Path columns; `Shift+Enter` reveals a file; `F5` refreshes app/custom entries.
+- **System menu** *(Astur)* — `Alt+Shift+Space` opens configurable Power and Setup
+  categories with lock/sleep/hibernate/sign-out/restart/shutdown, settings, config,
+  reload, restart-Astur, screenshot, and wallpaper actions. Order, width, icons,
+  confirmation, custom categories, commands, URLs, and scripts are data-driven.
+- **Desktop tools** *(Astur, opt-in)* — workspace-aware Alt+Tab picker, Alt+Grave
+  scratchpad, clipboard/emoji launcher providers, workspace-triggered wallpaper,
+  media title widget, active-workspace/MRU persistence, and local named-pipe IPC.
+- **Settings GUI** *(Astur)* — native editor for launcher, menus, desktop tools,
+  layouts, appearance, navbar, widgets, rules, and key bindings. Saving applies
+  **live** — window manager hot-reloads, no restart.
 - **Tray icon** *(Astur)* — no console window; left-click for Settings, right-click for
   Settings / Quit.
 - **Light / dark theme** *(Astur)* — the launcher and menus follow `theme = dark |
   light | auto` (auto tracks the Windows app theme); optional experimental acrylic
   blur behind the popups.
-- **Extras** — coloured window borders, unfocused-window dimming, focus-follows-mouse,
-  per-app window rules, and live config hot-reload.
+- **Extras** — coloured borders, unfocused dimming, focus-follows-mouse, rich
+  exe/class/title window rules with workspace/monitor routing, arbitrary Alt chords,
+  and live config hot-reload.
 
-Left Alt is fully reserved as the Astur modifier — apps never see it. Right Alt is
-untouched for normal use. Alt+Tab still works.
+Left Alt is fully reserved as Astur modifier — apps never see it. Right Alt is
+untouched. Alt+Tab passes through by default; optional replacement uses Astur's
+workspace-aware picker.
 
 ## Hotkeys
 
@@ -116,28 +127,29 @@ untouched for normal use. Alt+Tab still works.
 | `Alt` + `Shift+Enter` | Launch browser |
 | `Alt` + `1`–`9`, `0` | Switch to workspace 1–10 |
 | `Alt` + `Shift` + `1`–`9`, `0` | Move focused window to workspace |
-| `Alt` + `Tab` | Switch apps (pass-through preserved) |
+| `Alt` + `Tab` | Windows switcher by default; optional Astur workspace-aware switcher |
 
-The letter binds (`J K H L M T F W`) are rebindable in
-`%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
-borders, and behaviour. The status bar is configured in `navbar.conf` (same
-folder). Both config files **hot-reload** on save — no restart needed.
+Letter binds (`J K H L M T F W`) plus extra Alt/Shift/Ctrl chords are configurable
+in `%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
+borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
+in same folder. Both files **hot-reload** on save.
 
 ## Configuration
 
 Two files are created in `%USERPROFILE%\.astur\` on first run, both fully
 commented and **hot-reloaded on save**:
 
-- **`astur.conf`** — window manager: workspace mode/count, layout, gaps, master
-  ratio, borders, dimming, focus-follows-mouse, cursor warping, animations
-  (`workspace_anim` = off/slide/spring/fade, `window_anim` = off/glide), launchers,
-  per-app rules (`ignore_classes` / `float_classes`), workspace keys, and the
-  rebindable letter hotkeys.
-- **`navbar.conf`** — the status bar.
+- **`astur.conf`** — workspaces/names/icons/wallpapers, five layouts, gaps, borders,
+  focus, animations/easing, popup theme/geometry, launcher providers/custom entries,
+  system actions, desktop tools, rich rules, persistence, IPC, and hotkeys.
+- **`navbar.conf`** — bar placement/style, three widget zones, labels/formats/icons,
+  app buttons/tooltips, stats, volume, network, media, floating mode, and auto-hide.
 
-The full Astur edition ships a **settings GUI** (`astur-settings.exe`) that edits
-both files for you — the `.conf` files remain the source of truth (comments and
-layout are preserved on save), and power users can keep editing them directly.
+Full Astur ships **`astur-settings.exe`** to edit both files. `.conf` remains source
+of truth; comments/layout survive saves. Structured records use `;;` between rows
+and `|` between fields. Prefix literal separators with backslash. Built-in icon names:
+`app browser calculator clipboard command file folder grid lock media power reload
+power-circle restart screenshot search settings setup signout sleep terminal wallpaper web window`.
 
 ## Build from source
 
@@ -146,12 +158,15 @@ Requires [Rust stable](https://rustup.rs). The repo is a Cargo workspace.
 ```bash
 git clone https://github.com/Page011/Astur
 cd Astur
-cargo build --release -p astur
-# binary at: target/release/astur.exe
+cargo build --release
+# binaries: target/release/astur.exe + target/release/astur-settings.exe
 ```
 
-`crates/astur` is the window manager, `crates/astur-config` the shared config
-parser, `crates/astur-settings` the settings GUI (WIP). The minimal **Astur Lite**
+`cargo build --release -p astur` builds core WM only. Settings menu then reports
+missing companion instead of failing silently.
+
+`crates/astur` is window manager, `crates/astur-config` shared config parser,
+`crates/astur-settings` settings GUI. Minimal **Astur Lite**
 lives on the [`lite`](https://github.com/Page011/Astur/tree/lite) branch (a single
 crate, no workspace).
 
@@ -196,9 +211,20 @@ power menu, with a single-exe (Lite) option and no required config file.
 **Do I need admin rights?** No. Running as admin lets it manage elevated windows too.
 
 **What's the difference between Astur and Astur Lite?** See [Editions](#editions) —
-Lite is the minimal ~1 MB console exe; Astur adds the launcher, file search, power
-menu, tray, extra bar widgets, theming, and a settings GUI.
+Lite is minimal ~1 MB console exe; Astur adds configurable launcher/search, system
+menu, tray, desktop tools, rich widgets/themes/rules, IPC, persistence, and settings GUI.
 
+### Current desktop-tool limits
+
+- Workspace wallpaper changes Windows global wallpaper through
+  `SystemParametersInfoW`; not independent per-monitor wallpaper.
+- Media widget reads titles from known player windows; no play/pause/skip controls or
+  Windows media-session API yet.
+- Persisted state stores active workspace indexes and launcher MRU, not window-to-
+  workspace assignments across process restarts.
+- Astur Alt+Tab replacement shows title/app-icon rows; live DWM thumbnails remain
+  future work.
+- Clipboard history is text-only, memory-only, and cleared when Astur exits.
 ## Disclaimer
 
 Astur is an independent project, not affiliated with or endorsed by any other window

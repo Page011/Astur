@@ -1,79 +1,208 @@
 //! Runtime configuration: the `Config` struct, its documented-default file
 //! templates, and the key/value parser. No Win32 — pure data and string work.
 
+/// User-supplied launcher entry. `icon` accepts an .ico/.png/.exe path or
+/// `auto`; resolution belongs to the Win32 UI process, not this pure crate.
+#[derive(Clone, PartialEq, Debug)]
+pub struct LauncherEntry {
+    pub label: String,
+    pub target: String,
+    pub icon: String,
+}
+
+/// User-supplied system-menu action. Actions are always user-triggered.
+#[derive(Clone, PartialEq, Debug)]
+pub struct SystemAction {
+    pub category: String,
+    pub label: String,
+    pub target: String,
+    pub icon: String,
+    pub confirm: bool,
+}
+
+/// Rich window rule. Empty match fields are wildcards; every non-empty field
+/// must match. `action` is tile, float, or ignore.
+#[derive(Clone, PartialEq, Debug)]
+pub struct WindowRule {
+    pub action: String,
+    pub exe: String,
+    pub class: String,
+    pub title: String,
+    pub workspace: Option<usize>,
+    pub monitor: Option<usize>,
+}
+
+/// Extra configurable key binding. Chords use names such as ALT+Q,
+/// ALT+SHIFT+F2. `action` is resolved by the WM onto its command queue.
+#[derive(Clone, PartialEq, Debug)]
+pub struct HotkeyDef {
+    pub chord: String,
+    pub action: String,
+    pub argument: String,
+}
+
 /// Runtime configuration, loaded from astur.conf + navbar.conf at startup.
 #[derive(Clone, PartialEq)]
 pub struct Config {
-    pub per_monitor: bool,          // true: Alt+1..9 switches focused monitor only
-    pub start_tiled: bool,          // tile automatically on launch
-    pub outer_gap: i32,             // gap between windows and screen edge
-    pub inner_gap: i32,             // gap between adjacent windows
-    pub master_ratio: f32,          // fraction of width given to the master window
-    pub workspaces: usize,          // workspaces per monitor (1..10)
-    pub workspace_keys: Vec<u32>,   // VK code per workspace; Alt+key switches, +Shift moves
-    pub layout: String,             // "dwindle" (spiral into a corner) or "master"
-    pub terminal: String,           // command launched by Alt+Enter
-    pub browser: String,            // Alt+Shift+Enter; empty = default browser
-    pub unfocused_opacity: f32,     // 0.0-1.0 alpha for unfocused windows (1.0 = off)
-    pub border_enabled: bool,       // draw coloured DWM borders (Windows 11)
-    pub focused_border: u32,        // COLORREF for the focused window border
-    pub unfocused_border: u32,      // COLORREF for unfocused window borders
+    pub per_monitor: bool,        // true: Alt+1..9 switches focused monitor only
+    pub start_tiled: bool,        // tile automatically on launch
+    pub outer_gap: i32,           // gap between windows and screen edge
+    pub inner_gap: i32,           // gap between adjacent windows
+    pub master_ratio: f32,        // fraction of width given to the master window
+    pub workspaces: usize,        // workspaces per monitor (1..10)
+    pub workspace_keys: Vec<u32>, // VK code per workspace; Alt+key switches, +Shift moves
+    pub workspace_names: Vec<String>, // optional display names, in workspace order
+    pub workspace_icons: Vec<String>, // optional short labels/icons, in workspace order
+    pub layout: String,           // dwindle | master | columns | grid | monocle
+    pub terminal: String,         // command launched by Alt+Enter
+    pub browser: String,          // Alt+Shift+Enter; empty = default browser
+    pub unfocused_opacity: f32,   // 0.0-1.0 alpha for unfocused windows (1.0 = off)
+    pub border_enabled: bool,     // draw coloured DWM borders (Windows 11)
+    pub focused_border: u32,      // COLORREF for the focused window border
+    pub unfocused_border: u32,    // COLORREF for unfocused window borders
     pub cursor_follows_focus: bool, // warp the mouse to the focused window
-    pub focus_follows_mouse: bool,  // hovering a window focuses it (focus follows mouse)
-    pub animations: bool,           // animate tiling moves + workspace slides
-    pub animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
-    pub workspace_slide: bool,      // back-compat: false forces workspace_anim = off
-    pub workspace_anim: String,     // workspace-switch style: off | slide | spring | fade
-    pub window_anim: String,        // window move/open/close/resize: off | glide
-    pub bar_enabled: bool,          // draw the status bar on every monitor
-    pub bar_height: i32,            // bar thickness in px (work area is reserved for it)
-    pub bar_bottom: bool,           // dock the bar at the bottom instead of the top
-    pub bar_font_size: i32,         // text height in px; 0 = auto from bar_height
-    pub bar_show_title: bool,       // show the focused window title
-    pub bar_show_clock: bool,       // show the clock
-    pub bar_clock_24h: bool,        // 24-hour clock (false = 12-hour with am/pm)
-    pub bar_show_layout: bool,      // show layout + tiling/floating state on the right
-    pub bar_bg: Option<u32>,        // COLORREF bar background; None = follow theme
-    pub bar_fg: Option<u32>,        // COLORREF bar text; None = follow theme
-    pub bar_accent: Option<u32>,    // COLORREF active-workspace highlight; None = theme
-    pub bar_inactive: Option<u32>,  // COLORREF empty-workspace text; None = theme
-    pub bar_font_name: String,      // font family (default "Segoe UI")
-    pub bar_hide_empty: bool,       // hide empty workspace pills
-    pub bar_padding: i32,           // horizontal padding from each screen edge (px)
-    pub bar_show_date: bool,        // show the date widget
-    pub bar_date_format: String,    // date token string, e.g. "ddd dd MMM"
-    pub bar_show_cpu: bool,         // show CPU load %
-    pub bar_show_mem: bool,         // show RAM load %
-    pub bar_show_battery: bool,     // show battery %
+    pub focus_follows_mouse: bool, // hovering a window focuses it (focus follows mouse)
+    pub animations: bool,         // animate tiling moves + workspace slides
+    pub animation_ms: i32,        // animation duration in ms (0 disables; clamp 0..2000)
+    pub workspace_slide: bool,    // back-compat: false forces workspace_anim = off
+    pub workspace_anim: String,   // workspace-switch style: off | slide | spring | fade
+    pub window_anim: String,      // window move/open/close/resize: off | glide | spring
+    pub animation_easing: String, // cubic | smooth | spring
+    pub popup_font_name: String,
+    pub popup_font_size: i32,
+    pub popup_font_weight: i32,
+    pub popup_radius: i32,
+    pub popup_border_width: i32,
+    pub popup_opacity: i32,
+    pub popup_bg: Option<u32>,
+    pub popup_fg: Option<u32>,
+    pub popup_muted: Option<u32>,
+    pub popup_accent: Option<u32>,
+    pub popup_accent_fg: Option<u32>,
+    pub popup_border: Option<u32>,
+    pub launcher_enabled: bool,
+    pub launcher_width: i32,
+    pub launcher_wide_width: i32,
+    pub launcher_height: i32,
+    pub launcher_row_height: i32,
+    pub launcher_icon_size: i32,
+    pub launcher_padding: i32,
+    pub launcher_selection_radius: i32,
+    pub launcher_placement: String,
+    pub launcher_source_apps: bool,
+    pub launcher_source_files: bool,
+    pub launcher_source_calc: bool,
+    pub launcher_source_web: bool,
+    pub launcher_source_windows: bool,
+    pub launcher_source_clipboard: bool,
+    pub launcher_source_emoji: bool,
+    pub launcher_web_url: String,
+    pub launcher_max_results: usize,
+    pub launcher_file_scope: String,
+    pub launcher_file_exclude: Vec<String>,
+    pub launcher_mru: bool,
+    pub launcher_entries: Vec<LauncherEntry>,
+    pub system_menu_enabled: bool,
+    pub system_menu_width: i32,
+    pub system_power_items: Vec<String>,
+    pub system_setup_items: Vec<String>,
+    pub system_actions: Vec<SystemAction>,
+    pub alt_tab_replacement: bool,
+    pub scratchpad_enabled: bool,
+    pub scratchpad_command: String,
+    pub scratchpad_class: String,
+    pub clipboard_history: bool,
+    pub clipboard_limit: usize,
+    pub clipboard_prefix: String,
+    pub emoji_picker: bool,
+    pub emoji_prefix: String,
+    pub wallpaper_dir: String,
+    pub workspace_wallpapers: Vec<String>,
+    pub media_enabled: bool,
+    pub ipc_enabled: bool,
+    pub ipc_pipe: String,
+    pub persist_state: bool,
+    pub extra_hotkeys: Vec<HotkeyDef>,
+    pub window_rules: Vec<WindowRule>,
+    pub bar_enabled: bool,         // draw the status bar on every monitor
+    pub bar_height: i32,           // bar thickness in px (work area is reserved for it)
+    pub bar_bottom: bool,          // dock the bar at the bottom instead of the top
+    pub bar_font_size: i32,        // text height in px; 0 = auto from bar_height
+    pub bar_show_title: bool,      // show the focused window title
+    pub bar_show_clock: bool,      // show the clock
+    pub bar_clock_24h: bool,       // 24-hour clock (false = 12-hour with am/pm)
+    pub bar_show_layout: bool,     // show layout + tiling/floating state on the right
+    pub bar_bg: Option<u32>,       // COLORREF bar background; None = follow theme
+    pub bar_fg: Option<u32>,       // COLORREF bar text; None = follow theme
+    pub bar_accent: Option<u32>,   // COLORREF active-workspace highlight; None = theme
+    pub bar_inactive: Option<u32>, // COLORREF empty-workspace text; None = theme
+    pub bar_font_name: String,     // font family (default "Segoe UI")
+    pub bar_hide_empty: bool,      // hide empty workspace pills
+    pub bar_widget_gap: i32,
+    pub bar_icon_size: i32,
+    pub bar_workspace_width: i32,
+    pub bar_icon_mode: String,
+    pub bar_show_tooltips: bool,
+    pub bar_show_app_labels: bool,
+    pub bar_cpu_format: String,
+    pub bar_mem_format: String,
+    pub bar_battery_format: String,
+    pub bar_net_format: String,
+    pub bar_volume_format: String,
+    pub bar_clock_format: String,
+    pub bar_icon_cpu: String,
+    pub bar_icon_mem: String,
+    pub bar_icon_battery: String,
+    pub bar_icon_net: String,
+    pub bar_icon_volume: String,
+    pub bar_padding: i32,        // horizontal padding from each screen edge (px)
+    pub bar_show_date: bool,     // show the date widget
+    pub bar_date_format: String, // date token string, e.g. "ddd dd MMM"
+    pub bar_show_cpu: bool,      // show CPU load %
+    pub bar_show_mem: bool,      // show RAM load %
+    pub bar_show_battery: bool,  // show battery %
     pub ignore_classes: Vec<String>, // window classes never tiled/managed
-    pub float_classes: Vec<String>,   // window classes managed but auto-floated
-    pub key_focus_next: u32,        // Alt+<key> focus next window in the stack (default J)
-    pub key_focus_prev: u32,        // Alt+<key> focus previous window in the stack (default K)
-    pub key_shrink_master: u32,     // Alt+<key> shrink the master area (default H)
-    pub key_grow_master: u32,       // Alt+<key> grow the master area (default L)
-    pub key_promote_master: u32,    // Alt+<key> promote focused window to master (default M)
-    pub key_toggle_tiling: u32,     // Alt+<key> toggle tiling on/off (default T)
-    pub key_toggle_float: u32,      // Alt+<key> toggle floating for focused window (default F)
-    pub key_close_window: u32,      // Alt+<key> close the focused window (default W)
-    pub theme: String,              // popup palette: dark | light | auto (follows Windows)
-    pub acrylic: bool,              // experimental acrylic blur behind the popups
-    pub bar_floating: bool,         // detached rounded bar (margins from the screen edges)
-    pub bar_margin: i32,            // gap between a floating bar and the screen edges (px)
-    pub bar_radius: i32,            // floating-bar corner radius (px)
-    pub bar_autohide: bool,         // slide the bar away; reveal on screen-edge hover
-    pub bar_wheel_ws: bool,         // mouse wheel over the bar cycles workspaces
-    pub bar_show_net: bool,         // show network up/down speed
-    pub bar_show_volume: bool,      // show volume % (wheel adjusts, click mutes)
-    pub bar_show_apps: bool,        // show app buttons for the active workspace's windows
-    pub bar_left: Vec<String>,      // widget names, left zone (drawn left-to-right)
-    pub bar_center: Vec<String>,    // widget names, centered in the remaining gap
-    pub bar_right: Vec<String>,     // widget names, right zone (listed left-to-right)
+    pub float_classes: Vec<String>, // window classes managed but auto-floated
+    pub key_focus_next: u32,     // Alt+<key> focus next window in the stack (default J)
+    pub key_focus_prev: u32,     // Alt+<key> focus previous window in the stack (default K)
+    pub key_shrink_master: u32,  // Alt+<key> shrink the master area (default H)
+    pub key_grow_master: u32,    // Alt+<key> grow the master area (default L)
+    pub key_promote_master: u32, // Alt+<key> promote focused window to master (default M)
+    pub key_toggle_tiling: u32,  // Alt+<key> toggle tiling on/off (default T)
+    pub key_toggle_float: u32,   // Alt+<key> toggle floating for focused window (default F)
+    pub key_close_window: u32,   // Alt+<key> close the focused window (default W)
+    pub theme: String,           // popup palette: dark | light | auto (follows Windows)
+    pub acrylic: bool,           // experimental acrylic blur behind the popups
+    pub bar_floating: bool,      // detached rounded bar (margins from the screen edges)
+    pub bar_margin: i32,         // gap between a floating bar and the screen edges (px)
+    pub bar_radius: i32,         // floating-bar corner radius (px)
+    pub bar_autohide: bool,      // slide the bar away; reveal on screen-edge hover
+    pub bar_wheel_ws: bool,      // mouse wheel over the bar cycles workspaces
+    pub bar_show_net: bool,      // show network up/down speed
+    pub bar_show_volume: bool,   // show volume % (wheel adjusts, click mutes)
+    pub bar_show_apps: bool,     // show app buttons for the active workspace's windows
+    pub bar_show_media: bool,
+    pub bar_left: Vec<String>, // widget names, left zone (drawn left-to-right)
+    pub bar_center: Vec<String>, // widget names, centered in the remaining gap
+    pub bar_right: Vec<String>, // widget names, right zone (listed left-to-right)
 }
 
 /// Widget names accepted in the navbar `left` / `center` / `right` zone lists.
 pub const BAR_WIDGETS: &[&str] = &[
-    "workspaces", "apps", "title", "layout", "cpu", "mem", "net", "volume", "battery",
-    "date", "clock",
+    "workspaces",
+    "apps",
+    "title",
+    "layout",
+    "cpu",
+    "mem",
+    "net",
+    "volume",
+    "battery",
+    "date",
+    "clock",
+    "media",
+    "separator",
+    "spacer",
 ];
 
 /// Built-in bar palettes that `auto` colours resolve to: [bg, fg, accent,
@@ -99,8 +228,16 @@ impl Config {
             outer_gap: 8,
             inner_gap: 8,
             master_ratio: 0.55,
-            workspaces: 9,
+            workspaces: 10,
             workspace_keys: parse_keys("1 2 3 4 5 6 7 8 9 0"),
+            workspace_names: vec![
+                "Web".into(),
+                "Code".into(),
+                "Chat".into(),
+                "Files".into(),
+                "Media".into(),
+            ],
+            workspace_icons: Vec::new(),
             layout: "dwindle".to_string(),
             terminal: "wt.exe".to_string(),
             browser: String::new(),
@@ -115,6 +252,81 @@ impl Config {
             workspace_slide: true,
             workspace_anim: "slide".to_string(),
             window_anim: "glide".to_string(),
+            animation_easing: "cubic".to_string(),
+            popup_font_name: "Segoe UI".to_string(),
+            popup_font_size: 18,
+            popup_font_weight: 400,
+            popup_radius: 16,
+            popup_border_width: 1,
+            popup_opacity: 94,
+            popup_bg: None,
+            popup_fg: None,
+            popup_muted: None,
+            popup_accent: None,
+            popup_accent_fg: None,
+            popup_border: None,
+            launcher_enabled: true,
+            launcher_width: 660,
+            launcher_wide_width: 1060,
+            launcher_height: 452,
+            launcher_row_height: 40,
+            launcher_icon_size: 32,
+            launcher_padding: 16,
+            launcher_selection_radius: 12,
+            launcher_placement: "cursor_monitor".to_string(),
+            launcher_source_apps: true,
+            launcher_source_files: true,
+            launcher_source_calc: true,
+            launcher_source_web: true,
+            launcher_source_windows: false,
+            launcher_source_clipboard: false,
+            launcher_source_emoji: false,
+            launcher_web_url: "https://www.google.com/search?q={query}".to_string(),
+            launcher_max_results: 40,
+            launcher_file_scope: String::new(),
+            launcher_file_exclude: vec![".git".into(), "node_modules".into(), "target".into()],
+            launcher_mru: true,
+            launcher_entries: Vec::new(),
+            system_menu_enabled: true,
+            system_menu_width: 380,
+            system_power_items: vec![
+                "lock".into(),
+                "sleep".into(),
+                "hibernate".into(),
+                "sign_out".into(),
+                "restart".into(),
+                "shutdown".into(),
+            ],
+            system_setup_items: vec![
+                "settings".into(),
+                "open_config".into(),
+                "reload".into(),
+                "restart_astur".into(),
+                "screenshot".into(),
+                "wallpapers".into(),
+            ],
+            system_actions: Vec::new(),
+            alt_tab_replacement: false,
+            scratchpad_enabled: false,
+            scratchpad_command: "wt.exe".to_string(),
+            scratchpad_class: "CASCADIA_HOSTING_WINDOW_CLASS".to_string(),
+            clipboard_history: false,
+            clipboard_limit: 50,
+            clipboard_prefix: ">".to_string(),
+            emoji_picker: false,
+            emoji_prefix: ":".to_string(),
+            wallpaper_dir: String::new(),
+            workspace_wallpapers: Vec::new(),
+            media_enabled: false,
+            ipc_enabled: false,
+            ipc_pipe: "astur".to_string(),
+            persist_state: true,
+            extra_hotkeys: vec![HotkeyDef {
+                chord: "ALT+GRAVE".to_string(),
+                action: "scratchpad".to_string(),
+                argument: String::new(),
+            }],
+            window_rules: Vec::new(),
             bar_enabled: true,
             bar_height: 28,
             bar_bottom: false,
@@ -123,12 +335,29 @@ impl Config {
             bar_show_clock: true,
             bar_clock_24h: true,
             bar_show_layout: true,
-            bar_bg: None,       // follow theme
+            bar_bg: None, // follow theme
             bar_fg: None,
             bar_accent: None,
             bar_inactive: None,
             bar_font_name: "Segoe UI".to_string(),
             bar_hide_empty: false,
+            bar_widget_gap: 16,
+            bar_icon_size: 20,
+            bar_workspace_width: 34,
+            bar_icon_mode: "both".to_string(),
+            bar_show_tooltips: true,
+            bar_show_app_labels: false,
+            bar_cpu_format: "{value}%".to_string(),
+            bar_mem_format: "{value}%".to_string(),
+            bar_battery_format: "{value}%".to_string(),
+            bar_net_format: "D:{down} U:{up}".to_string(),
+            bar_volume_format: "{value}%".to_string(),
+            bar_clock_format: "HH:mm".to_string(),
+            bar_icon_cpu: "CPU".to_string(),
+            bar_icon_mem: "RAM".to_string(),
+            bar_icon_battery: "BAT".to_string(),
+            bar_icon_net: "NET".to_string(),
+            bar_icon_volume: "VOL".to_string(),
             bar_padding: 8,
             bar_show_date: false,
             bar_date_format: "ddd dd MMM".to_string(),
@@ -155,6 +384,7 @@ impl Config {
             bar_show_net: false,
             bar_show_volume: true,
             bar_show_apps: false,
+            bar_show_media: false,
             bar_left: vec!["workspaces".into(), "apps".into()],
             bar_center: vec!["title".into()],
             bar_right: vec![
@@ -178,7 +408,7 @@ const DEFAULT_CONFIG: &str = "\
 # Location : %USERPROFILE%\\.astur\\astur.conf
 #            (override with the ASTUR_CONFIG environment variable)
 # The status bar is configured separately in navbar.conf (same folder).
-# Apply    : edit this file, then restart Astur.
+# Apply    : save this file; Astur hot-reloads it within about one second.
 # Regen    : delete this file and relaunch to get a fresh, fully-commented copy.
 #
 # Syntax   : one  key = value  per line. '#' starts a comment. Blank lines and
@@ -225,6 +455,11 @@ workspaces = 10
 #   workspace_keys = Q W E R T Y
 # keys
 workspace_keys = 1 2 3 4 5 6 7 8 9 0
+# Optional display labels. Missing positions fall back to workspace number.
+# list; quote-free names should not contain commas.
+workspace_names = Web, Code, Chat, Files, Media
+# Optional compact pills. Text, symbols from selected font, or icon-font glyphs.
+workspace_icons =
 
 # Tile windows automatically on launch (Alt+T toggles at runtime).  bool
 start_tiled = true
@@ -233,7 +468,10 @@ start_tiled = true
 #   dwindle = each new window splits the remaining space, spiralling into the
 #             bottom corner (spiral default).
 #   master  = one large master column on the left, the rest stacked on the right.
-# values: dwindle | master
+#   columns = equal-width columns
+#   grid    = balanced rows and columns
+#   monocle = every tiled window fills work area; focused window sits on top
+# values: dwindle | master | columns | grid | monocle
 layout = dwindle
 
 # Fraction of the width given to the master window (master layout, and the
@@ -292,6 +530,8 @@ workspace_slide = true
 #           Composited on a brief overlay (the real windows are placed instantly
 #           underneath), so it stays smooth even with heavy apps.  string
 window_anim = glide
+# Motion curve used by popup/placement transitions. values: cubic | smooth | spring
+animation_easing = cubic
 
 # ---------------------------------------------------------------------------
 # Appearance: theme, window borders & dimming
@@ -310,6 +550,20 @@ theme = dark
 # look). Uses an undocumented Windows API; if popups render oddly, turn it off.
 # bool
 acrylic = false
+# Popup typography and geometry. Sizes are pixels in current process DPI mode.
+popup_font_name = Segoe UI
+popup_font_size = 18
+popup_font_weight = 400
+popup_radius = 16
+popup_border_width = 1
+popup_opacity = 94
+# Set colours to auto to follow theme, or explicit #RRGGBB.
+popup_bg = auto
+popup_fg = auto
+popup_muted = auto
+popup_accent = auto
+popup_accent_fg = auto
+popup_border = auto
 
 # Dim unfocused windows to this opacity.  float 0.10 - 1.00  (1.0 = disabled)
 unfocused_opacity = 0.8
@@ -333,9 +587,13 @@ ignore_classes =
 # Manage but always float these (let the app place them; don't tile).
 # Example: float_classes = #32770, MsiDialogCloseClass
 float_classes =
+# Rich rules. Records separated by ;;, fields by |:
+# action|exe|class|title|workspace|monitor
+# Empty match fields are wildcards. workspace/monitor are 1-based; 0/empty = unset.
+window_rules =
 
 # ---------------------------------------------------------------------------
-# Launchers
+# Launcher and system menu
 # ---------------------------------------------------------------------------
 
 # Program launched by Alt+Enter. Resolved via the shell, so PATH and App
@@ -344,6 +602,67 @@ terminal = wt.exe
 # Program launched by Alt+Shift+Enter. Leave EMPTY to open the system default
 # browser.  text
 browser =
+
+# Alt+Space picker. Placement: cursor_monitor | focused_monitor | primary_monitor
+launcher_enabled = true
+launcher_width = 660
+launcher_wide_width = 1060
+launcher_height = 452
+launcher_row_height = 40
+launcher_icon_size = 32
+launcher_padding = 16
+launcher_selection_radius = 12
+launcher_placement = cursor_monitor
+launcher_max_results = 40
+launcher_mru = true
+# Providers can be enabled independently.
+launcher_source_apps = true
+launcher_source_files = true
+launcher_source_calc = true
+launcher_source_web = true
+launcher_source_windows = false
+launcher_source_clipboard = false
+launcher_source_emoji = false
+launcher_web_url = https://www.google.com/search?q={query}
+# Empty file scope uses current user profile. Excludes are comma-separated path fragments.
+launcher_file_scope =
+launcher_file_exclude = .git, node_modules, target
+# Custom records: label|target|icon ;; label|target|icon. icon: auto/path/builtin name.
+launcher_entries =
+
+# Alt+Shift+Space system menu.
+system_menu_enabled = true
+system_menu_width = 380
+# Built-ins: lock sleep hibernate sign_out restart shutdown settings open_config
+# reload restart_astur screenshot wallpapers. Order controls menu order.
+system_power_items = lock, sleep, hibernate, sign_out, restart, shutdown
+system_setup_items = settings, open_config, reload, restart_astur, screenshot, wallpapers
+# Custom: category|label|target|icon|confirm, records separated by ;;
+system_actions =
+
+# ---------------------------------------------------------------------------
+# Optional desktop features
+# ---------------------------------------------------------------------------
+alt_tab_replacement = false
+scratchpad_enabled = false
+scratchpad_command = wt.exe
+scratchpad_class = CASCADIA_HOSTING_WINDOW_CLASS
+clipboard_history = false
+clipboard_limit = 50
+clipboard_prefix = >
+emoji_picker = false
+emoji_prefix = :
+wallpaper_dir =
+# One wallpaper path per workspace, separated by ;;. Empty positions do nothing.
+workspace_wallpapers =
+media_enabled = false
+persist_state = true
+# Local named-pipe command API. Pipe name only; no remote/network listener.
+ipc_enabled = false
+ipc_pipe = astur
+# Extra bindings: chord|action|argument ;; chord|action|argument
+# Escape literal field separators with a leading backslash.
+extra_hotkeys = ALT+GRAVE|scratchpad|
 
 # ============================================================================
 # Hotkeys (LEFT ALT is the modifier)
@@ -388,7 +707,7 @@ const DEFAULT_NAVBAR: &str = "\
 # Location : %USERPROFILE%\\.astur\\navbar.conf
 #            (override with the ASTUR_NAVBAR environment variable)
 # Window-manager settings live separately in astur.conf (same folder).
-# Apply    : edit this file, then restart Astur.
+# Apply    : save this file; Astur hot-reloads it within about one second.
 #
 # One bar is drawn on EVERY monitor. Each shows that monitor's workspaces and
 # focused window. The tiling work area is reserved so windows never sit under a
@@ -437,6 +756,9 @@ autohide = false
 #   battery     battery percent
 #   date        the date (see date_format)
 #   clock       the time
+#   media       current media title
+#   separator   thin divider
+#   spacer      fixed gap
 # A widget only shows if it is BOTH listed in a zone and its show_* toggle
 # below is true (so you can flip widgets without re-ordering).
 # ---------------------------------------------------------------------------
@@ -479,6 +801,31 @@ show_net = false
 show_volume = true
 # App buttons: an icon per window on the active workspace; click focuses.  bool
 show_apps = false
+# Current media title. Requires media_enabled in astur.conf.
+show_media = false
+
+# ---------------------------------------------------------------------------
+# Spacing, labels and icons
+# ---------------------------------------------------------------------------
+widget_gap = 16
+icon_size = 20
+workspace_width = 34
+# icon = label only; text = value only; both = label + value
+icon_mode = both
+show_tooltips = true
+show_app_labels = false
+cpu_format = {value}%
+mem_format = {value}%
+battery_format = {value}%
+net_format = D:{down} U:{up}
+volume_format = {value}%
+clock_format = HH:mm
+# Plain labels work everywhere; icon-font glyphs work when font_name supports them.
+icon_cpu = CPU
+icon_mem = RAM
+icon_battery = BAT
+icon_net = NET
+icon_volume = VOL
 
 # Colours: 'auto' follows the theme (astur.conf 'theme' picks the dark or light
 # preset), or set an explicit #RRGGBB to override that colour permanently.
@@ -502,6 +849,216 @@ fn parse_list(v: &str) -> Vec<String> {
         .collect()
 }
 
+/// Ordered slots preserve empty positions. `;;` is preferred because Windows
+/// paths may contain commas; comma remains accepted for older configs.
+fn parse_slots(v: &str) -> Vec<String> {
+    let values: Vec<String> = if v.contains(";;") {
+        v.split(";;").map(|s| s.trim().to_string()).collect()
+    } else {
+        v.split(',').map(|s| s.trim().to_string()).collect()
+    };
+    if values.iter().all(String::is_empty) {
+        Vec::new()
+    } else {
+        values
+    }
+}
+
+/// Split declarative records. `;;` separates records and `|` separates fields.
+/// `\|` and `\;` embed literal separators; other backslashes stay untouched so
+/// Windows paths round-trip without doubled escaping.
+fn records(v: &str) -> std::vec::IntoIter<Vec<String>> {
+    let chars: Vec<char> = v.chars().collect();
+    let mut out = Vec::new();
+    let mut fields = Vec::new();
+    let mut field = String::new();
+    let mut i = 0usize;
+    while i < chars.len() {
+        let ch = chars[i];
+        if ch == '\\'
+            && i + 1 < chars.len()
+            && chars[i + 1] == '\\'
+            && (i + 2 == chars.len()
+                || chars[i + 2] == '|'
+                || (chars[i + 2] == ';' && i + 3 < chars.len() && chars[i + 3] == ';'))
+        {
+            field.push('\\');
+            i += 2;
+            continue;
+        }
+        if ch == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '|' | ';') {
+            field.push(chars[i + 1]);
+            i += 2;
+            continue;
+        }
+        if ch == '|' {
+            fields.push(field.trim().to_string());
+            field.clear();
+            i += 1;
+            continue;
+        }
+        if ch == ';' && i + 1 < chars.len() && chars[i + 1] == ';' {
+            fields.push(field.trim().to_string());
+            field.clear();
+            if fields.iter().any(|value| !value.is_empty()) {
+                out.push(std::mem::take(&mut fields));
+            } else {
+                fields.clear();
+            }
+            i += 2;
+            continue;
+        }
+        field.push(ch);
+        i += 1;
+    }
+    fields.push(field.trim().to_string());
+    if fields.iter().any(|value| !value.is_empty()) {
+        out.push(fields);
+    }
+    out.into_iter()
+}
+
+fn escape_field(value: &str) -> String {
+    let mut escaped = value.replace('|', "\\|").replace(';', "\\;");
+    if escaped.ends_with('\\') {
+        escaped.push('\\');
+    }
+    escaped
+}
+
+pub fn parse_launcher_entries(v: &str) -> Vec<LauncherEntry> {
+    records(v)
+        .filter_map(|f| {
+            let label = f.first()?.clone();
+            let target = f.get(1)?.clone();
+            (!label.is_empty() && !target.is_empty()).then(|| LauncherEntry {
+                label,
+                target,
+                icon: f.get(2).cloned().unwrap_or_else(|| "auto".to_string()),
+            })
+        })
+        .collect()
+}
+
+pub fn format_launcher_entries(v: &[LauncherEntry]) -> String {
+    v.iter()
+        .map(|e| {
+            format!(
+                "{}|{}|{}",
+                escape_field(&e.label),
+                escape_field(&e.target),
+                escape_field(&e.icon)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ;; ")
+}
+
+pub fn parse_system_actions(v: &str) -> Vec<SystemAction> {
+    records(v)
+        .filter_map(|f| {
+            let category = f.first()?.clone();
+            let category = if category.is_empty() {
+                "Custom".to_string()
+            } else {
+                category
+            };
+            let label = f.get(1)?.clone();
+            let target = f.get(2)?.clone();
+            (!label.is_empty() && !target.is_empty()).then(|| SystemAction {
+                category,
+                label,
+                target,
+                icon: f.get(3).cloned().unwrap_or_else(|| "command".to_string()),
+                confirm: f.get(4).is_some_and(|v| parse_bool(v)),
+            })
+        })
+        .collect()
+}
+
+pub fn format_system_actions(v: &[SystemAction]) -> String {
+    v.iter()
+        .map(|e| {
+            format!(
+                "{}|{}|{}|{}|{}",
+                escape_field(&e.category),
+                escape_field(&e.label),
+                escape_field(&e.target),
+                escape_field(&e.icon),
+                e.confirm
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ;; ")
+}
+
+pub fn parse_window_rules(v: &str) -> Vec<WindowRule> {
+    records(v)
+        .filter_map(|f| {
+            let action = f.first()?.to_ascii_lowercase();
+            if !matches!(action.as_str(), "tile" | "float" | "ignore") {
+                return None;
+            }
+            let one_based = |s: Option<&String>| {
+                s.and_then(|v| v.parse::<usize>().ok())
+                    .and_then(|v| v.checked_sub(1))
+            };
+            Some(WindowRule {
+                action,
+                exe: f.get(1).cloned().unwrap_or_default(),
+                class: f.get(2).cloned().unwrap_or_default(),
+                title: f.get(3).cloned().unwrap_or_default(),
+                workspace: one_based(f.get(4)),
+                monitor: one_based(f.get(5)),
+            })
+        })
+        .collect()
+}
+
+pub fn format_window_rules(v: &[WindowRule]) -> String {
+    v.iter()
+        .map(|r| {
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                escape_field(&r.action),
+                escape_field(&r.exe),
+                escape_field(&r.class),
+                escape_field(&r.title),
+                r.workspace.map(|n| (n + 1).to_string()).unwrap_or_default(),
+                r.monitor.map(|n| (n + 1).to_string()).unwrap_or_default(),
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ;; ")
+}
+
+pub fn parse_hotkeys(v: &str) -> Vec<HotkeyDef> {
+    records(v)
+        .filter_map(|f| {
+            let chord = f.first()?.to_ascii_uppercase().replace(' ', "");
+            let action = f.get(1)?.to_ascii_lowercase();
+            (!chord.is_empty() && !action.is_empty()).then(|| HotkeyDef {
+                chord,
+                action,
+                argument: f.get(2).cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+pub fn format_hotkeys(v: &[HotkeyDef]) -> String {
+    v.iter()
+        .map(|h| {
+            format!(
+                "{}|{}|{}",
+                escape_field(&h.chord),
+                escape_field(&h.action),
+                escape_field(&h.argument)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ;; ")
+}
 /// Map a key name ("1", "Q", "F3") to its Win32 virtual-key code.
 pub fn key_to_vk(name: &str) -> Option<u32> {
     let n = name.trim().to_ascii_uppercase();
@@ -665,7 +1222,18 @@ fn parse_into(c: &mut Config, text: &str) {
                     c.workspace_keys = keys;
                 }
             }
-            "layout" => c.layout = v.to_ascii_lowercase(),
+            "workspace_names" => c.workspace_names = parse_list(v),
+            "workspace_icons" => c.workspace_icons = parse_list(v),
+            "workspace_wallpapers" => c.workspace_wallpapers = parse_slots(v),
+            "layout" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(
+                    m.as_str(),
+                    "dwindle" | "master" | "columns" | "grid" | "monocle"
+                ) {
+                    c.layout = m;
+                }
+            }
             "terminal" => c.terminal = v.to_string(),
             "browser" => c.browser = v.to_string(),
             "unfocused_opacity" => {
@@ -693,10 +1261,161 @@ fn parse_into(c: &mut Config, text: &str) {
             }
             "window_anim" => {
                 let m = v.trim().to_ascii_lowercase();
-                if matches!(m.as_str(), "off" | "glide") {
+                if matches!(m.as_str(), "off" | "glide" | "spring") {
                     c.window_anim = m;
                 }
             }
+            "animation_easing" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "cubic" | "smooth" | "spring") {
+                    c.animation_easing = m;
+                }
+            }
+            "popup_font_name" => {
+                if !v.is_empty() {
+                    c.popup_font_name = v.to_string()
+                }
+            }
+            "popup_font_size" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.popup_font_size = n.clamp(10, 72)
+                }
+            }
+            "popup_font_weight" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.popup_font_weight = n.clamp(100, 900)
+                }
+            }
+            "popup_radius" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.popup_radius = n.clamp(0, 48)
+                }
+            }
+            "popup_border_width" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.popup_border_width = n.clamp(0, 8)
+                }
+            }
+            "popup_opacity" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.popup_opacity = n.clamp(20, 100)
+                }
+            }
+            "popup_bg" => c.popup_bg = parse_theme_color(v, 0x0016_1616, c.popup_bg),
+            "popup_fg" => c.popup_fg = parse_theme_color(v, 0x00E6_E6E6, c.popup_fg),
+            "popup_muted" => c.popup_muted = parse_theme_color(v, 0x0089_8989, c.popup_muted),
+            "popup_accent" => c.popup_accent = parse_theme_color(v, 0x0082_6333, c.popup_accent),
+            "popup_accent_fg" => {
+                c.popup_accent_fg = parse_theme_color(v, 0x00FF_FFFF, c.popup_accent_fg)
+            }
+            "popup_border" => c.popup_border = parse_theme_color(v, 0x0033_2A26, c.popup_border),
+            "launcher_enabled" => c.launcher_enabled = parse_bool(v),
+            "launcher_width" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_width = n.clamp(320, 2400)
+                }
+            }
+            "launcher_wide_width" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_wide_width = n.clamp(480, 3200)
+                }
+            }
+            "launcher_height" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_height = n.clamp(200, 1800)
+                }
+            }
+            "launcher_row_height" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_row_height = n.clamp(24, 96)
+                }
+            }
+            "launcher_icon_size" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_icon_size = n.clamp(12, 72)
+                }
+            }
+            "launcher_padding" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_padding = n.clamp(4, 80)
+                }
+            }
+            "launcher_selection_radius" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.launcher_selection_radius = n.clamp(0, 48)
+                }
+            }
+            "launcher_placement" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(
+                    m.as_str(),
+                    "cursor_monitor" | "focused_monitor" | "primary_monitor"
+                ) {
+                    c.launcher_placement = m
+                }
+            }
+            "launcher_source_apps" => c.launcher_source_apps = parse_bool(v),
+            "launcher_source_files" => c.launcher_source_files = parse_bool(v),
+            "launcher_source_calc" => c.launcher_source_calc = parse_bool(v),
+            "launcher_source_web" => c.launcher_source_web = parse_bool(v),
+            "launcher_source_windows" => c.launcher_source_windows = parse_bool(v),
+            "launcher_source_clipboard" => c.launcher_source_clipboard = parse_bool(v),
+            "launcher_source_emoji" => c.launcher_source_emoji = parse_bool(v),
+            "launcher_web_url" => {
+                if v.contains("{query}") {
+                    c.launcher_web_url = v.to_string()
+                }
+            }
+            "launcher_max_results" => {
+                if let Ok(n) = v.parse::<usize>() {
+                    c.launcher_max_results = n.clamp(5, 500)
+                }
+            }
+            "launcher_file_scope" => c.launcher_file_scope = v.to_string(),
+            "launcher_file_exclude" => c.launcher_file_exclude = parse_list(v),
+            "launcher_mru" => c.launcher_mru = parse_bool(v),
+            "launcher_entries" => c.launcher_entries = parse_launcher_entries(v),
+            "system_menu_enabled" => c.system_menu_enabled = parse_bool(v),
+            "system_menu_width" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.system_menu_width = n.clamp(280, 1200)
+                }
+            }
+            "system_power_items" => c.system_power_items = parse_list(v),
+            "system_setup_items" => c.system_setup_items = parse_list(v),
+            "system_actions" => c.system_actions = parse_system_actions(v),
+            "alt_tab_replacement" => c.alt_tab_replacement = parse_bool(v),
+            "scratchpad_enabled" => c.scratchpad_enabled = parse_bool(v),
+            "scratchpad_command" => c.scratchpad_command = v.to_string(),
+            "scratchpad_class" => c.scratchpad_class = v.to_string(),
+            "clipboard_history" => c.clipboard_history = parse_bool(v),
+            "clipboard_limit" => {
+                if let Ok(n) = v.parse::<usize>() {
+                    c.clipboard_limit = n.clamp(1, 500)
+                }
+            }
+            "clipboard_prefix" => {
+                if !v.is_empty() {
+                    c.clipboard_prefix = v.to_string()
+                }
+            }
+            "emoji_picker" => c.emoji_picker = parse_bool(v),
+            "emoji_prefix" => {
+                if !v.is_empty() {
+                    c.emoji_prefix = v.to_string()
+                }
+            }
+            "wallpaper_dir" => c.wallpaper_dir = v.to_string(),
+            "media_enabled" => c.media_enabled = parse_bool(v),
+            "ipc_enabled" => c.ipc_enabled = parse_bool(v),
+            "ipc_pipe" => {
+                if !v.is_empty() {
+                    c.ipc_pipe = v.to_string()
+                }
+            }
+            "persist_state" => c.persist_state = parse_bool(v),
+            "extra_hotkeys" => c.extra_hotkeys = parse_hotkeys(v),
+            "window_rules" => c.window_rules = parse_window_rules(v),
             "ignore_classes" => c.ignore_classes = parse_list(v),
             "float_classes" => c.float_classes = parse_list(v),
             "key_focus_next" => {
@@ -772,6 +1491,40 @@ fn parse_into(c: &mut Config, text: &str) {
             "hide_empty" | "hide_empty_workspaces" | "bar_hide_empty" => {
                 c.bar_hide_empty = parse_bool(v)
             }
+            "widget_gap" | "bar_widget_gap" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_widget_gap = n.clamp(0, 100)
+                }
+            }
+            "icon_size" | "bar_icon_size" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_icon_size = n.clamp(8, 64)
+                }
+            }
+            "workspace_width" | "bar_workspace_width" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_workspace_width = n.clamp(18, 120)
+                }
+            }
+            "icon_mode" | "bar_icon_mode" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "icon" | "text" | "both") {
+                    c.bar_icon_mode = m
+                }
+            }
+            "show_tooltips" | "bar_show_tooltips" => c.bar_show_tooltips = parse_bool(v),
+            "show_app_labels" | "bar_show_app_labels" => c.bar_show_app_labels = parse_bool(v),
+            "cpu_format" | "bar_cpu_format" => c.bar_cpu_format = v.to_string(),
+            "mem_format" | "bar_mem_format" => c.bar_mem_format = v.to_string(),
+            "battery_format" | "bar_battery_format" => c.bar_battery_format = v.to_string(),
+            "net_format" | "bar_net_format" => c.bar_net_format = v.to_string(),
+            "volume_format" | "bar_volume_format" => c.bar_volume_format = v.to_string(),
+            "clock_format" | "bar_clock_format" => c.bar_clock_format = v.to_string(),
+            "icon_cpu" | "bar_icon_cpu" => c.bar_icon_cpu = v.to_string(),
+            "icon_mem" | "bar_icon_mem" => c.bar_icon_mem = v.to_string(),
+            "icon_battery" | "bar_icon_battery" => c.bar_icon_battery = v.to_string(),
+            "icon_net" | "bar_icon_net" => c.bar_icon_net = v.to_string(),
+            "icon_volume" | "bar_icon_volume" => c.bar_icon_volume = v.to_string(),
             "padding" | "bar_padding" => {
                 if let Ok(n) = v.parse::<i32>() {
                     c.bar_padding = n.clamp(0, 200);
@@ -811,6 +1564,7 @@ fn parse_into(c: &mut Config, text: &str) {
             "show_net" | "show_network" | "bar_show_net" => c.bar_show_net = parse_bool(v),
             "show_volume" | "bar_show_volume" => c.bar_show_volume = parse_bool(v),
             "show_apps" | "bar_show_apps" => c.bar_show_apps = parse_bool(v),
+            "show_media" | "bar_show_media" => c.bar_show_media = parse_bool(v),
             "left" | "bar_left" => c.bar_left = parse_widgets(v),
             "center" | "centre" | "bar_center" => c.bar_center = parse_widgets(v),
             "right" | "bar_right" => c.bar_right = parse_widgets(v),
@@ -953,11 +1707,35 @@ mod tests {
     }
 
     #[test]
+    fn structured_records_escape_separators_and_preserve_paths() {
+        let original = vec![LauncherEntry {
+            label: "Build | test".to_string(),
+            target: r#"cmd:powershell -Command "a|b;;c""#.to_string(),
+            icon: r"C:\".to_string(),
+        }];
+        let text = format_launcher_entries(&original);
+        assert_eq!(parse_launcher_entries(&text), original);
+
+        let hotkeys = vec![HotkeyDef {
+            chord: "ALT+Q".to_string(),
+            action: "launch".to_string(),
+            argument: "cmd:echo one|findstr one; echo two".to_string(),
+        }];
+        assert_eq!(parse_hotkeys(&format_hotkeys(&hotkeys)), hotkeys);
+    }
+
+    #[test]
     fn parse_into_gaps_clamped() {
         let mut c = Config::defaults();
         parse_into(&mut c, "outer_gap = -10\ninner_gap = 99999");
         assert_eq!(c.outer_gap, 0); // negative clamped up
         assert_eq!(c.inner_gap, 500); // huge clamped down
+    }
+
+    #[test]
+    fn workspace_wallpaper_slots_preserve_empty_positions() {
+        let c = parse_text("workspace_wallpapers = one.jpg ;; ;; three.png");
+        assert_eq!(c.workspace_wallpapers, vec!["one.jpg", "", "three.png"]);
     }
 
     #[test]
@@ -1014,7 +1792,10 @@ mod tests {
     #[test]
     fn parse_into_bar_style_clamped() {
         let mut c = Config::defaults();
-        parse_into(&mut c, "floating = yes\nmargin = 999\nradius = -3\nautohide = on");
+        parse_into(
+            &mut c,
+            "floating = yes\nmargin = 999\nradius = -3\nautohide = on",
+        );
         assert!(c.bar_floating);
         assert_eq!(c.bar_margin, 200);
         assert_eq!(c.bar_radius, 0);

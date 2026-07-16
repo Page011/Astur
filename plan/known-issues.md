@@ -2,6 +2,16 @@
 
 Dated. Newest on top. "Don't use X because Y" goes here with the reason.
 
+## 2026-07-17 — RESOLVED: Settings click silently did nothing after WM-only build
+
+`cargo run/build --release --bin astur` builds only `astur.exe`; it does not build
+the separate `astur-settings` workspace crate. `tray_open_settings` also ignored the
+`ShellExecuteW` result, so a missing companion produced no feedback. Full source build
+is now documented as `cargo build --release` (both exes), and launch uses `Command::spawn`
+with an actionable error dialog on failure. Installer already bundles both siblings.
+Built-in popup icons now use Lucide-derived 24x24 geometry through allocation-free GDI
+vector primitives; no SVG runtime or icon-font dependency added.
+
 ## 2026-07-13 — RESOLVED: theme-vs-custom colours — heuristics dead, tri-state shipped
 
 Two heuristics for "did the user customise this bar colour?" failed in a row:
@@ -402,3 +412,15 @@ Anything added to `mouse_proc`/`keyboard_proc` is multiplied by the entire OS in
 rate. No locks without an atomic guard, no allocation, no `SetWindowPos`. If you
 must do work, push a `Cmd` and let the manager/worker handle it. Measure before and
 after.
+## 2026-07-16 — Current limits: desktop-tool first pass
+
+- Workspace wallpaper mapping calls `SystemParametersInfoW`, so change is global even
+  in per-monitor workspace mode. `IDesktopWallpaper` needed for true per-monitor state.
+- Media widget polls titles from known player windows. No WinRT media-session controls.
+- Persisted state intentionally stores active workspace indexes and launcher MRU only;
+  HWNDs cannot safely survive process restart, so window assignments are not restored.
+- Alt+Tab replacement is title/icon based; DWM live thumbnails remain backlog.
+- Clipboard history is text-only and process-memory-only. This avoids a sensitive
+  plaintext history file by default.
+- IPC worker blocks on one local named-pipe connection. Disabling or renaming pipe takes
+  effect after current wait/connection completes; no network/remote listener exists.

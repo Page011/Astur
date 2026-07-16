@@ -19,16 +19,29 @@ jobs:
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Build release binary
-        run: cargo build --release -p astur
+      # Builds the whole workspace: astur.exe (window manager) + astur-settings.exe
+      # (settings GUI). The installer bundles both; the portable exe is astur.exe.
+      - name: Build release binaries
+        run: cargo build --release
 
-      - name: Stage artifact
+      - name: Stage portable artifact
         run: Copy-Item target\release\astur.exe astur-windows-x64.exe
+
+      # Inno Setup is not preinstalled on the runner; Chocolatey is.
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # astur.iss reads its own version and emits dist\Astur-Setup-<version>.exe.
+      # Needs the prior cargo build so target\release\*.exe exist.
+      - name: Build installer
+        run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\astur.iss'
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: astur-windows-x64.exe
+          files: |
+            astur-windows-x64.exe
+            dist/Astur-Setup-*.exe
           generate_release_notes: true
           # Hyphenated semver tags (v2.0.0-alpha.1, -beta, -rc) publish as pre-releases.
           prerelease: ${{ contains(github.ref_name, '-') }}

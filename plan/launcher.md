@@ -1,4 +1,4 @@
-# Launcher — app picker + (planned) file search
+# Launcher — customizable app, file, window, clipboard, and emoji picker
 
 Omarchy/rofi-style centered picker. Type to fuzzy-filter, arrows to select,
 Enter to launch, Esc to dismiss. Trigger: **Alt+Space** (Left Alt is already
@@ -13,9 +13,25 @@ Win+Space, which is the Windows layout toggle).
 | v2 | + shell `AppsFolder` (UWP/system apps: Notepad, Calculator, …), per-row icons, click-outside-to-dismiss | **SHIPPED 2026-06-26** |
 | v4 | Tab **wide column view** (Modified/Size/Path), full **mouse support** (hover/click/wheel), icon pipeline v3 | **SHIPPED 2026-07-10** |
 | v5 | **inline calculator** + **web-search fallback** rows; double-buffered paint (no icon flash on scroll); theme-aware palette | **SHIPPED 2026-07-13** |
-| later | Windows Search index (files, Everything-style) | planned (below) |
-| next | clipboard-history prefix, emoji-picker prefix (queued — `roadmap-v2.md`) | queued |
-| maybe | open-window switcher (focus a managed window) | backlog |
+| v3 | Windows Search index, open/reveal, async file icons | **SHIPPED 2026-06-27** |
+| v6 | Custom sources/entries/style/icons/MRU; window/clipboard/emoji providers; Alt+Tab mode | **SHIPPED 2026-07-16** |
+
+### v6 as built (2026-07-16)
+
+- Full popup configuration: font/weight, dimensions, rows, padding, icon size,
+  radius/border/opacity, placement, theme colours, maximum results, file scope and
+  path-fragment exclusions.
+- Providers independently gated: installed/custom apps, indexed files, calculator,
+  web fallback, managed windows, runtime clipboard history, curated emoji catalog.
+  Clipboard and emoji use configurable prefixes and paste into prior foreground app.
+- Custom entries support files, URLs, `cmd:` targets, icon paths, shell targets, and
+  built-in monochrome icon names. Structured field separators can be escaped.
+- Persistent MRU ranking (when state persistence enabled), `F5` refresh, and live
+  refresh after config save. Icon replacement destroys owned HICONs and rejects stale
+  worker results.
+- Optional Alt+Tab replacement reuses a window-only picker, orders managed windows by
+  foreground recency, switches hidden workspaces before activation, and commits on
+  Left-Alt release. No live DWM thumbnails yet.
 
 ### v5 as built (2026-07-13)
 
@@ -130,9 +146,9 @@ Built as designed. As-built notes:
   120ms, bails if `SEARCH_GEN` moved on, runs the query, and bails again if superseded
   before applying — so a fast typist never backs up the index. `st.files` cleared on
   each keystroke so stale results never linger.
-- **Results**: merged into the picker as `Hit::App | Hit::File` — apps (instant,
-  fuzzy) first, then up to 40 file hits. File rows show the filename (+ a small marker;
-  per-extension shell icons are a backlog item).
+- **Results**: merged into the picker as provider-tagged hits — apps (instant,
+  fuzzy/MRU) first, then up to configured result limit. File icons resolve through
+  same async shell-icon workers as apps and stale generations are discarded.
 - **Tab** toggles a detail footer for the selected file: full path, `Modified`
   (formatted from the automation date), `Size` (human-readable), and the key hints.
 - **Enter** opens the file; **Shift+Enter** opens its containing folder

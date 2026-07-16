@@ -107,6 +107,88 @@ pub(crate) fn dwindle_layout(
     out
 }
 
+/// Equal-width columns. Useful for ultrawide monitors and predictable placement.
+pub(crate) fn columns_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
+    grid_cells(area, n, n.max(1), outer, inner)
+}
+
+/// Balanced grid using approximately square cells. Last row stretches across
+/// its available columns rather than leaving dead tiles.
+pub(crate) fn grid_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let cols = (n as f64).sqrt().ceil() as usize;
+    grid_cells(area, n, cols.max(1), outer, inner)
+}
+
+fn grid_cells(area: RECT, n: usize, cols: usize, outer: i32, inner: i32) -> Vec<RECT> {
+    let mut out = Vec::with_capacity(n);
+    let left = area.left + outer;
+    let top = area.top + outer;
+    let width = area.right - area.left - 2 * outer;
+    let height = area.bottom - area.top - 2 * outer;
+    if n == 0 || width <= 0 || height <= 0 {
+        return out;
+    }
+    let rows = n.div_ceil(cols);
+    let row_gap = fitted_gap(height, rows, inner);
+    let row_h = (height - row_gap * (rows.saturating_sub(1) as i32)) / rows as i32;
+    for row in 0..rows {
+        let start = row * cols;
+        let count = (n - start).min(cols);
+        let col_gap = fitted_gap(width, count, inner);
+        let cell_w = (width - col_gap * (count.saturating_sub(1) as i32)) / count as i32;
+        let y = top + row as i32 * (row_h + row_gap);
+        let bottom = if row + 1 == rows {
+            top + height
+        } else {
+            y + row_h
+        };
+        for col in 0..count {
+            let x = left + col as i32 * (cell_w + col_gap);
+            let right = if col + 1 == count {
+                left + width
+            } else {
+                x + cell_w
+            };
+            out.push(RECT {
+                left: x,
+                top: y,
+                right,
+                bottom,
+            });
+        }
+    }
+    out
+}
+
+fn fitted_gap(extent: i32, cells: usize, requested: i32) -> i32 {
+    if cells <= 1 {
+        return 0;
+    }
+    let gaps = (cells - 1) as i32;
+    requested.max(0).min((extent - cells as i32).max(0) / gaps)
+}
+
+/// Monocle layout: every tiled window fills the work area. Focus determines
+/// which stacked window is visible; no window is resized differently.
+pub(crate) fn monocle_layout(area: RECT, n: usize, outer: i32) -> Vec<RECT> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let rect = RECT {
+        left: area.left + outer,
+        top: area.top + outer,
+        right: area.right - outer,
+        bottom: area.bottom - outer,
+    };
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return Vec::new();
+    }
+    vec![rect; n]
+}
+
 /// Update `splits` so the dwindle window at tiled index `idx` matches the size
 /// the user dragged it to (`new`). Replays the cascade to find that window's
 /// split level + axis, then back-computes the ratio. Neighbours reflow to fill.
@@ -242,6 +324,40 @@ mod tests {
     #[test]
     fn dwindle_degenerate_area_empty() {
         assert!(dwindle_layout(r(0, 0, 5, 5), 2, 10, 0, &[]).is_empty());
+    }
+
+    #[test]
+    fn columns_split_width_and_preserve_edge() {
+        let v = columns_layout(r(0, 0, 100, 80), 3, 0, 10);
+        assert_eq!(
+            v,
+            vec![r(0, 0, 26, 80), r(36, 0, 62, 80), r(72, 0, 100, 80)]
+        );
+    }
+
+    #[test]
+    fn grid_balances_rows_and_stretches_last_row() {
+        let v = grid_layout(r(0, 0, 300, 200), 5, 0, 0);
+        assert_eq!(v.len(), 5);
+        assert_eq!(v[0], r(0, 0, 100, 100));
+        assert_eq!(v[2], r(200, 0, 300, 100));
+        assert_eq!(v[3], r(0, 100, 150, 200));
+        assert_eq!(v[4], r(150, 100, 300, 200));
+    }
+
+    #[test]
+    fn grid_clamps_gap_to_keep_cells_valid() {
+        let v = grid_layout(r(0, 0, 20, 10), 4, 0, 500);
+        assert_eq!(v.len(), 4);
+        assert!(v.iter().all(|cell| cell.right > cell.left));
+        assert!(v.iter().all(|cell| cell.bottom > cell.top));
+    }
+
+    #[test]
+    fn monocle_repeats_full_target() {
+        let v = monocle_layout(r(0, 0, 100, 80), 3, 5);
+        assert_eq!(v, vec![r(5, 5, 95, 75); 3]);
+        assert!(monocle_layout(r(0, 0, 4, 4), 1, 3).is_empty());
     }
 
     #[test]

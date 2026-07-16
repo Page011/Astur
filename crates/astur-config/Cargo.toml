@@ -1,6 +1,6 @@
 [package]
 name = "astur-config"
-version = "2.0.0-dev"
+version = "2.1.1"
 edition = "2021"
 description = "Astur configuration parsing — shared by the WM and the settings GUI"
 license = "Apache-2.0"

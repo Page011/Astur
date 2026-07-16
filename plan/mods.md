@@ -216,7 +216,12 @@ registry.
    such a mod; store approvals as `{mod_hash: caps}` in `~/.astur/mods/consent.json`;
    re-prompt when the hash changes. Cosmetic-only mods skip this.
 
-### Tier 2 — out-of-process IPC mods (later, separate branch)
+### Tier 2 — out-of-process IPC mods (command transport shipped; events/providers later)
+
+2026-07-16: opt-in local named pipe now accepts whitelisted commands for workspace,
+layout, focus, launch, scratchpad, launcher/menu, reload, and status. Remote clients
+are rejected. Event subscriptions, capability consent, provider streaming, and a
+bundled client SDK remain later work.
 
 - **New `src/ipc.rs`**: a worker thread owning a named pipe (`\\.\pipe\astur`).
   Reads line/JSON requests → validates → `push_cmd(Cmd)`. Exposes the existing `Cmd`
