@@ -36,23 +36,22 @@ jobs:
       - name: Build installer
         run: '& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" packaging\astur.iss'
 
+      # Publish via the official gh CLI (preinstalled on the runner). softprops/
+      # action-gh-release was repeatedly getting a GitHub 500 ("Unicorn" HTML page)
+      # from the release-create API; gh uses a different client and is more robust.
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            astur-windows-x64.exe
-            dist/Astur-Setup-*.exe
-          # Explicit body. Auto-generated notes across a large tag range can 500 the
-          # release API (GitHub "Unicorn" page) and fail the publish, so don't use them.
-          body: |
-            **Astur ${{ github.ref_name }}** — fast, free, portable tiling window
-            manager for Windows 10/11.
-
-            Downloads:
-            - `astur-windows-x64.exe` — portable window manager, single exe, no installer.
-            - `Astur-Setup-*.exe` — installer bundling the window manager + Settings GUI
-              (per-user, no admin), with optional run-at-sign-in.
-
-            See the release commit for the full changelog.
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: pwsh
+        run: |
+          $files = @((Resolve-Path astur-windows-x64.exe).Path)
+          $files += (Get-ChildItem dist/Astur-Setup-*.exe).FullName
+          $notes = "**Astur $env:GITHUB_REF_NAME** - portable tiling window manager for Windows 10/11.`n`n" +
+                   "- ``astur-windows-x64.exe`` - portable window manager, single exe, no installer.`n" +
+                   "- ``Astur-Setup-*.exe`` - installer bundling the window manager + Settings GUI.`n`n" +
+                   "See the release commit for the full changelog."
+          $ghArgs = @('release','create',$env:GITHUB_REF_NAME) + $files +
+                    @('--title',"Astur $env:GITHUB_REF_NAME",'--notes',$notes)
           # Hyphenated semver tags (v2.0.0-alpha.1, -beta, -rc) publish as pre-releases.
-          prerelease: ${{ contains(github.ref_name, '-') }}
+          if ($env:GITHUB_REF_NAME -match '-') { $ghArgs += '--prerelease' }
+          gh @ghArgs
