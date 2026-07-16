@@ -5,6 +5,7 @@
 /dist/
 
 # Planning / internal docs (not for public repo)
+/plan/
 /public/
 /site/
 

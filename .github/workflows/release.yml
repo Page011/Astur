@@ -42,6 +42,17 @@ jobs:
           files: |
             astur-windows-x64.exe
             dist/Astur-Setup-*.exe
-          generate_release_notes: true
+          # Explicit body. Auto-generated notes across a large tag range can 500 the
+          # release API (GitHub "Unicorn" page) and fail the publish, so don't use them.
+          body: |
+            **Astur ${{ github.ref_name }}** — fast, free, portable tiling window
+            manager for Windows 10/11.
+
+            Downloads:
+            - `astur-windows-x64.exe` — portable window manager, single exe, no installer.
+            - `Astur-Setup-*.exe` — installer bundling the window manager + Settings GUI
+              (per-user, no admin), with optional run-at-sign-in.
+
+            See the release commit for the full changelog.
           # Hyphenated semver tags (v2.0.0-alpha.1, -beta, -rc) publish as pre-releases.
           prerelease: ${{ contains(github.ref_name, '-') }}
