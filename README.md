@@ -31,7 +31,7 @@ Astur comes in two editions from the same project:
 
 | | **Astur Lite** | **Astur** |
 |---|---|---|
-| Format | single portable `.exe`, no install | **installer** + tray app |
+| Format | single portable `.exe`, no install | **installer** + tray app; WM-only portable option |
 | Stop / control | console window (`Ctrl+C`) | **tray icon** — Settings / Quit |
 | Configuration | hand-edit `.conf` files | **settings GUI** + `.conf` |
 | RAM | ~1 MB, minimal | higher (launcher, search) |
@@ -47,12 +47,15 @@ menu, tray, and a settings GUI — with the same motion polish and core tiling.
 
 ## Install
 
-- **Astur** — download `Astur-Setup-<version>.exe` from
-  [Releases](../../releases) and run it (per-user install, no admin, optional
+- **Astur** — download `Astur-Setup-2.1.1.exe` from the
+  [latest stable release](https://github.com/Page011/Astur/releases/latest) and run it
+  (per-user install, no admin, optional
   start-on-login), or grab the portable `astur-windows-x64.exe` from the same
-  release.
+  release. The portable asset contains the full window manager but not the separate
+  `astur-settings.exe` companion; use the installer for the Settings GUI.
 - **Astur Lite** — the minimal portable build from the
-  [`lite`](https://github.com/Page011/Astur/tree/lite) branch / its release. One
+  [`lite`](https://github.com/Page011/Astur/tree/lite) branch or pinned
+  [v1.0.1 release](https://github.com/Page011/Astur/releases/tag/v1.0.1). One
   `.exe`, no install, console window.
 
 No admin required. Running as admin lets it manage elevated windows (e.g. Task
@@ -174,10 +177,11 @@ crate, no workspace).
 
 Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) that
 intercept input before it reaches any application. Left Alt is swallowed so it never
-triggers app menus or Alt shortcuts — only Astur sees it. Window moves and resizes
-are dispatched to a dedicated worker thread so the hooks never stall on a slow
-application's `SetWindowPos`. File search queries the Windows Search index off the
-input path, so typing stays responsive.
+triggers app menus or Alt shortcuts — only Astur sees it. Drag commands are queued to
+the manager; a DWM-thumbnail overlay (outline fallback) previews movement while the
+real window is committed once on release. Slow application repainting stays out of
+the per-frame input path. File search queries the Windows Search index off the input
+path, so typing stays responsive.
 
 ## Quit
 
@@ -190,13 +194,14 @@ input path, so typing stays responsive.
 |---|---|---|---|---|
 | Master-stack tiling | Yes | Yes | Yes | No (zones only) |
 | Alt-drag move/resize anywhere | Yes | No | No | No |
-| Silky smooth animations | Yes | No | No | No |
+| Animation scope | Window glide + workspace slide/spring/fade | Movement (experimental) | Window movement | No tiling animation |
 | App launcher + file search built in | Yes | No | No | No |
-| Settings GUI | Yes | No (CLI) | Partial | Yes |
-| Single portable exe option | Yes (Lite) | No | No (installer) | Part of PowerToys |
+| Settings GUI | Yes | `komorebi-gui` companion | Tray controls + config file | Yes |
+| Single portable exe option | Yes (Lite; Full WM-only option) | No (multiple binaries) | No (installer) | Part of PowerToys |
 | Virtual workspaces | Yes | Yes | Yes | Via Windows |
 | Config file required to start | No | Yes | Yes | No |
-| Language | Rust | Rust | C++ | C# |
+| Language | Rust | Rust | Rust | C++ core / C# editor |
+| Licence | Apache-2.0 | Komorebi 2.0 personal-use source licence | GPL-3.0 | MIT |
 
 See the full [comparison: Astur vs GlazeWM, komorebi & FancyZones](https://astur.app/compare).
 
@@ -225,6 +230,11 @@ menu, tray, desktop tools, rich widgets/themes/rules, IPC, persistence, and sett
 - Astur Alt+Tab replacement shows title/app-icon rows; live DWM thumbnails remain
   future work.
 - Clipboard history is text-only, memory-only, and cleared when Astur exits.
+
+## Author
+
+Astur is created and maintained by **Nigel**.
+
 ## Disclaimer
 
 Astur is an independent project, not affiliated with or endorsed by any other window
