@@ -47,7 +47,7 @@ menu, tray, and a settings GUI — with the same motion polish and core tiling.
 
 ## Install
 
-- **Astur** — download `Astur-Setup-2.1.1.exe` from the
+- **Astur** — download `Astur-Setup-2.1.2.exe` from the
   [latest stable release](https://github.com/Page011/Astur/releases/latest) and run it
   (per-user install, no admin, optional
   start-on-login), or grab the portable `astur-windows-x64.exe` from the same

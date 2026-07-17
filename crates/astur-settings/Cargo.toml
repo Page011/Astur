@@ -1,6 +1,6 @@
 [package]
 name = "astur-settings"
-version = "2.1.1"
+version = "2.1.2"
 edition = "2021"
 description = "Astur settings GUI — friendly editor for astur.conf / navbar.conf"
 license = "Apache-2.0"

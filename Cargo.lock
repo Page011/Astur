@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "astur"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "astur-config",
  "embed-resource",
@@ -221,11 +221,11 @@ dependencies = [
 
 [[package]]
 name = "astur-config"
-version = "2.1.1"
+version = "2.1.2"
 
 [[package]]
 name = "astur-settings"
-version = "2.1.1"
+version = "2.1.2"
 dependencies = [
  "astur-config",
  "eframe",
