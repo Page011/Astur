@@ -146,13 +146,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
     IsWindowVisible, KillTimer, MessageBoxW, PeekMessageW, PostMessageW, SendMessageTimeoutW,
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowLongW, SystemParametersInfoW,
-    EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND,
-    EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWLP_USERDATA,
-    GWL_EXSTYLE, GWL_STYLE, GW_OWNER, MB_ICONERROR, MB_OK, PM_REMOVE, PW_RENDERFULLCONTENT,
-    SMTO_ABORTIFHUNG, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_SETDESKWALLPAPER,
-    SPI_SETFOREGROUNDLOCKTIMEOUT, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE,
-    WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_QUERYENDSESSION, WM_TIMER, WM_USER, WS_CHILD,
+    EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_SHOW,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+    EVENT_SYSTEM_MOVESIZEEND, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, MB_ICONERROR, MB_OK,
+    PM_REMOVE, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
+    SPI_SETDESKWALLPAPER, SPI_SETFOREGROUNDLOCKTIMEOUT, SW_SHOW,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT,
+    WM_QUERYENDSESSION, WM_TIMER, WM_USER, WS_CHILD,
 };
 
 // --- tunables -------------------------------------------------------------
@@ -548,7 +549,8 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         return DefWindowProcW(h, msg, w, l);
     }
     if msg == WM_DISPLAYCHANGE {
-        // Reposition/create bars for the new monitor layout, then retile.
+        // Reconcile fullscreen monitor handles, reposition/create bars, retile.
+        seed_fullscreen_windows();
         ensure_bars();
         push_cmd(Cmd::RefreshMonitors);
     } else if msg == WM_RELOAD {
@@ -565,6 +567,10 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
                 let _ = ShowWindow(hwnd_from(b.hwnd), SW_HIDE);
             }
         }
+    } else if msg == WM_BAR_MODE_CHANGED {
+        // A maximized/fullscreen app entered or left one monitor. Rebuild only
+        // bar runtime geometry; manager/window layout must not disturb the app.
+        ensure_bars();
     }
     DefWindowProcW(h, msg, w, l)
 }
@@ -1469,6 +1475,10 @@ static BAR_MARGIN: AtomicIsize = AtomicIsize::new(8);
 static BAR_RADIUS: AtomicIsize = AtomicIsize::new(12);
 static BAR_AUTOHIDE: AtomicBool = AtomicBool::new(false);
 static BAR_WHEEL_WS: AtomicBool = AtomicBool::new(true);
+// Top-level app HWND -> HMONITOR for every visible maximized/fullscreen app.
+// Main-thread WinEvents maintain this map. Bars only read it while rebuilding,
+// never from hook or paint hot paths.
+static FULLSCREEN_WINDOWS: Mutex<Option<HashMap<isize, isize>>> = Mutex::new(None);
 
 // Hook-visible bar hit rects, lock-free (the mouse hook may not take locks).
 // Slot i is bar i's on-screen rect while it accepts wheel input; hwnd 0 = empty.
@@ -1738,6 +1748,8 @@ const WM_PILL_ANIM: u32 = WM_USER + 3;
 // Custom message from the LL mouse hook: wheel over this bar (wparam: 1=up,
 // 0=down; lparam = screen x of the cursor).
 const WM_BAR_WHEEL: u32 = WM_USER + 4;
+// Custom message to the marker window: per-monitor fullscreen bar mode changed.
+const WM_BAR_MODE_CHANGED: u32 = WM_USER + 5;
 // SetTimer id for the pill-slide animation (distinct from the clock tick).
 const PILL_TIMER_ID: usize = 2;
 // Custom message (to the marker window): config changed, rebuild bars on the
@@ -2004,34 +2016,27 @@ unsafe fn tracked_window_alive(hwnd: HWND) -> bool {
     !hwnd.0.is_null() && IsWindow(hwnd).as_bool()
 }
 
-/// Is this a normal top-level application window we should tile?
-unsafe fn is_manageable(hwnd: HWND) -> bool {
+/// Is this a visible top-level app surface (including owned presentation/game
+/// popups with no title)? Used by fullscreen detection, not tiling adoption.
+unsafe fn is_app_surface(hwnd: HWND) -> bool {
     if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() {
         return false;
     }
-    // Never manage our own windows (console, marker, bars).
+    // Never treat our own windows (console, marker, bars) as app surfaces.
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == GetCurrentProcessId() {
         return false;
     }
-    // Only true top-level roots, no owned tool/dialog windows.
+    // Only true top-level roots. Owned presentation popups remain eligible.
     if GetAncestor(hwnd, GA_ROOT) != hwnd {
         return false;
-    }
-    if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
-        if !owner.0.is_null() {
-            return false;
-        }
     }
     let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
     let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
     // Child windows, tool windows, and non-activatable windows (tooltips, OSDs,
     // the lock-screen overlay, IME candidates) are never real app windows.
     if style & WS_CHILD.0 != 0 || ex & WS_EX_TOOLWINDOW.0 != 0 || ex & WS_EX_NOACTIVATE.0 != 0 {
-        return false;
-    }
-    if GetWindowTextLengthW(hwnd) == 0 {
         return false;
     }
     // Skip cloaked windows (e.g. UWP ghost windows on other virtual desktops).
@@ -2045,11 +2050,37 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
     if cloaked != 0 {
         return false;
     }
-    // Reject known shell/desktop classes and any user-configured ignore list.
+    // Reject known shell/desktop classes.
     let class = window_class(hwnd);
     if BLOCK_CLASSES.contains(&class.as_str()) {
         return false;
     }
+    true
+}
+
+/// Is this a normal top-level application window (not shell/Astur chrome)?
+/// Ignored/floating rules are deliberately not checked: ignored games still
+/// need their monitor's navbar to auto-hide while fullscreen.
+unsafe fn is_app_window(hwnd: HWND) -> bool {
+    if !is_app_surface(hwnd) {
+        return false;
+    }
+    // Tiling adopts only unowned, titled main windows. Fullscreen detection uses
+    // is_app_surface directly so owned/no-title presentation windows still count.
+    if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
+        if !owner.0.is_null() {
+            return false;
+        }
+    }
+    GetWindowTextLengthW(hwnd) > 0
+}
+
+/// Is this a normal top-level application window we should tile?
+unsafe fn is_manageable(hwnd: HWND) -> bool {
+    if !is_app_window(hwnd) {
+        return false;
+    }
+    let class = window_class(hwnd);
     if IGNORE_CLASSES
         .lock()
         .unwrap()
@@ -2059,6 +2090,106 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
         return false;
     }
     !match_window_rule(hwnd).is_some_and(|r| r.action == RuleAction::Ignore)
+}
+
+const FULLSCREEN_EDGE_TOLERANCE: i32 = 2;
+
+/// Borderless fullscreen windows normally match rcMonitor exactly; tolerate a
+/// tiny DWM border discrepancy. Maximized windows are detected separately via
+/// IsZoomed because their rect stops at the Windows taskbar work area.
+fn rect_covers_monitor(window: RECT, monitor: RECT) -> bool {
+    window.left <= monitor.left + FULLSCREEN_EDGE_TOLERANCE
+        && window.top <= monitor.top + FULLSCREEN_EDGE_TOLERANCE
+        && window.right >= monitor.right - FULLSCREEN_EDGE_TOLERANCE
+        && window.bottom >= monitor.bottom - FULLSCREEN_EDGE_TOLERANCE
+}
+
+/// Monitor occupied by this visible maximized/fullscreen app, if any.
+unsafe fn fullscreen_monitor(hwnd: HWND) -> Option<isize> {
+    if !is_app_surface(hwnd) || IsIconic(hwnd).as_bool() {
+        return None;
+    }
+    let hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+        return None;
+    }
+    let mut rect = RECT::default();
+    if GetWindowRect(hwnd, &mut rect).is_err() {
+        return None;
+    }
+    (IsZoomed(hwnd).as_bool() || rect_covers_monitor(rect, mi.rcMonitor)).then_some(hmon.0 as isize)
+}
+
+fn fullscreen_window_tracked(hwnd: isize) -> bool {
+    FULLSCREEN_WINDOWS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|m| m.contains_key(&hwnd))
+}
+
+/// Refresh one app's fullscreen membership. True only on an actual transition,
+/// so resize WinEvents never flood navbar rebuild messages.
+unsafe fn refresh_fullscreen_window(hwnd: HWND) -> bool {
+    let h = hwnd.0 as isize;
+    let monitor = fullscreen_monitor(hwnd);
+    let mut guard = FULLSCREEN_WINDOWS.lock().unwrap();
+    let windows = guard.get_or_insert_with(HashMap::new);
+    if windows.get(&h).copied() == monitor {
+        return false;
+    }
+    windows.remove(&h);
+    if let Some(hmon) = monitor {
+        windows.insert(h, hmon);
+    }
+    true
+}
+
+fn remove_fullscreen_window(hwnd: isize) -> bool {
+    FULLSCREEN_WINDOWS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|m| m.remove(&hwnd))
+        .is_some()
+}
+
+unsafe extern "system" fn fullscreen_enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let windows = &mut *(lparam.0 as *mut HashMap<isize, isize>);
+    if let Some(hmon) = fullscreen_monitor(hwnd) {
+        windows.insert(hwnd.0 as isize, hmon);
+    }
+    BOOL(1)
+}
+
+/// One-time/display-change reconciliation catches fullscreen apps already open
+/// before Astur starts and drops stale monitor handles after topology changes.
+unsafe fn seed_fullscreen_windows() {
+    let mut windows = HashMap::new();
+    let _ = EnumWindows(
+        Some(fullscreen_enum_proc),
+        LPARAM(&mut windows as *mut HashMap<isize, isize> as isize),
+    );
+    *FULLSCREEN_WINDOWS.lock().unwrap() = Some(windows);
+}
+
+fn monitor_has_fullscreen(hmon: isize) -> bool {
+    FULLSCREEN_WINDOWS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|m| m.values().any(|&monitor| monitor == hmon))
+}
+
+unsafe fn request_bar_mode_refresh() {
+    let marker = MARKER_HWND.load(Ordering::Relaxed);
+    if marker != 0 {
+        let _ = PostMessageW(hwnd_from(marker), WM_BAR_MODE_CHANGED, WPARAM(0), LPARAM(0));
+    }
 }
 
 /// Should a freshly-managed window start floating? Rich rules take precedence
@@ -5085,7 +5216,6 @@ unsafe fn ensure_bars() {
         0
     };
     let radius = BAR_RADIUS.load(Ordering::Relaxed) as i32;
-    let autohide = BAR_AUTOHIDE.load(Ordering::Relaxed);
     let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
 
     let mut raw: Vec<(isize, RECT)> = Vec::new();
@@ -5098,6 +5228,8 @@ unsafe fn ensure_bars() {
 
     let mut bars = BARS.lock().unwrap();
     for &(hmon, rcm) in &raw {
+        // Configured auto-hide stays global. Fullscreen override is per monitor.
+        let autohide = BAR_AUTOHIDE.load(Ordering::Relaxed) || monitor_has_fullscreen(hmon);
         let x = rcm.left + margin;
         let w = (rcm.right - rcm.left) - margin * 2;
         let y = if bottom {
@@ -5182,23 +5314,61 @@ unsafe fn ensure_bars() {
             } else {
                 rcm.top - height - 2
             };
-            AH_BARS
-                .lock()
-                .unwrap()
-                .get_or_insert_with(HashMap::new)
-                .insert(
-                    hb.0 as isize,
-                    AhBar {
-                        x,
-                        w,
-                        h: height,
-                        y_shown: y,
-                        y_hidden,
-                        y_cur: y as f64,
-                        shown: true,
-                        strip,
-                    },
+            let key = hb.0 as isize;
+            let (y_cur, shown) = {
+                let mut guard = AH_BARS.lock().unwrap();
+                let states = guard.get_or_insert_with(HashMap::new);
+                let state = states.entry(key).or_insert(AhBar {
+                    x,
+                    w,
+                    h: height,
+                    y_shown: y,
+                    y_hidden,
+                    y_cur: y as f64,
+                    shown: true,
+                    strip,
+                });
+                // Preserve slide progress when another monitor changes mode or
+                // config/display geometry rebuilds bars.
+                let old_span = state.y_hidden - state.y_shown;
+                let progress = if old_span == 0 {
+                    0.0
+                } else {
+                    ((state.y_cur - state.y_shown as f64) / old_span as f64).clamp(0.0, 1.0)
+                };
+                state.x = x;
+                state.w = w;
+                state.h = height;
+                state.y_shown = y;
+                state.y_hidden = y_hidden;
+                state.y_cur = y as f64 + progress * (y_hidden - y) as f64;
+                state.strip = strip;
+                (state.y_cur.round() as i32, state.shown)
+            };
+            // ensure_bars first places existing windows at shown geometry; restore
+            // preserved hidden/mid-slide position before returning to message pump.
+            let _ = SetWindowPos(
+                hb,
+                HWND_TOPMOST,
+                x,
+                y_cur,
+                w,
+                height,
+                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+            );
+            if shown {
+                barhit_publish(
+                    key,
+                    Some(RECT {
+                        left: x,
+                        top: y,
+                        right: x + w,
+                        bottom: y + height,
+                    }),
                 );
+            } else {
+                barhit_publish(key, None);
+            }
             SetTimer(hb, AH_TIMER_ID, 30, None);
         } else {
             if let Some(m) = AH_BARS.lock().unwrap().as_mut() {
@@ -6717,9 +6887,31 @@ unsafe extern "system" fn win_event_proc(
     if id_object != 0 || id_child != 0 || hwnd.0.is_null() {
         return;
     }
+    let h = hwnd.0 as isize;
+    let tracked_fullscreen = fullscreen_window_tracked(h);
+    let fullscreen_changed = match event {
+        // Window is definitely leaving visible fullscreen state. Remove directly:
+        // EVENT callbacks may run before IsIconic/IsWindowVisible settles.
+        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART
+            if tracked_fullscreen =>
+        {
+            remove_fullscreen_window(h)
+        }
+        // F11/maximize geometry changes arrive here. Ignore background resize
+        // noise unless window is foreground or already tracked fullscreen.
+        EVENT_OBJECT_LOCATIONCHANGE if GetForegroundWindow() == hwnd || tracked_fullscreen => {
+            refresh_fullscreen_window(hwnd)
+        }
+        EVENT_OBJECT_SHOW | EVENT_SYSTEM_FOREGROUND | EVENT_SYSTEM_MINIMIZEEND => {
+            refresh_fullscreen_window(hwnd)
+        }
+        _ => false,
+    };
+    if fullscreen_changed {
+        request_bar_mode_refresh();
+    }
     match event {
         EVENT_OBJECT_SHOW => {
-            let h = hwnd.0 as isize;
             // Someone made it visible — whoever hid it, the marker is stale now
             // (and a later app-driven hide must untrack it again).
             unmark_hidden_by_us(h);
@@ -6730,7 +6922,6 @@ unsafe extern "system" fn win_event_proc(
         EVENT_SYSTEM_FOREGROUND => {
             // Foreground events refire for the same window; collapse repeats so
             // the manager doesn't re-run locate + styling for no change.
-            let h = hwnd.0 as isize;
             if LAST_FG.swap(h, Ordering::Relaxed) == h {
                 return;
             }
@@ -6744,7 +6935,6 @@ unsafe extern "system" fn win_event_proc(
             // Astur performed for a workspace switch are marked in HIDDEN_BY_US;
             // SUPPRESS alone misses the tail of the batch (async delivery), and
             // untracking those orphaned live windows on hidden workspaces.
-            let h = hwnd.0 as isize;
             if !SUPPRESS.load(Ordering::Relaxed) && !was_hidden_by_us(h) {
                 push_cmd(Cmd::Remove(h));
             }
@@ -6752,7 +6942,6 @@ unsafe extern "system" fn win_event_proc(
         EVENT_OBJECT_DESTROY => {
             // A destroyed window is gone for real — always untrack (a Remove for
             // an untracked hwnd is a no-op, so this is safe even mid-switch).
-            let h = hwnd.0 as isize;
             unmark_hidden_by_us(h);
             push_cmd(Cmd::Remove(h));
         }
@@ -11000,6 +11189,10 @@ fn main() {
         .expect("CreateWindowExW failed");
         THUMB_HWND.store(thumb.0 as isize, Ordering::Relaxed);
 
+        // Seed per-monitor fullscreen state before first bar placement so apps
+        // already maximized/fullscreen when Astur starts never get covered.
+        seed_fullscreen_windows();
+
         // Status bar on every monitor (waybar-style). Register the class once,
         // build the font, then create a bar window per monitor.
         if cfg.bar_enabled && cfg.bar_height > 0 {
@@ -11048,6 +11241,18 @@ fn main() {
         let _ = SetWinEventHook(
             EVENT_OBJECT_SHOW,
             EVENT_OBJECT_SHOW,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        // F11/borderless fullscreen and maximize/restore both change top-level
+        // geometry. Callback filters this noisy event to foreground or already-
+        // fullscreen windows before doing any work.
+        let _ = SetWinEventHook(
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_LOCATIONCHANGE,
             None,
             Some(win_event_proc),
             0,
@@ -11162,5 +11367,44 @@ fn main() {
         let _ = UnhookWindowsHookEx(kbd_hook);
         let _ = UnhookWindowsHookEx(mouse_hook);
         let _ = windows::Win32::Media::timeEndPeriod(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monitor_cover_requires_all_four_edges() {
+        let monitor = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1080,
+        };
+        let exact = monitor;
+        let dwm_tolerance = RECT {
+            left: -1918,
+            top: 2,
+            right: -2,
+            bottom: 1078,
+        };
+        let navbar_reserved = RECT {
+            left: -1920,
+            top: 32,
+            right: 0,
+            bottom: 1080,
+        };
+        let taskbar_reserved = RECT {
+            left: -1920,
+            top: 0,
+            right: 0,
+            bottom: 1040,
+        };
+
+        assert!(rect_covers_monitor(exact, monitor));
+        assert!(rect_covers_monitor(dwm_tolerance, monitor));
+        assert!(!rect_covers_monitor(navbar_reserved, monitor));
+        assert!(!rect_covers_monitor(taskbar_reserved, monitor));
     }
 }
