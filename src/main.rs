@@ -278,14 +278,38 @@ unsafe fn is_compound_modifier_down() -> bool {
         || vk_down(VK_RCONTROL)
 }
 
-#[inline]
-unsafe fn left_alt_down() -> bool {
-    if is_compound_modifier_down() {
+/// Check if the currently focused foreground window belongs to a class
+/// configured for Alt passthrough (e.g. Emacs, where Alt acts as Meta).
+unsafe fn is_passthrough_foreground() -> bool {
+    let fg = GetForegroundWindow();
+    if fg.0.is_null() {
         return false;
     }
-    // Trust the hook flag, but fall back to the live key state so a missed
-    // key-down (e.g. Alt held before the hook saw it) can't wedge the modifier.
-    ALT_DOWN.load(Ordering::Relaxed) || vk_down(VK_LMENU)
+    let root = GetAncestor(fg, GA_ROOT);
+    let target = if root.0.is_null() { fg } else { root };
+    let class = window_class(target);
+    if class.is_empty() {
+        return false;
+    }
+    PASSTHROUGH_CLASSES
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(&class))
+}
+
+#[inline]
+unsafe fn left_alt_down() -> bool {
+    let alt_down = ALT_DOWN.load(Ordering::Relaxed) || vk_down(VK_LMENU);
+    if MOD_WIN_ALT.load(Ordering::Relaxed) {
+        let win_down = vk_down(VK_LWIN) || vk_down(VK_RWIN);
+        win_down && alt_down
+    } else {
+        if is_compound_modifier_down() {
+            return false;
+        }
+        alt_down
+    }
 }
 
 #[inline]
@@ -358,71 +382,104 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 PRESSED[kb.vkCode as usize].store(false, Ordering::Relaxed);
             }
 
-            // If Left Alt was held (claimed by Astur) and the user presses Win or Ctrl,
-            // transition out of the WM modifier state so compound shortcuts (e.g. Win+Alt+Space,
-            // Ctrl+Alt+...) pass cleanly to the system and applications.
-            if down && ALT_DOWN.load(Ordering::Relaxed) {
-                if kb.vkCode == VK_LWIN.0 as u32
-                    || kb.vkCode == VK_RWIN.0 as u32
-                    || kb.vkCode == VK_CONTROL.0 as u32
-                    || kb.vkCode == VK_LCONTROL.0 as u32
-                    || kb.vkCode == VK_RCONTROL.0 as u32
-                {
-                    if ALT_DOWN.swap(false, Ordering::Relaxed) {
-                        if FAKE_ALT.swap(false, Ordering::Relaxed) {
-                            inject_key(VK_MENU, true);
-                        }
-                        inject_key(VK_LMENU, false);
-                    }
-                    return CallNextHookEx(None, code, wparam, lparam);
-                }
-            }
+            let win_alt_mode = MOD_WIN_ALT.load(Ordering::Relaxed);
 
-            if kb.vkCode == VK_LMENU.0 as u32 {
-                if down {
-                    // Do not claim Left Alt if a compound modifier (Win or Ctrl) is already held.
-                    if is_compound_modifier_down() {
+            if !win_alt_mode {
+                // Classic Alt mode:
+                // If Left Alt was held (claimed by Astur) and the user presses Win or Ctrl,
+                // transition out of the WM modifier state so compound shortcuts (e.g. Win+Alt+Space,
+                // Ctrl+Alt+...) pass cleanly to the system and applications.
+                if down && ALT_DOWN.load(Ordering::Relaxed) {
+                    if kb.vkCode == VK_LWIN.0 as u32
+                        || kb.vkCode == VK_RWIN.0 as u32
+                        || kb.vkCode == VK_CONTROL.0 as u32
+                        || kb.vkCode == VK_LCONTROL.0 as u32
+                        || kb.vkCode == VK_RCONTROL.0 as u32
+                    {
+                        if ALT_DOWN.swap(false, Ordering::Relaxed) {
+                            if FAKE_ALT.swap(false, Ordering::Relaxed) {
+                                inject_key(VK_MENU, true);
+                            }
+                            inject_key(VK_LMENU, false);
+                        }
                         return CallNextHookEx(None, code, wparam, lparam);
                     }
-                    ALT_DOWN.store(true, Ordering::Relaxed);
-                    return LRESULT(1); // never let apps see Left Alt
-                } else if up {
-                    // Only swallow keyup if Astur claimed the corresponding keydown.
-                    if ALT_DOWN.swap(false, Ordering::Relaxed) {
-                        // Release the synthetic Alt so the task switcher commits.
-                        if FAKE_ALT.swap(false, Ordering::Relaxed) {
-                            inject_key(VK_MENU, true);
+                }
+
+                if kb.vkCode == VK_LMENU.0 as u32 {
+                    if down {
+                        // Do not claim Left Alt if a compound modifier (Win or Ctrl) is already held
+                        // OR if the active window is configured for Alt passthrough (e.g. Emacs Meta).
+                        if is_compound_modifier_down() || is_passthrough_foreground() {
+                            return CallNextHookEx(None, code, wparam, lparam);
+                        }
+                        ALT_DOWN.store(true, Ordering::Relaxed);
+                        return LRESULT(1); // never let apps see Left Alt
+                    } else if up {
+                        // Only swallow keyup if Astur claimed the corresponding keydown.
+                        if ALT_DOWN.swap(false, Ordering::Relaxed) {
+                            // Release the synthetic Alt so the task switcher commits.
+                            if FAKE_ALT.swap(false, Ordering::Relaxed) {
+                                inject_key(VK_MENU, true);
+                            }
+                            return LRESULT(1);
+                        }
+                        return CallNextHookEx(None, code, wparam, lparam);
+                    }
+                }
+
+                // Alt+Tab (and Alt+Shift+Tab): drive the switcher with injected keys
+                // and swallow the physical Tab so it isn't counted twice.
+                if kb.vkCode == VK_TAB.0 as u32 && ALT_DOWN.load(Ordering::Relaxed) && !is_compound_modifier_down() {
+                    if down {
+                        if !FAKE_ALT.swap(true, Ordering::Relaxed) {
+                            inject_key(VK_MENU, false);
+                        }
+                        inject_key(VK_TAB, false);
+                        inject_key(VK_TAB, true);
+                    }
+                    return LRESULT(1);
+                }
+
+                // Tiling hotkeys: Alt + key. Swallowed from apps (Alt is reserved).
+                if down && ALT_DOWN.load(Ordering::Relaxed) && !is_compound_modifier_down() {
+                    if is_passthrough_foreground() {
+                        // Focus transitioned to a passthrough window while Alt was held.
+                        // Yield Left Alt to the application immediately.
+                        ALT_DOWN.store(false, Ordering::Relaxed);
+                        inject_key(VK_LMENU, false);
+                        return CallNextHookEx(None, code, wparam, lparam);
+                    }
+                    let shift = vk_down(VK_SHIFT);
+                    if let Some(cmd) = resolve_hotkey(kb.vkCode, shift) {
+                        let vk = kb.vkCode as usize;
+                        // swap(true): push only on the first down (debounce auto-repeat),
+                        // re-armed by the key-up store above. Lockless on the hot path.
+                        if vk < 256 && !PRESSED[vk].swap(true, Ordering::Relaxed) {
+                            push_cmd(cmd);
                         }
                         return LRESULT(1);
                     }
-                    return CallNextHookEx(None, code, wparam, lparam);
                 }
-            }
-
-            // Alt+Tab (and Alt+Shift+Tab): drive the switcher with injected keys
-            // and swallow the physical Tab so it isn't counted twice.
-            if kb.vkCode == VK_TAB.0 as u32 && ALT_DOWN.load(Ordering::Relaxed) && !is_compound_modifier_down() {
+            } else {
+                // Win + Alt mode:
+                // Neither Win nor Left Alt is swallowed when pressed alone or together.
+                // An Astur hotkey is triggered when BOTH Win and Left Alt are held down
+                // (and Ctrl is not held), and the key is an Astur binding.
                 if down {
-                    if !FAKE_ALT.swap(true, Ordering::Relaxed) {
-                        inject_key(VK_MENU, false);
+                    let win_down = vk_down(VK_LWIN) || vk_down(VK_RWIN);
+                    let alt_down = vk_down(VK_LMENU);
+                    let ctrl_down = vk_down(VK_CONTROL) || vk_down(VK_LCONTROL) || vk_down(VK_RCONTROL);
+                    if win_down && alt_down && !ctrl_down {
+                        let shift = vk_down(VK_SHIFT);
+                        if let Some(cmd) = resolve_hotkey(kb.vkCode, shift) {
+                            let vk = kb.vkCode as usize;
+                            if vk < 256 && !PRESSED[vk].swap(true, Ordering::Relaxed) {
+                                push_cmd(cmd);
+                            }
+                            return LRESULT(1); // swallow the hotkey
+                        }
                     }
-                    inject_key(VK_TAB, false);
-                    inject_key(VK_TAB, true);
-                }
-                return LRESULT(1);
-            }
-
-            // Tiling hotkeys: Alt + key. Swallowed from apps (Alt is reserved).
-            if down && ALT_DOWN.load(Ordering::Relaxed) && !is_compound_modifier_down() {
-                let shift = vk_down(VK_SHIFT);
-                if let Some(cmd) = resolve_hotkey(kb.vkCode, shift) {
-                    let vk = kb.vkCode as usize;
-                    // swap(true): push only on the first down (debounce auto-repeat),
-                    // re-armed by the key-up store above. Lockless on the hot path.
-                    if vk < 256 && !PRESSED[vk].swap(true, Ordering::Relaxed) {
-                        push_cmd(cmd);
-                    }
-                    return LRESULT(1);
                 }
             }
         }
@@ -775,13 +832,15 @@ static MANAGED: Mutex<Vec<isize>> = Mutex::new(Vec::new());
 static INDEX: Mutex<Option<HashMap<isize, (usize, usize)>>> = Mutex::new(None);
 // Mirror of cfg.focus_follows_mouse readable by the poll thread without the cfg.
 static FOLLOW_MOUSE: AtomicBool = AtomicBool::new(false);
+// True if modifier is configured as "win_alt" (Win + Left Alt).
+static MOD_WIN_ALT: AtomicBool = AtomicBool::new(false);
 // Last window seen as foreground, to collapse duplicate foreground events.
 static LAST_FG: AtomicIsize = AtomicIsize::new(0);
 // Config-driven window-class filters, populated once at startup so the hooks and
 // is_manageable can read them without threading the whole Config through.
 static IGNORE_CLASSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static FLOAT_CLASSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
-// VK code per workspace (index = workspace), read by the keyboard hook.
+static PASSTHROUGH_CLASSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 static WORKSPACE_KEYS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// Rebindable single-letter hotkeys (config keys `key_*`); defaults match the
@@ -4256,8 +4315,10 @@ fn config_watcher() {
         let cfg = load_config();
         // Statics the hooks/workers read directly.
         FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
+        MOD_WIN_ALT.store(cfg.modifier.eq_ignore_ascii_case("win_alt"), Ordering::Relaxed);
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
+        *PASSTHROUGH_CLASSES.lock().unwrap() = cfg.passthrough_classes.clone();
         *WORKSPACE_KEYS.lock().unwrap() = cfg.workspace_keys.clone();
         {
             let mut hk = HOTKEYS.lock().unwrap();
@@ -4480,8 +4541,10 @@ fn main() {
         // share the exact same settings.
         let cfg = load_config();
         FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
+        MOD_WIN_ALT.store(cfg.modifier.eq_ignore_ascii_case("win_alt"), Ordering::Relaxed);
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
+        *PASSTHROUGH_CLASSES.lock().unwrap() = cfg.passthrough_classes.clone();
         *WORKSPACE_KEYS.lock().unwrap() = cfg.workspace_keys.clone();
         {
             let mut hk = HOTKEYS.lock().unwrap();

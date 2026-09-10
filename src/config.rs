@@ -48,6 +48,8 @@ pub(crate) struct Config {
     pub(crate) bar_show_battery: bool,     // show battery %
     pub(crate) ignore_classes: Vec<String>, // window classes never tiled/managed
     pub(crate) float_classes: Vec<String>,   // window classes managed but auto-floated
+    pub(crate) passthrough_classes: Vec<String>, // window classes that bypass Left Alt reservation (e.g. Emacs)
+    pub(crate) modifier: String,           // Astur modifier: "alt" (default) or "win_alt"
     pub(crate) key_focus_next: u32,        // Alt+<key> focus next window in the stack (default J)
     pub(crate) key_focus_prev: u32,        // Alt+<key> focus previous window in the stack (default K)
     pub(crate) key_shrink_master: u32,     // Alt+<key> shrink the master area (default H)
@@ -105,6 +107,8 @@ impl Config {
             bar_show_battery: true,
             ignore_classes: Vec::new(),
             float_classes: Vec::new(),
+            passthrough_classes: vec!["Emacs".to_string()],
+            modifier: "alt".to_string(),
             key_focus_next: 0x4A,     // J
             key_focus_prev: 0x4B,     // K
             key_shrink_master: 0x48,  // H
@@ -251,6 +255,10 @@ ignore_classes =
 # Manage but always float these (let the app place them; don't tile).
 # Example: float_classes = #32770, MsiDialogCloseClass
 float_classes =
+# Bypass Astur's Left Alt reservation for these window classes. When focused,
+# all Left Alt keys pass straight through to the app (essential for Emacs Meta).
+# Example: passthrough_classes = Emacs
+passthrough_classes = Emacs
 
 # ---------------------------------------------------------------------------
 # Launchers
@@ -264,10 +272,18 @@ terminal = wt.exe
 browser =
 
 # ============================================================================
-# Hotkeys (LEFT ALT is the modifier)
+# Hotkeys
 # ============================================================================
-#   Alt + left-drag      move window under cursor (drops back into the tiling)
-#   Alt + right-drag     resize nearest corner (red bracket marker)
+# Modifier key for Astur window management (drag move/resize, tiling, hotkeys).
+#   alt     = Left Alt is reserved by Astur (default). Apps never see Left Alt.
+#   win_alt = Win + Left Alt together. Leaves plain Left Alt 100% free for
+#             Emacs Meta and apps, leaves plain Win 100% free for Windows
+#             shortcuts, and lets you manage windows from anywhere.
+# values: alt | win_alt
+modifier = alt
+#
+#   [Mod] + left-drag      move window under cursor (drops back into the tiling)
+#   [Mod] + right-drag     resize nearest corner (red bracket marker)
 #   Alt+T                toggle tiling on/off (floating mode; workspaces kept)
 #   Alt+J / Alt+K        focus next / previous window in the stack
 #   Alt+Shift+J / K      swap window order in the stack
@@ -538,6 +554,8 @@ fn parse_into(c: &mut Config, text: &str) {
             "workspace_slide" => c.workspace_slide = parse_bool(v),
             "ignore_classes" => c.ignore_classes = parse_list(v),
             "float_classes" => c.float_classes = parse_list(v),
+            "passthrough_classes" => c.passthrough_classes = parse_list(v),
+            "modifier" => c.modifier = v.to_ascii_lowercase(),
             "key_focus_next" => {
                 if let Some(k) = key_to_vk(v) {
                     c.key_focus_next = k;
@@ -734,5 +752,24 @@ mod tests {
         assert!(!c.bar_autohide);
         assert_eq!(c.bar_autohide_delay, 2500);
         assert_eq!(c.bar_autohide_fade_ms, 0);
+    }
+
+    #[test]
+    fn parse_into_passthrough_classes() {
+        let mut c = Config::defaults();
+        assert_eq!(c.passthrough_classes, vec!["Emacs".to_string()]);
+        parse_into(&mut c, "passthrough_classes = Emacs, Ghostty, Alacritty");
+        assert_eq!(
+            c.passthrough_classes,
+            vec!["Emacs".to_string(), "Ghostty".to_string(), "Alacritty".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_into_modifier() {
+        let mut c = Config::defaults();
+        assert_eq!(c.modifier, "alt");
+        parse_into(&mut c, "modifier = win_alt");
+        assert_eq!(c.modifier, "win_alt");
     }
 }

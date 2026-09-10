@@ -85,8 +85,9 @@ fully commented and **hot-reloaded on save**:
 
 - **`astur.conf`** — window manager: workspace mode/count, layout, gaps,
   master ratio, borders, dimming, focus-follows-mouse, cursor warping,
-  animations (`animations`, `animation_ms`), launchers, per-app window rules
-  (`ignore_classes` / `float_classes`), workspace keys, and the rebindable
+  animations (`animations`, `animation_ms`), modifier (`modifier = alt` or `win_alt`),
+  launchers, per-app window rules
+  (`ignore_classes` / `float_classes` / `passthrough_classes`), workspace keys, and the rebindable
   letter hotkeys.
 - **`navbar.conf`** — the status bar (see below).
 
