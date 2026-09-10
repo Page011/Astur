@@ -27,6 +27,7 @@ pub(crate) struct Config {
     pub(crate) bar_autohide: bool,         // autohide the bar (reveals on ws/window switch or hover)
     pub(crate) bar_autohide_delay: u64,    // ms the bar remains visible before hiding
     pub(crate) bar_autohide_fade_ms: i32,  // fade in/out animation duration in ms (0 = disable fade)
+    pub(crate) bar_autohide_window_switch: bool, // reveal the bar when switching windows
     pub(crate) bar_height: i32,            // bar thickness in px (work area is reserved for it)
     pub(crate) bar_bottom: bool,           // dock the bar at the bottom instead of the top
     pub(crate) bar_font_size: i32,         // text height in px; 0 = auto from bar_height
@@ -86,6 +87,7 @@ impl Config {
             bar_autohide: false,
             bar_autohide_delay: 3000,
             bar_autohide_fade_ms: 150,
+            bar_autohide_window_switch: false,
             bar_height: 28,
             bar_bottom: false,
             bar_font_size: 0,
@@ -284,22 +286,22 @@ modifier = alt
 #
 #   [Mod] + left-drag      move window under cursor (drops back into the tiling)
 #   [Mod] + right-drag     resize nearest corner (red bracket marker)
-#   Alt+T                toggle tiling on/off (floating mode; workspaces kept)
-#   Alt+J / Alt+K        focus next / previous window in the stack
-#   Alt+Shift+J / K      swap window order in the stack
-#   Alt+arrows           focus window by direction (cursor follows)
-#   Alt+Shift+arrows     move window by direction (across monitors)
-#   Alt+M                promote focused window to master
-#   Alt+H / Alt+L        master layout: shrink / grow the master column;
-#                        dwindle layout: shrink / grow the focused window's split
-#   Alt+F                toggle floating for the focused window
-#   Alt+W                close the focused window
-#   Alt+Enter            launch terminal
-#   Alt+Shift+Enter      launch browser
-#   Alt+<workspace_key>  switch to that workspace (see workspace_keys above)
-#   Alt+Shift+<ws key>   move focused window to that workspace (and follow it)
-#   Alt+Tab              normal task switcher (still works)
-#   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by Astur)
+#   [Mod]+T                toggle tiling on/off (floating mode; workspaces kept)
+#   [Mod]+J / [Mod]+K      focus next / previous window in the stack
+#   [Mod]+Shift+J / K      swap window order in the stack
+#   [Mod]+arrows           focus window by direction (cursor follows)
+#   [Mod]+Shift+arrows     move window by direction (across monitors)
+#   [Mod]+M                promote focused window to master
+#   [Mod]+H / [Mod]+L      master layout: shrink / grow the master column;
+#                          dwindle layout: shrink / grow the focused window's split
+#   [Mod]+F                toggle floating for the focused window
+#   [Mod]+W                close the focused window
+#   [Mod]+Enter            launch terminal
+#   [Mod]+Shift+Enter      launch browser
+#   [Mod]+<workspace_key>  switch to that workspace (see workspace_keys above)
+#   [Mod]+Shift+<ws key>   move focused window to that workspace (and follow it)
+#   Alt+Tab                normal task switcher (in alt mode)
+#   RIGHT ALT              normal Alt behaviour (in alt mode; LEFT ALT is reserved)
 #
 # The letter keys above (J K H L M T F W) are rebindable. Each takes a single
 # key name (see the 'keys' type at the top of this file). Arrows and Enter
@@ -333,8 +335,10 @@ const DEFAULT_NAVBAR: &str = "\
 
 # Show the bars.  bool   (set false to disable entirely)
 enabled = true
-# Autohide the bar (reveals on workspace/window switch or edge hover).  bool
+# Autohide the bar (reveals on workspace switch or edge hover).  bool
 autohide = false
+# Reveal the bar when switching windows.  bool (default false)
+# autohide_window_switch = false
 # Time in seconds (or ms if > 60) the bar remains visible before hiding.  int (default 3)
 autohide_delay = 3
 # Fade animation duration in ms (0 disables fade).  int 0 - 2000 (default 150)
@@ -418,6 +422,17 @@ pub(crate) fn key_to_vk(name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Convert a VK code back to its display name (e.g. 0x4A -> "J", 0x70 -> "F1").
+pub(crate) fn vk_to_key(vk: u32) -> String {
+    if (0x30..=0x39).contains(&vk) || (0x41..=0x5A).contains(&vk) {
+        ((vk as u8) as char).to_string()
+    } else if (0x70..=0x87).contains(&vk) {
+        format!("F{}", vk - 0x70 + 1)
+    } else {
+        format!("0x{:02X}", vk)
+    }
 }
 
 /// Parse a space/comma-separated list of key names into VK codes.
@@ -599,6 +614,9 @@ fn parse_into(c: &mut Config, text: &str) {
             // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
             "enabled" | "bar_enabled" => c.bar_enabled = parse_bool(v),
             "autohide" | "bar_autohide" => c.bar_autohide = parse_bool(v),
+            "autohide_window_switch"
+            | "bar_autohide_window_switch"
+            | "autohide_on_window_switch" => c.bar_autohide_window_switch = parse_bool(v),
             "autohide_delay" | "bar_autohide_delay" => {
                 if let Ok(n) = v.parse::<u64>() {
                     let ms = if n <= 60 { n * 1000 } else { n };
@@ -743,15 +761,24 @@ mod tests {
     #[test]
     fn parse_into_autohide() {
         let mut c = Config::defaults();
-        parse_into(&mut c, "autohide = true\nautohide_delay = 5\nautohide_fade_ms = 200");
+        assert!(!c.bar_autohide_window_switch);
+        parse_into(
+            &mut c,
+            "autohide = true\nautohide_delay = 5\nautohide_fade_ms = 200\nautohide_window_switch = true",
+        );
         assert!(c.bar_autohide);
         assert_eq!(c.bar_autohide_delay, 5000);
         assert_eq!(c.bar_autohide_fade_ms, 200);
+        assert!(c.bar_autohide_window_switch);
 
-        parse_into(&mut c, "bar_autohide = off\nbar_autohide_delay = 2500\nbar_autohide_fade_ms = 0");
+        parse_into(
+            &mut c,
+            "bar_autohide = off\nbar_autohide_delay = 2500\nbar_autohide_fade_ms = 0\nbar_autohide_window_switch = false",
+        );
         assert!(!c.bar_autohide);
         assert_eq!(c.bar_autohide_delay, 2500);
         assert_eq!(c.bar_autohide_fade_ms, 0);
+        assert!(!c.bar_autohide_window_switch);
     }
 
     #[test]
@@ -771,5 +798,13 @@ mod tests {
         assert_eq!(c.modifier, "alt");
         parse_into(&mut c, "modifier = win_alt");
         assert_eq!(c.modifier, "win_alt");
+    }
+
+    #[test]
+    fn test_vk_to_key() {
+        assert_eq!(vk_to_key(0x4A), "J");
+        assert_eq!(vk_to_key(0x31), "1");
+        assert_eq!(vk_to_key(0x70), "F1");
+        assert_eq!(vk_to_key(0x87), "F24");
     }
 }

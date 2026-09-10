@@ -882,6 +882,7 @@ static BAR_BOTTOM: AtomicBool = AtomicBool::new(false);
 static BAR_AUTOHIDE: AtomicBool = AtomicBool::new(false);
 static BAR_AUTOHIDE_MS: AtomicU64 = AtomicU64::new(3000);
 static BAR_AUTOHIDE_FADE_MS: AtomicIsize = AtomicIsize::new(150);
+static BAR_AUTOHIDE_WINDOW_SWITCH: AtomicBool = AtomicBool::new(false);
 static BAR_HIDE_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static BAR_FONT_SIZE: AtomicIsize = AtomicIsize::new(0); // 0 = auto from height
 // Width of each workspace pill in px, and the bar text height, set from config.
@@ -3833,7 +3834,9 @@ unsafe fn update_bar(mgr: &Manager) {
     if changed.is_empty() && anim_seeds.is_empty() {
         return;
     }
-    if BAR_AUTOHIDE.load(Ordering::Relaxed) {
+    if BAR_AUTOHIDE.load(Ordering::Relaxed)
+        && (BAR_AUTOHIDE_WINDOW_SWITCH.load(Ordering::Relaxed) || !anim_seeds.is_empty())
+    {
         trigger_bar_reveal();
     }
     let bars = BARS.lock().unwrap().clone();
@@ -4280,6 +4283,7 @@ fn apply_bar_statics(cfg: &Config) {
     BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
     BAR_AUTOHIDE.store(cfg.bar_autohide, Ordering::Relaxed);
     BAR_AUTOHIDE_MS.store(cfg.bar_autohide_delay, Ordering::Relaxed);
+    BAR_AUTOHIDE_WINDOW_SWITCH.store(cfg.bar_autohide_window_switch, Ordering::Relaxed);
     BAR_AUTOHIDE_FADE_MS.store(
         if cfg.animations {
             cfg.bar_autohide_fade_ms as isize
@@ -4514,6 +4518,127 @@ fn resolve_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
     None
 }
 
+fn print_startup_banner(cfg: &Config) {
+    let win_alt = cfg.modifier.eq_ignore_ascii_case("win_alt");
+    let (m_drag, m_hdr, m, ms) = if win_alt {
+        ("Win+Alt", "Win+Alt", "Win+Alt", "Win+Alt+Shift")
+    } else {
+        ("LEFT ALT", "LEFT ALT", "Alt", "Alt+Shift")
+    };
+
+    let k_tile = config::vk_to_key(cfg.key_toggle_tiling);
+    let k_next = config::vk_to_key(cfg.key_focus_next);
+    let k_prev = config::vk_to_key(cfg.key_focus_prev);
+    let k_prom = config::vk_to_key(cfg.key_promote_master);
+    let k_shr = config::vk_to_key(cfg.key_shrink_master);
+    let k_gro = config::vk_to_key(cfg.key_grow_master);
+    let k_flt = config::vk_to_key(cfg.key_toggle_float);
+    let k_cls = config::vk_to_key(cfg.key_close_window);
+
+    let default_keys = vec![
+        0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x30,
+    ];
+    let (ws_switch, ws_move) = if cfg.workspace_keys == default_keys {
+        (format!("{}+1..9,0", m), format!("{}+1..9,0", ms))
+    } else {
+        let keys_str: Vec<String> = cfg
+            .workspace_keys
+            .iter()
+            .map(|&k| config::vk_to_key(k))
+            .collect();
+        if keys_str.len() <= 6 {
+            (
+                format!("{}+{}", m, keys_str.join(",")),
+                format!("{}+{}", ms, keys_str.join(",")),
+            )
+        } else {
+            (
+                format!("{}+{}..{}", m, keys_str[0], keys_str.last().unwrap()),
+                format!("{}+{}..{}", ms, keys_str[0], keys_str.last().unwrap()),
+            )
+        }
+    };
+
+    println!("Astur running.");
+    println!(
+        "  {:<25} = move window (drops back into the tiling)",
+        format!("{} + left-drag", m_drag)
+    );
+    println!(
+        "  {:<25} = resize nearest corner (red bracket)",
+        format!("{} + right-drag", m_drag)
+    );
+    println!("  --- tiling ({} is the modifier) ---", m_hdr);
+    println!(
+        "  {:<25} = toggle tiling on/off (keeps workspaces)",
+        format!("{}+{}", m, k_tile)
+    );
+    println!(
+        "  {:<25} = focus next / previous window",
+        format!("{}+{} / {}+{}", m, k_next, m, k_prev)
+    );
+    println!(
+        "  {:<25} = swap window order in the stack",
+        format!("{}+{}/{}", ms, k_next, k_prev)
+    );
+    println!(
+        "  {:<25} = focus window by direction (cursor follows)",
+        format!("{}+arrows", m)
+    );
+    println!(
+        "  {:<25} = move window by direction (across monitors)",
+        format!("{}+arrows", ms)
+    );
+    println!(
+        "  {:<25} = promote focused window to master",
+        format!("{}+{}", m, k_prom)
+    );
+    println!(
+        "  {:<25} = shrink / grow the master area",
+        format!("{}+{} / {}+{}", m, k_shr, m, k_gro)
+    );
+    println!(
+        "  {:<25} = toggle float for focused window",
+        format!("{}+{}", m, k_flt)
+    );
+    println!(
+        "  {:<25} = close focused window",
+        format!("{}+{}", m, k_cls)
+    );
+    println!(
+        "  {:<25} = launch terminal",
+        format!("{}+Enter", m)
+    );
+    println!(
+        "  {:<25} = launch default browser",
+        format!("{}+Enter", ms)
+    );
+    println!(
+        "  {:<25} = switch workspace (or click a bar pill)",
+        ws_switch
+    );
+    println!(
+        "  {:<25} = move focused window to workspace",
+        ws_move
+    );
+    println!("  Per-monitor status bars, focus-follows-mouse, window rules:");
+    println!("  all configurable in astur.conf (see comments in that file).");
+    if win_alt {
+        println!("  Normal Alt and Win keys pass through to applications.");
+    } else {
+        println!("  Alt+Tab still works. Use RIGHT ALT for normal Alt behavior.");
+        if !cfg.passthrough_classes.is_empty() {
+            println!("  Left Alt passes through in: {}", cfg.passthrough_classes.join(", "));
+        }
+    }
+    println!("  --- config ---");
+    println!("  Default 'shared' mode spreads workspaces across monitors:");
+    println!("  ws1=mon1, ws2=mon2, ws3=mon3, ws4=mon1 (2nd), and so on.");
+    println!("  Edit %USERPROFILE%\\.astur\\astur.conf then restart.");
+    println!("  workspace_mode = shared | per_monitor; set terminal/browser too.");
+    println!("Press Ctrl+C in this window to quit (windows are restored).");
+}
+
 fn main() {
     // Reveal every managed window if any thread panics. `panic = "abort"` skips
     // destructors and a process kill skips the console handler, so without this a
@@ -4699,35 +4824,9 @@ fn main() {
         std::thread::spawn(transition_worker);
         // Hot-reload config files on save.
         std::thread::spawn(config_watcher);
+        print_startup_banner(&cfg);
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
         std::thread::spawn(move || manager_loop(cfg));
-
-        println!("Astur running.");
-        println!("  LEFT ALT + left-drag  = move window (drops back into the tiling)");
-        println!("  LEFT ALT + right-drag = resize nearest corner (red bracket)");
-        println!("  --- tiling (LEFT ALT is the modifier) ---");
-        println!("  Alt+T          = toggle tiling on/off (keeps workspaces)");
-        println!("  Alt+J / Alt+K  = focus next / previous window");
-        println!("  Alt+Shift+J/K  = swap window order in the stack");
-        println!("  Alt+arrows     = focus window by direction (cursor follows)");
-        println!("  Alt+Shift+arr  = move window by direction (across monitors)");
-        println!("  Alt+M          = promote focused window to master");
-        println!("  Alt+H / Alt+L  = shrink / grow the master area");
-        println!("  Alt+F          = toggle float for focused window");
-        println!("  Alt+W          = close focused window");
-        println!("  Alt+Enter      = launch terminal");
-        println!("  Alt+Shift+Enter= launch default browser");
-        println!("  Alt+1..9,0     = switch workspace (or click a bar pill)");
-        println!("  Alt+Shift+1..0 = move focused window to workspace");
-        println!("  Per-monitor status bars, focus-follows-mouse, window rules:");
-        println!("  all configurable in astur.conf (see comments in that file).");
-        println!("  Alt+Tab still works. Use RIGHT ALT for normal Alt behavior.");
-        println!("  --- config ---");
-        println!("  Default 'shared' mode spreads workspaces across monitors:");
-        println!("  ws1=mon1, ws2=mon2, ws3=mon3, ws4=mon1 (2nd), and so on.");
-        println!("  Edit %USERPROFILE%\\.astur\\astur.conf then restart.");
-        println!("  workspace_mode = shared | per_monitor; set terminal/browser too.");
-        println!("Press Ctrl+C in this window to quit (windows are restored).");
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -4738,6 +4837,22 @@ fn main() {
         let _ = UnhookWindowsHookEx(kbd_hook);
         let _ = UnhookWindowsHookEx(mouse_hook);
         let _ = windows::Win32::Media::timeEndPeriod(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_print_startup_banner_both_modes() {
+        let c = Config::defaults();
+        print_startup_banner(&c);
+
+        let mut win_alt_c = Config::defaults();
+        win_alt_c.modifier = "win_alt".to_string();
+        win_alt_c.passthrough_classes = vec!["Emacs".to_string()];
+        print_startup_banner(&win_alt_c);
     }
 }
 
