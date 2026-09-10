@@ -24,6 +24,8 @@ pub(crate) struct Config {
     pub(crate) animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
     pub(crate) workspace_slide: bool,      // GPU thumbnail slide transition on workspace switch
     pub(crate) bar_enabled: bool,          // draw the status bar on every monitor
+    pub(crate) bar_autohide: bool,         // autohide the bar (reveals on ws/window switch or hover)
+    pub(crate) bar_autohide_delay: u64,    // ms the bar remains visible before hiding
     pub(crate) bar_height: i32,            // bar thickness in px (work area is reserved for it)
     pub(crate) bar_bottom: bool,           // dock the bar at the bottom instead of the top
     pub(crate) bar_font_size: i32,         // text height in px; 0 = auto from bar_height
@@ -78,6 +80,8 @@ impl Config {
             animation_ms: 140,
             workspace_slide: true,
             bar_enabled: true,
+            bar_autohide: false,
+            bar_autohide_delay: 3000,
             bar_height: 28,
             bar_bottom: false,
             bar_font_size: 0,
@@ -311,6 +315,10 @@ const DEFAULT_NAVBAR: &str = "\
 
 # Show the bars.  bool   (set false to disable entirely)
 enabled = true
+# Autohide the bar (reveals on workspace/window switch or edge hover).  bool
+autohide = false
+# Time in seconds (or ms if > 60) the bar remains visible before hiding.  int (default 3)
+autohide_delay = 3
 # Bar thickness in pixels.  int 0 - 200  (0 also disables it)
 height = 28
 # Dock the bars at the bottom of each screen instead of the top.  bool
@@ -568,6 +576,13 @@ fn parse_into(c: &mut Config, text: &str) {
             }
             // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
             "enabled" | "bar_enabled" => c.bar_enabled = parse_bool(v),
+            "autohide" | "bar_autohide" => c.bar_autohide = parse_bool(v),
+            "autohide_delay" | "bar_autohide_delay" => {
+                if let Ok(n) = v.parse::<u64>() {
+                    let ms = if n <= 60 { n * 1000 } else { n };
+                    c.bar_autohide_delay = ms.clamp(500, 60_000);
+                }
+            }
             "height" | "bar_height" => {
                 if let Ok(n) = v.parse::<i32>() {
                     c.bar_height = n.clamp(0, 200);
@@ -696,5 +711,17 @@ mod tests {
         parse_into(&mut c, "workspace_mode = per_monitor\nlayout = MASTER");
         assert!(c.per_monitor);
         assert_eq!(c.layout, "master"); // lowercased
+    }
+
+    #[test]
+    fn parse_into_autohide() {
+        let mut c = Config::defaults();
+        parse_into(&mut c, "autohide = true\nautohide_delay = 5");
+        assert!(c.bar_autohide);
+        assert_eq!(c.bar_autohide_delay, 5000);
+
+        parse_into(&mut c, "bar_autohide = off\nbar_autohide_delay = 2500");
+        assert!(!c.bar_autohide);
+        assert_eq!(c.bar_autohide_delay, 2500);
     }
 }

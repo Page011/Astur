@@ -16,9 +16,9 @@
 // Uncomment to run without a console window (release builds):
 // #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 mod config;
 mod layout;
@@ -34,10 +34,11 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
     CreateRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, EndPaint,
     EnumDisplayMonitors, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
-    MonitorFromPoint, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+    MonitorFromPoint, MonitorFromWindow, ReleaseDC, ScreenToClient, SelectObject, SetBkMode, SetTextColor,
     SetWindowRgn, UpdateWindow, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
     DEFAULT_GUI_FONT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE,
-    DT_VCENTER, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS,
+    DT_VCENTER, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    OUT_DEFAULT_PRECIS,
     PAINTSTRUCT, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -83,7 +84,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
     SPI_SETFOREGROUNDLOCKTIMEOUT,
     SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
-    WM_CLOSE, WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WM_USER, WS_CHILD,
+    WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_PAINT, WM_SETCURSOR, WM_TIMER, WM_USER, WS_CHILD,
+    LoadCursorW, SetCursor, IDC_ARROW, IDC_HAND,
+};
+use windows::Win32::UI::HiDpi::{
+    GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
+    MDT_EFFECTIVE_DPI,
 };
 
 // --- tunables -------------------------------------------------------------
@@ -277,8 +283,8 @@ fn drag_active() -> bool {
 
 /// WndProc for the marker window: nothing custom, the class brush paints it red.
 unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if msg == WM_DISPLAYCHANGE {
-        // Reposition/create bars for the new monitor layout, then retile.
+    if msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED {
+        // Reposition/create bars for the new monitor layout/DPI, then retile.
         ensure_bars();
         push_cmd(Cmd::RefreshMonitors);
     } else if msg == WM_RELOAD {
@@ -290,6 +296,9 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         );
         if BAR_HEIGHT.load(Ordering::Relaxed) > 0 {
             ensure_bars();
+            if BAR_AUTOHIDE.load(Ordering::Relaxed) {
+                trigger_bar_reveal();
+            }
         } else {
             for b in BARS.lock().unwrap().iter() {
                 let _ = ShowWindow(hwnd_from(b.hwnd), SW_HIDE);
@@ -552,62 +561,81 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 }
             }
         }
-        WM_MOUSEMOVE if ANY_DRAG.load(Ordering::Relaxed) => {
-            // NOTE: do NOT suppress mouse-move events. Returning 1 here would
-            // freeze the physical cursor, so `pt` never advances and the window
-            // can't follow. We reposition the window and let the move pass through.
-            //
-            // We also can't trust GetAsyncKeyState for the drag button here: the
-            // button-down was suppressed, so the OS thinks it's up. The drag is
-            // ended only by the matching button-up event below.
-            //
-            // The ANY_DRAG guard keeps every other process's mouse-move off the
-            // STATE mutex entirely — only an active drag reaches this lock.
-            let s = STATE.lock().unwrap();
-            match s.mode {
-                Mode::Move => {
-                    let dx = pt.x - s.origin_x;
-                    let dy = pt.y - s.origin_y;
-                    set_target(s.hwnd, s.win_x + dx, s.win_y + dy, 0, 0, false);
-                }
-                Mode::Resize => {
-                    // Drag the nearest corner; the opposite corner stays fixed.
-                    let dx = pt.x - s.origin_x;
-                    let dy = pt.y - s.origin_y;
-                    let mut x = s.win_x;
-                    let mut y = s.win_y;
-                    let mut w;
-                    let mut h;
-                    if s.left {
-                        x = s.win_x + dx;
-                        w = s.win_w - dx;
-                    } else {
-                        w = s.win_w + dx;
+        WM_MOUSEMOVE => {
+            if ANY_DRAG.load(Ordering::Relaxed) {
+                // NOTE: do NOT suppress mouse-move events. Returning 1 here would
+                // freeze the physical cursor, so `pt` never advances and the window
+                // can't follow. We reposition the window and let the move pass through.
+                //
+                // We also can't trust GetAsyncKeyState for the drag button here: the
+                // button-down was suppressed, so the OS thinks it's up. The drag is
+                // ended only by the matching button-up event below.
+                //
+                // The ANY_DRAG guard keeps every other process's mouse-move off the
+                // STATE mutex entirely — only an active drag reaches this lock.
+                let s = STATE.lock().unwrap();
+                match s.mode {
+                    Mode::Move => {
+                        let dx = pt.x - s.origin_x;
+                        let dy = pt.y - s.origin_y;
+                        set_target(s.hwnd, s.win_x + dx, s.win_y + dy, 0, 0, false);
                     }
-                    if s.top {
-                        y = s.win_y + dy;
-                        h = s.win_h - dy;
-                    } else {
-                        h = s.win_h + dy;
-                    }
-                    if w < MIN_W {
+                    Mode::Resize => {
+                        // Drag the nearest corner; the opposite corner stays fixed.
+                        let dx = pt.x - s.origin_x;
+                        let dy = pt.y - s.origin_y;
+                        let mut x = s.win_x;
+                        let mut y = s.win_y;
+                        let mut w;
+                        let mut h;
                         if s.left {
-                            x = s.win_x + (s.win_w - MIN_W);
+                            x = s.win_x + dx;
+                            w = s.win_w - dx;
+                        } else {
+                            w = s.win_w + dx;
                         }
-                        w = MIN_W;
-                    }
-                    if h < MIN_H {
                         if s.top {
-                            y = s.win_y + (s.win_h - MIN_H);
+                            y = s.win_y + dy;
+                            h = s.win_h - dy;
+                        } else {
+                            h = s.win_h + dy;
                         }
-                        h = MIN_H;
+                        if w < MIN_W {
+                            if s.left {
+                                x = s.win_x + (s.win_w - MIN_W);
+                            }
+                            w = MIN_W;
+                        }
+                        if h < MIN_H {
+                            if s.top {
+                                y = s.win_y + (s.win_h - MIN_H);
+                            }
+                            h = MIN_H;
+                        }
+                        set_target(s.hwnd, x, y, w, h, true);
+                        let corner_x = if s.left { x } else { x + w };
+                        let corner_y = if s.top { y } else { y + h };
+                        show_marker(corner_x, corner_y, s.left, s.top);
                     }
-                    set_target(s.hwnd, x, y, w, h, true);
-                    let corner_x = if s.left { x } else { x + w };
-                    let corner_y = if s.top { y } else { y + h };
-                    show_marker(corner_x, corner_y, s.left, s.top);
+                    Mode::None => {}
                 }
-                Mode::None => {}
+            } else if BAR_AUTOHIDE.load(Ordering::Relaxed) {
+                let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+                let mut mi = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+                    let bottom = BAR_BOTTOM.load(Ordering::Relaxed);
+                    let edge_hit = if bottom {
+                        pt.y >= mi.rcMonitor.bottom - 2
+                    } else {
+                        pt.y <= mi.rcMonitor.top + 1
+                    };
+                    if edge_hit {
+                        trigger_bar_reveal();
+                    }
+                }
             }
         }
         WM_LBUTTONUP => {
@@ -752,6 +780,9 @@ static BAR_HINST: AtomicIsize = AtomicIsize::new(0);
 // Bar geometry, set at startup so ensure_bars works without a Config in hand.
 static BAR_HEIGHT: AtomicIsize = AtomicIsize::new(0); // 0 = bar disabled
 static BAR_BOTTOM: AtomicBool = AtomicBool::new(false);
+static BAR_AUTOHIDE: AtomicBool = AtomicBool::new(false);
+static BAR_AUTOHIDE_MS: AtomicU64 = AtomicU64::new(3000);
+static BAR_HIDE_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static BAR_FONT_SIZE: AtomicIsize = AtomicIsize::new(0); // 0 = auto from height
 // Width of each workspace pill in px, and the bar text height, set from config.
 static BAR_CELL: AtomicIsize = AtomicIsize::new(34);
@@ -768,6 +799,26 @@ static STATS_ON: AtomicBool = AtomicBool::new(false);
 static STAT_CPU: AtomicIsize = AtomicIsize::new(-1);
 static STAT_MEM: AtomicIsize = AtomicIsize::new(-1);
 static STAT_BAT: AtomicIsize = AtomicIsize::new(-1);
+
+/// Query the effective DPI of a display monitor (defaults to 96 DPI / 100% on failure).
+unsafe fn monitor_dpi(hmon: isize) -> u32 {
+    let mut dpix = 96;
+    let mut dpiy = 96;
+    if hmon != 0
+        && GetDpiForMonitor(
+            HMONITOR(hmon as *mut c_void),
+            MDT_EFFECTIVE_DPI,
+            &mut dpix,
+            &mut dpiy,
+        )
+        .is_ok()
+        && dpix > 0
+    {
+        dpix
+    } else {
+        96
+    }
+}
 
 /// Sliding workspace-pill highlight. While an entry is present for a monitor,
 /// paint_bar draws the accent pill at an interpolated x between the old and new
@@ -821,6 +872,7 @@ struct MonBar {
     active: usize,
     occupied: u64,
     title: String,
+    focused_hwnd: isize,
 }
 
 /// Everything the bars paint. Replaced wholesale by the manager each update.
@@ -877,14 +929,23 @@ const PILL_TIMER_ID: usize = 2;
 // Custom message (to the marker window): config changed, rebuild bars on the
 // main thread.
 const WM_RELOAD: u32 = WM_USER + 2;
+// Custom message: reveal the bar for autohide.
+const WM_BAR_REVEAL: u32 = WM_USER + 4;
 // SetTimer id for the bar clock tick.
 const BAR_TIMER_ID: usize = 1;
+// SetTimer id for autohide countdown.
+const AUTOHIDE_TIMER_ID: usize = 3;
 
 fn push_cmd(c: Cmd) {
-    CMDQ.lock().unwrap().push_back(c);
+    let mut q = CMDQ.lock().unwrap();
+    if matches!(c, Cmd::Retile) && q.iter().any(|existing| matches!(existing, Cmd::Retile)) {
+        return;
+    }
+    q.push_back(c);
     CMDCV.notify_one();
 }
 
+#[derive(Clone)]
 struct Workspace {
     windows: Vec<isize>,  // all managed windows in this workspace (tiled order)
     floating: Vec<isize>, // subset of `windows` excluded from tiling
@@ -907,6 +968,7 @@ impl Workspace {
 }
 
 /// One physical display: its own workspaces, tiled on its own work area.
+#[derive(Clone)]
 struct Monitor {
     hmon: isize,        // HMONITOR (raw) — identity across enumerations
     base_work: RECT,    // taskbar-excluded area, before the bar is subtracted
@@ -1120,7 +1182,34 @@ unsafe fn should_float(hwnd: HWND) -> bool {
 /// Compute the visible-frame correction: Win32 GetWindowRect includes an
 /// invisible DWM shadow border, so we expand the target by that padding to make
 /// the *visible* edges line up flush, giving even gaps.
+/// The resulting window rect is strictly clamped to the target monitor's physical
+/// bounds so it never bleeds into adjacent monitors (which triggers cross-monitor
+/// DPI virtualization/scaling in Windows for System-DPI aware apps like Emacs).
 unsafe fn adjust_for_border(hwnd: HWND, target: RECT) -> RECT {
+    let target_center = POINT {
+        x: (target.left + target.right) / 2,
+        y: (target.top + target.bottom) / 2,
+    };
+    let target_mon = MonitorFromPoint(target_center, MONITOR_DEFAULTTONEAREST);
+
+    let mut mi = MONITORINFO {
+        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let has_mi = GetMonitorInfoW(target_mon, &mut mi).as_bool();
+
+    let cur_mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    if cur_mon != target_mon {
+        let mut adj = target;
+        if has_mi {
+            adj.left = adj.left.max(mi.rcMonitor.left);
+            adj.top = adj.top.max(mi.rcMonitor.top);
+            adj.right = adj.right.min(mi.rcMonitor.right);
+            adj.bottom = adj.bottom.min(mi.rcMonitor.bottom);
+        }
+        return adj;
+    }
+
     let mut wr = RECT::default();
     if GetWindowRect(hwnd, &mut wr).is_err() {
         return target;
@@ -1133,22 +1222,30 @@ unsafe fn adjust_for_border(hwnd: HWND, target: RECT) -> RECT {
         core::mem::size_of::<RECT>() as u32,
     )
     .is_ok();
-    if !ok {
+    if !ok || fr.right <= fr.left || fr.bottom <= fr.top {
         return target;
     }
-    let lp = fr.left - wr.left;
-    let tp = fr.top - wr.top;
-    let rp = wr.right - fr.right;
-    let bp = wr.bottom - fr.bottom;
-    RECT {
+    let lp = (fr.left - wr.left).clamp(0, 32);
+    let tp = (fr.top - wr.top).clamp(0, 32);
+    let rp = (wr.right - fr.right).clamp(0, 32);
+    let bp = (wr.bottom - fr.bottom).clamp(0, 32);
+
+    let mut adj = RECT {
         left: target.left - lp,
         top: target.top - tp,
         right: target.right + rp,
         bottom: target.bottom + bp,
+    };
+    if has_mi {
+        adj.left = adj.left.max(mi.rcMonitor.left);
+        adj.top = adj.top.max(mi.rcMonitor.top);
+        adj.right = adj.right.min(mi.rcMonitor.right);
+        adj.bottom = adj.bottom.min(mi.rcMonitor.bottom);
     }
+    adj
 }
 
-/// Enumerate physical monitors, sorted left-to-right (0 = leftmost), each with
+/// Enumerate physical monitors, sorted left-to-right then top-to-bottom, each with
 /// its own fresh set of workspaces.
 unsafe extern "system" fn monitor_enum_proc(
     hmon: HMONITOR,
@@ -1156,19 +1253,19 @@ unsafe extern "system" fn monitor_enum_proc(
     _rc: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
-    let v = &mut *(lparam.0 as *mut Vec<(isize, i32, RECT)>);
+    let v = &mut *(lparam.0 as *mut Vec<(isize, i32, i32, RECT)>);
     let mut mi = MONITORINFO {
         cbSize: core::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-        v.push((hmon.0 as isize, mi.rcMonitor.left, mi.rcWork));
+        v.push((hmon.0 as isize, mi.rcMonitor.left, mi.rcMonitor.top, mi.rcWork));
     }
     BOOL(1)
 }
 
 unsafe fn enumerate_monitors() -> Vec<Monitor> {
-    let mut raw: Vec<(isize, i32, RECT)> = Vec::new();
+    let mut raw: Vec<(isize, i32, i32, RECT)> = Vec::new();
     let _ = EnumDisplayMonitors(
         None,
         None,
@@ -1176,18 +1273,20 @@ unsafe fn enumerate_monitors() -> Vec<Monitor> {
         LPARAM(&mut raw as *mut _ as isize),
     );
     if raw.is_empty() {
-        raw.push((0, 0, work_area_at(POINT { x: 0, y: 0 })));
+        raw.push((0, 0, 0, work_area_at(POINT { x: 0, y: 0 })));
     }
-    raw.sort_by_key(|m| m.1); // left-to-right
+    // Sort left-to-right, then top-to-bottom so both horizontal and vertical
+    // monitor arrangements have a deterministic, intuitive ordering.
+    raw.sort_by(|a, b| a.1.cmp(&b.1).then_with(|| a.2.cmp(&b.2)));
     // One placeholder workspace each; distribute_workspaces sets the real counts.
     raw.into_iter()
-        .map(|(h, _, wa)| Monitor::new(h, wa, 1))
+        .map(|(h, _, _, wa)| Monitor::new(h, wa, 1))
         .collect()
 }
 
 /// Index of the primary (main) monitor — the one containing the origin (0,0).
 unsafe fn primary_index(monitors: &[Monitor]) -> usize {
-    let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTONEAREST).0 as isize;
+    let hmon = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY).0 as isize;
     monitors.iter().position(|m| m.hmon == hmon).unwrap_or(0)
 }
 
@@ -1231,11 +1330,13 @@ fn distribute_workspaces(monitors: &mut [Monitor], primary: usize, total: usize,
 unsafe fn reserve_bar(monitors: &mut [Monitor], cfg: &Config) {
     for m in monitors.iter_mut() {
         m.work_area = m.base_work;
-        if cfg.bar_enabled && cfg.bar_height > 0 {
+        if cfg.bar_enabled && !cfg.bar_autohide && cfg.bar_height > 0 {
+            let dpi = monitor_dpi(m.hmon);
+            let bar_h = ((cfg.bar_height * dpi as i32 + 48) / 96).max(1);
             if cfg.bar_bottom {
-                m.work_area.bottom -= cfg.bar_height;
+                m.work_area.bottom -= bar_h;
             } else {
-                m.work_area.top += cfg.bar_height;
+                m.work_area.top += bar_h;
             }
         }
     }
@@ -1357,6 +1458,69 @@ unsafe fn animate_to(hwnd: HWND, target: RECT) {
     }
     let to = adjust_for_border(hwnd, target);
     set_pos_raw(hwnd.0 as isize, to);
+
+    // Check for character-cell rounding or overflow (e.g. Emacs, terminal emulators).
+    let mut wr = RECT::default();
+    if GetWindowRect(hwnd, &mut wr).is_err() {
+        return;
+    }
+
+    let mut fr = RECT::default();
+    let has_fr = DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut fr as *mut _ as *mut c_void,
+        core::mem::size_of::<RECT>() as u32,
+    )
+    .is_ok()
+        && fr.right > fr.left
+        && fr.bottom > fr.top
+        && (fr.top - wr.top).abs() <= 32
+        && (fr.bottom - wr.bottom).abs() <= 32;
+
+    let bp = (to.bottom - target.bottom).max(0);
+    let rp = (to.right - target.right).max(0);
+
+    let bottom_edge = if has_fr { fr.bottom } else { wr.bottom - bp };
+    let right_edge = if has_fr { fr.right } else { wr.right - rp };
+
+    let mut new_w = to.right - to.left;
+    let mut new_h = to.bottom - to.top;
+    let mut needs_adj = false;
+
+    if bottom_edge > target.bottom + 1 {
+        let overflow_y = bottom_edge - target.bottom;
+        if overflow_y > 1 {
+            let cur_h = to.bottom - to.top;
+            if cur_h > overflow_y + MIN_H {
+                new_h = cur_h - overflow_y;
+                needs_adj = true;
+            }
+        }
+    }
+
+    if right_edge > target.right + 1 {
+        let overflow_x = right_edge - target.right;
+        if overflow_x > 1 {
+            let cur_w = to.right - to.left;
+            if cur_w > overflow_x + MIN_W {
+                new_w = cur_w - overflow_x;
+                needs_adj = true;
+            }
+        }
+    }
+
+    if needs_adj && new_w >= MIN_W && new_h >= MIN_H {
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            to.left,
+            to.top,
+            new_w,
+            new_h,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+        );
+    }
 }
 
 /// Compute the tiled (hwnd, screen-rect) targets for one workspace, in tiling
@@ -1430,11 +1594,7 @@ unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
     let rects = workspace_layout(mgr, mi, mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0));
     SUPPRESS.store(true, Ordering::Relaxed);
     for (h, target) in rects {
-        let hwnd = hwnd_from(h);
-        if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
-            let _ = ShowWindow(hwnd, SW_RESTORE);
-        }
-        set_pos_raw(h, adjust_for_border(hwnd, target));
+        animate_to(hwnd_from(h), target);
     }
     SUPPRESS.store(false, Ordering::Relaxed);
 }
@@ -1444,6 +1604,18 @@ unsafe fn retile_all(mgr: &Manager) {
     for mi in 0..mgr.monitors.len() {
         retile_monitor(mgr, mi);
     }
+}
+
+/// Schedule delayed retile passes to reconcile cross-monitor moves and DPI changes.
+/// Applications handling WM_DPICHANGED asynchronously resize themselves a few
+/// milliseconds after crossing screens; re-applying the layout snaps them back.
+fn schedule_retile() {
+    std::thread::spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(60));
+        push_cmd(Cmd::Retile);
+        std::thread::sleep(std::time::Duration::from_millis(80));
+        push_cmd(Cmd::Retile);
+    });
 }
 
 /// Apply opacity + border colour to a single window based on focus state.
@@ -1600,14 +1772,39 @@ unsafe fn active_window_rects(mgr: &Manager, mi: usize) -> Vec<(isize, RECT)> {
     items
 }
 
-/// The monitor to the left/right of `mi` (monitors are ordered left-to-right).
-/// Vertical directions have no neighbour in this layout.
+/// The monitor adjacent to `mi` in direction `dir`.
+/// Uses geometric bounding boxes so horizontal (left/right), vertical
+/// (top/bottom), and mixed monitor layouts all navigate seamlessly.
 fn adjacent_monitor(mgr: &Manager, mi: usize, dir: Dir) -> Option<usize> {
-    match dir {
+    let cur = mgr.monitors.get(mi)?;
+    let (cx, cy) = rect_center(cur.base_work);
+    let mut best = None;
+    let mut best_score = i64::MAX;
+    for (i, m) in mgr.monitors.iter().enumerate() {
+        if i == mi {
+            continue;
+        }
+        let (ox, oy) = rect_center(m.base_work);
+        let (primary, secondary, valid) = match dir {
+            Dir::Left => ((cx - ox) as i64, (cy - oy).unsigned_abs() as i64, ox < cx),
+            Dir::Right => ((ox - cx) as i64, (cy - oy).unsigned_abs() as i64, ox > cx),
+            Dir::Up => ((cy - oy) as i64, (cx - ox).unsigned_abs() as i64, oy < cy),
+            Dir::Down => ((oy - cy) as i64, (cx - ox).unsigned_abs() as i64, oy > cy),
+        };
+        if !valid || primary <= 0 {
+            continue;
+        }
+        let score = primary + secondary * 2;
+        if score < best_score {
+            best_score = score;
+            best = Some(i);
+        }
+    }
+    best.or_else(|| match dir {
         Dir::Left if mi > 0 => Some(mi - 1),
         Dir::Right if mi + 1 < mgr.monitors.len() => Some(mi + 1),
         _ => None,
-    }
+    })
 }
 
 /// Best-effort focus that defeats the Windows foreground lock by briefly
@@ -2255,6 +2452,7 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
         let wa = mgr.monitors[mi].work_area;
         let _ = SetCursorPos((wa.left + wa.right) / 2, (wa.top + wa.bottom) / 2);
     }
+    schedule_retile();
 }
 
 /// Re-enumerate monitors after a display change. Preserves each surviving
@@ -2367,6 +2565,7 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
     }
     SUPPRESS.store(false, Ordering::Relaxed);
     retile_all(mgr);
+    schedule_retile();
 }
 
 fn focused_index(ws: &Workspace) -> Option<usize> {
@@ -2397,6 +2596,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.monitors[mi].workspaces[a].focused = h;
                 mgr.focused_mon = mi;
                 retile_monitor(mgr, mi);
+                schedule_retile();
             }
         }
         Cmd::Remove(h) => {
@@ -2574,6 +2774,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             if i >= mgr.cfg.workspaces || mgr.monitors.is_empty() {
                 return;
             }
+            if mgr.cfg.bar_autohide {
+                trigger_bar_reveal();
+            }
             let (mi, local) = mgr.global_to_ml(i);
             if mi >= mgr.monitors.len() || local >= mgr.monitors[mi].workspaces.len() {
                 return;
@@ -2599,6 +2802,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
         Cmd::MoveToWs(i) => {
             if i >= mgr.cfg.workspaces || !mgr.tiling || mgr.monitors.is_empty() {
                 return;
+            }
+            if mgr.cfg.bar_autohide {
+                trigger_bar_reveal();
             }
             let from_mi = mgr.focused_mon;
             let from_a = mgr.monitors[from_mi].active;
@@ -2633,6 +2839,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     center_cursor_on(h);
                 }
             }
+            schedule_retile();
         }
         Cmd::ToggleTiling => {
             // Flip tiling only. Workspaces stay intact so Alt+1..9 keeps working
@@ -2724,6 +2931,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.focused_mon = to_mi;
                 retile_monitor(mgr, from_mi);
                 retile_monitor(mgr, to_mi);
+                schedule_retile();
             }
             focus_window(h);
         }
@@ -2881,6 +3089,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.focused_mon = to_mi;
                 retile_monitor(mgr, mi);
                 retile_monitor(mgr, to_mi);
+                schedule_retile();
                 focus_window(h);
                 if mgr.cfg.cursor_follows_focus {
                     center_cursor_on(h);
@@ -2919,16 +3128,8 @@ unsafe extern "system" fn bar_mon_enum(
     BOOL(1)
 }
 
-/// Build the shared bar font and pill-cell width. Call only on the main thread
-/// (the bars' paint thread) so deleting the old font can't race a paint.
-unsafe fn make_bar_font(height: i32, font_size: i32) {
-    let size = if font_size > 0 {
-        font_size
-    } else {
-        ((height as f32) * 0.5) as i32
-    }
-    .max(8);
-    // Null-terminated face name; kept alive for the duration of the call.
+/// Create a GDI font of the requested pixel size using the configured font face.
+unsafe fn create_font_for_size(size: i32) -> isize {
     let name = {
         let n = BAR_FONT_NAME.lock().unwrap().clone();
         if n.trim().is_empty() {
@@ -2940,7 +3141,7 @@ unsafe fn make_bar_font(height: i32, font_size: i32) {
     let mut wname: Vec<u16> = name.encode_utf16().collect();
     wname.push(0);
     let f = CreateFontW(
-        -size, // negative = character height (matches point-style sizing)
+        -size.max(8), // negative = character height (matches point-style sizing)
         0,
         0,
         0,
@@ -2955,11 +3156,39 @@ unsafe fn make_bar_font(height: i32, font_size: i32) {
         0, // DEFAULT_PITCH | FF_DONTCARE
         PCWSTR(wname.as_ptr()),
     );
-    let prev = BAR_FONT.swap(f.0 as isize, Ordering::Relaxed);
+    f.0 as isize
+}
+
+/// Build the shared bar font and pill-cell width. Call only on the main thread
+/// (the bars' paint thread) so deleting the old font can't race a paint.
+unsafe fn make_bar_font(height: i32, font_size: i32) {
+    let size = if font_size > 0 {
+        font_size
+    } else {
+        ((height as f32) * 0.5) as i32
+    }
+    .max(8);
+    let f = create_font_for_size(size);
+    let prev = BAR_FONT.swap(f, Ordering::Relaxed);
     if prev != 0 {
         let _ = DeleteObject(HGDIOBJ(prev as *mut c_void));
     }
     BAR_CELL.store((height.max(8) as f32 * 1.25) as isize, Ordering::Relaxed);
+}
+
+/// Reveal the status bar on all monitors and reset the autohide countdown.
+fn trigger_bar_reveal() {
+    if !BAR_AUTOHIDE.load(Ordering::Relaxed) {
+        return;
+    }
+    let delay_ms = BAR_AUTOHIDE_MS.load(Ordering::Relaxed);
+    *BAR_HIDE_AT.lock().unwrap() = Some(Instant::now() + Duration::from_millis(delay_ms));
+    let bars = BARS.lock().unwrap().clone();
+    for b in bars {
+        unsafe {
+            let _ = PostMessageW(hwnd_from(b.hwnd), WM_BAR_REVEAL, WPARAM(0), LPARAM(0));
+        }
+    }
 }
 
 /// Create or reposition one bar window per monitor. Safe to call repeatedly
@@ -2971,6 +3200,7 @@ unsafe fn ensure_bars() {
         return;
     }
     let bottom = BAR_BOTTOM.load(Ordering::Relaxed);
+    let autohide = BAR_AUTOHIDE.load(Ordering::Relaxed);
     let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
 
     let mut raw: Vec<(isize, RECT)> = Vec::new();
@@ -2982,9 +3212,20 @@ unsafe fn ensure_bars() {
     );
 
     let mut bars = BARS.lock().unwrap();
+    // Destroy and remove bar windows whose monitors disappeared.
+    let present: Vec<isize> = raw.iter().map(|(h, _)| *h).collect();
+    for b in bars.iter() {
+        if !present.contains(&b.hmon) {
+            let _ = DestroyWindow(hwnd_from(b.hwnd));
+        }
+    }
+    bars.retain(|b| present.contains(&b.hmon));
+
     for &(hmon, rcm) in &raw {
+        let dpi = monitor_dpi(hmon);
+        let bar_h = ((height * dpi as i32 + 48) / 96).max(1);
         let x = rcm.left;
-        let y = if bottom { rcm.bottom - height } else { rcm.top };
+        let y = if bottom { rcm.bottom - bar_h } else { rcm.top };
         let w = rcm.right - rcm.left;
         if let Some(b) = bars.iter().find(|b| b.hmon == hmon) {
             let _ = SetWindowPos(
@@ -2993,9 +3234,12 @@ unsafe fn ensure_bars() {
                 x,
                 y,
                 w,
-                height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
+                bar_h,
+                SWP_NOACTIVATE | if autohide { SWP_NOZORDER } else { SWP_SHOWWINDOW },
             );
+            if !autohide {
+                let _ = ShowWindow(hwnd_from(b.hwnd), SW_SHOWNA);
+            }
         } else {
             let hb = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
@@ -3005,7 +3249,7 @@ unsafe fn ensure_bars() {
                 x,
                 y,
                 w,
-                height,
+                bar_h,
                 None,
                 None,
                 hinst,
@@ -3013,19 +3257,14 @@ unsafe fn ensure_bars() {
             )
             .expect("bar window failed");
             SetWindowLongPtrW(hb, GWLP_USERDATA, hmon);
-            let _ = ShowWindow(hb, SW_SHOW);
+            if !autohide {
+                let _ = ShowWindow(hb, SW_SHOWNA);
+            }
             SetTimer(hb, BAR_TIMER_ID, 1000, None);
             bars.push(BarWin {
                 hwnd: hb.0 as isize,
                 hmon,
             });
-        }
-    }
-    // Hide bars whose monitor disappeared.
-    let present: Vec<isize> = raw.iter().map(|(h, _)| *h).collect();
-    for b in bars.iter() {
-        if !present.contains(&b.hmon) {
-            let _ = ShowWindow(hwnd_from(b.hwnd), SW_HIDE);
         }
     }
 }
@@ -3206,6 +3445,7 @@ unsafe fn update_bar(mgr: &Manager) {
             active,
             occupied,
             title,
+            focused_hwnd: fh,
         });
     }
     let new = BarData {
@@ -3230,8 +3470,6 @@ unsafe fn update_bar(mgr: &Manager) {
     // Diff against the previous snapshot so only changed monitors repaint, and
     // seed a pill-highlight slide on any monitor whose active workspace moved.
     let animate_pills = mgr.cfg.animations;
-    let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
-    let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
     let mut changed: Vec<isize> = Vec::new();
     let mut anim_seeds: Vec<(isize, i32, i32)> = Vec::new();
     {
@@ -3270,10 +3508,14 @@ unsafe fn update_bar(mgr: &Manager) {
                         && nm.active != usize::MAX
                         && om.active != nm.active
                     {
+                        let dpi = monitor_dpi(nm.hmon);
+                        let bar_h = ((mgr.cfg.bar_height * dpi as i32 + 48) / 96).max(1);
+                        let mon_cell = (bar_h.max(8) as f32 * 1.25) as i32;
+                        let mon_pad = (8 * dpi as i32 / 96).max(4);
                         anim_seeds.push((
                             nm.hmon,
-                            pad + om.active as i32 * cell,
-                            pad + nm.active as i32 * cell,
+                            mon_pad + om.active as i32 * mon_cell,
+                            mon_pad + nm.active as i32 * mon_cell,
                         ));
                     }
                 }
@@ -3283,6 +3525,9 @@ unsafe fn update_bar(mgr: &Manager) {
     *BAR.lock().unwrap() = new;
     if changed.is_empty() && anim_seeds.is_empty() {
         return;
+    }
+    if BAR_AUTOHIDE.load(Ordering::Relaxed) {
+        trigger_bar_reveal();
     }
     let bars = BARS.lock().unwrap().clone();
     for b in bars {
@@ -3361,16 +3606,29 @@ unsafe fn paint_bar(h: HWND) {
     FillRect(hdc, &rc, bg_brush);
     let _ = DeleteObject(HGDIOBJ(bg_brush.0));
 
-    let font_raw = BAR_FONT.load(Ordering::Relaxed);
-    let old_font = if font_raw != 0 {
-        Some(SelectObject(hdc, HGDIOBJ(font_raw as *mut c_void)))
+    let dpi = monitor_dpi(hmon);
+    let font_size_cfg = BAR_FONT_SIZE.load(Ordering::Relaxed) as i32;
+    let size = if font_size_cfg > 0 {
+        ((font_size_cfg * dpi as i32 + 48) / 96).max(8)
     } else {
-        Some(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)))
+        ((h_px as f32) * 0.5) as i32
+    }
+    .max(8);
+    let custom_font = create_font_for_size(size);
+    let old_font = if custom_font != 0 {
+        Some(SelectObject(hdc, HGDIOBJ(custom_font as *mut c_void)))
+    } else {
+        let font_raw = BAR_FONT.load(Ordering::Relaxed);
+        if font_raw != 0 {
+            Some(SelectObject(hdc, HGDIOBJ(font_raw as *mut c_void)))
+        } else {
+            Some(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)))
+        }
     };
     SetBkMode(hdc, TRANSPARENT);
 
-    let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
-    let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
+    let cell = (h_px.max(8) as f32 * 1.25) as i32;
+    let pad = (8 * dpi as i32 / 96).max(4);
     let mut right_edge = rc.right - pad;
 
     // ---- right cluster (right-to-left): clock, date, battery, mem, cpu, layout
@@ -3501,6 +3759,9 @@ unsafe fn paint_bar(h: HWND) {
     if let Some(of) = old_font {
         SelectObject(hdc, of);
     }
+    if custom_font != 0 {
+        let _ = DeleteObject(HGDIOBJ(custom_font as *mut c_void));
+    }
     let _ = EndPaint(h, &ps);
 }
 
@@ -3512,6 +3773,37 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             paint_bar(h);
             LRESULT(0)
         }
+        WM_SETCURSOR => {
+            // Set an arrow cursor by default, and a pointing hand when hovering over pills.
+            // DefWindowProc with a NULL class cursor leaves Windows in IDC_APPSTARTING (spinner)
+            // mode; setting the cursor explicitly ensures the spinner never appears over the bar.
+            let mut pt = POINT::default();
+            if GetCursorPos(&mut pt).is_ok() && ScreenToClient(h, &mut pt).as_bool() {
+                let mut rc = RECT::default();
+                let _ = GetClientRect(h, &mut rc);
+                let h_px = rc.bottom - rc.top;
+                let cell = (h_px.max(8) as f32 * 1.25) as i32;
+                let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
+                let dpi = monitor_dpi(hmon);
+                let pad = (8 * dpi as i32 / 96).max(4);
+                let num_pills = BAR
+                    .lock()
+                    .unwrap()
+                    .mons
+                    .iter()
+                    .find(|m| m.hmon == hmon)
+                    .map(|m| m.slots.len())
+                    .unwrap_or(0);
+                if cell > 0 && pt.x >= pad && pt.x < pad + (num_pills as i32) * cell {
+                    let cursor = LoadCursorW(None, IDC_HAND).unwrap_or_default();
+                    SetCursor(cursor);
+                    return LRESULT(1);
+                }
+            }
+            let cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
+            SetCursor(cursor);
+            LRESULT(1)
+        }
         WM_PILL_ANIM => {
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
             pill_anim_set(hmon, w.0 as i32, l.0 as i32);
@@ -3520,7 +3812,48 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
         }
+        WM_BAR_REVEAL => {
+            let _ = ShowWindow(h, SW_SHOWNA);
+            let _ = InvalidateRect(h, None, BOOL(0));
+            SetTimer(h, AUTOHIDE_TIMER_ID, 100, None);
+            LRESULT(0)
+        }
         WM_TIMER => {
+            if w.0 == AUTOHIDE_TIMER_ID {
+                if !BAR_AUTOHIDE.load(Ordering::Relaxed) {
+                    let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
+                    let _ = ShowWindow(h, SW_SHOWNA);
+                    return LRESULT(0);
+                }
+                let mut pt = POINT::default();
+                let mut hovered = false;
+                if GetCursorPos(&mut pt).is_ok() {
+                    let mut r = RECT::default();
+                    if GetWindowRect(h, &mut r).is_ok() {
+                        if pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom {
+                            hovered = true;
+                        }
+                    }
+                }
+                if hovered {
+                    let delay_ms = BAR_AUTOHIDE_MS.load(Ordering::Relaxed);
+                    *BAR_HIDE_AT.lock().unwrap() = Some(Instant::now() + Duration::from_millis(delay_ms));
+                } else {
+                    let hide_at = *BAR_HIDE_AT.lock().unwrap();
+                    if let Some(target) = hide_at {
+                        if Instant::now() >= target {
+                            let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
+                            let _ = ShowWindow(h, SW_HIDE);
+                            return LRESULT(0);
+                        }
+                    } else {
+                        let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
+                        let _ = ShowWindow(h, SW_HIDE);
+                        return LRESULT(0);
+                    }
+                }
+                return LRESULT(0);
+            }
             if w.0 == PILL_TIMER_ID {
                 let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
                 // Stop the fast timer once the slide finishes (or vanished).
@@ -3529,7 +3862,9 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                     pill_anim_clear(hmon);
                 }
             }
-            let _ = InvalidateRect(h, None, BOOL(0));
+            if IsWindowVisible(h).as_bool() {
+                let _ = InvalidateRect(h, None, BOOL(0));
+            }
             LRESULT(0)
         }
         WM_BAR_REFRESH => {
@@ -3538,9 +3873,13 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         }
         WM_LBUTTONDOWN => {
             let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
-            let cell = BAR_CELL.load(Ordering::Relaxed) as i32;
-            let pad = BAR_PADDING.load(Ordering::Relaxed) as i32;
+            let mut rc = RECT::default();
+            let _ = GetClientRect(h, &mut rc);
+            let h_px = rc.bottom - rc.top;
+            let cell = (h_px.max(8) as f32 * 1.25) as i32;
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
+            let dpi = monitor_dpi(hmon);
+            let pad = (8 * dpi as i32 / 96).max(4);
             if cell > 0 && x >= pad {
                 let pill = ((x - pad) / cell) as usize;
                 // Map the clicked pill back to its real local workspace via slots
@@ -3556,7 +3895,14 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                     push_cmd(Cmd::BarClick(hmon, local));
                 }
             }
+            if BAR_AUTOHIDE.load(Ordering::Relaxed) {
+                trigger_bar_reveal();
+            }
             LRESULT(0)
+        }
+        WM_DPICHANGED => {
+            push_cmd(Cmd::RefreshMonitors);
+            DefWindowProcW(h, msg, w, l)
         }
         WM_DISPLAYCHANGE => {
             push_cmd(Cmd::RefreshMonitors);
@@ -3621,6 +3967,8 @@ fn apply_bar_statics(cfg: &Config) {
         Ordering::Relaxed,
     );
     BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
+    BAR_AUTOHIDE.store(cfg.bar_autohide, Ordering::Relaxed);
+    BAR_AUTOHIDE_MS.store(cfg.bar_autohide_delay, Ordering::Relaxed);
     BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
     BAR_PADDING.store(cfg.bar_padding as isize, Ordering::Relaxed);
     *BAR_FONT_NAME.lock().unwrap() = cfg.bar_font_name.clone();
@@ -3855,12 +4203,18 @@ fn main() {
         eprintln!("Astur: panic — managed windows restored. {info}");
     }));
     unsafe {
+        // Per-Monitor V2 DPI awareness so that low-level mouse hooks, monitor
+        // rects, window positioning, and DWM frames all share true physical pixels
+        // across displays with different scaling factors (e.g. high-DPI laptop screen + external monitor).
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
         // 1ms timer resolution so the animation worker's frame sleeps are precise
         // (the default ~15.6ms granularity is the main cause of choppy motion).
         let _ = windows::Win32::Media::timeBeginPeriod(1);
 
         let hmod = GetModuleHandleW(None).expect("GetModuleHandleW failed");
         let hinst = HINSTANCE(hmod.0);
+        let arrow_cursor = LoadCursorW(None, IDC_ARROW).unwrap_or_default();
 
         // Load config once here so the bars (main thread) and the manager thread
         // share the exact same settings.
@@ -3890,6 +4244,7 @@ fn main() {
             hInstance: hinst,
             hbrBackground: brush,
             lpszClassName: w!("astur_marker"),
+            hCursor: arrow_cursor,
             ..Default::default()
         };
         RegisterClassW(&wc);
@@ -3901,6 +4256,7 @@ fn main() {
             hInstance: hinst,
             hbrBackground: CreateSolidBrush(COLORREF(0)),
             lpszClassName: SLIDE_CLASS,
+            hCursor: arrow_cursor,
             ..Default::default()
         };
         RegisterClassW(&slide_wc);
@@ -3932,11 +4288,15 @@ fn main() {
                 hInstance: hinst,
                 hbrBackground: bar_brush,
                 lpszClassName: w!("astur_bar"),
+                hCursor: arrow_cursor,
                 ..Default::default()
             };
             RegisterClassW(&bwc);
             make_bar_font(cfg.bar_height, cfg.bar_font_size);
             ensure_bars();
+            if cfg.bar_autohide {
+                trigger_bar_reveal();
+            }
         }
 
         let mouse_hook = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0)
@@ -4057,3 +4417,4 @@ fn main() {
         let _ = windows::Win32::Media::timeEndPeriod(1);
     }
 }
+
