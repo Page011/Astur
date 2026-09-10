@@ -13,8 +13,7 @@
 // Both hooks run on this process's message-loop thread, so all drag state lives
 // behind a single Mutex with effectively zero contention.
 
-// Uncomment to run without a console window (release builds):
-// #![windows_subsystem = "windows"]
+#![windows_subsystem = "windows"]
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
@@ -28,7 +27,7 @@ use layout::{dwindle_layout, master_stack, resize_dwindle, split_ratio};
 use windows::core::{w, PCWSTR};
 use windows::Win32::System::SystemInformation::GetLocalTime;
 use windows::Win32::Foundation::{
-    BOOL, COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
+    CloseHandle, BOOL, COLORREF, ERROR_ALREADY_EXISTS, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SYSTEMTIME, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, BitBlt, CombineRgn, CreateCompatibleBitmap, CreateCompatibleDC, CreateFontW,
@@ -42,23 +41,29 @@ use windows::Win32::Graphics::Gdi::{
     PAINTSTRUCT, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Console::SetConsoleCtrlHandler;
+use windows::Win32::System::Console::{
+    AttachConsole, SetConsoleCtrlHandler, ATTACH_PARENT_PROCESS, GetStdHandle, STD_OUTPUT_HANDLE,
+};
+use windows::Win32::UI::Shell::{
+    Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LCONTROL, VK_LMENU,
     VK_LWIN, VK_MENU, VK_RBUTTON, VK_RCONTROL, VK_RWIN, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
-    GetDesktopWindow, GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, RegisterClassW,
-    SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    SetCursorPos,
-    TranslateMessage,
-    UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HWND_TOPMOST, KBDLLHOOKSTRUCT,
-    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE,
-    SWP_NOZORDER,
-    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, DestroyWindow, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
-    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    AppendMenuW, CallNextHookEx, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
+    DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetAncestor, GetDesktopWindow,
+    GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, MessageBoxW, PostQuitMessage,
+    RegisterClassW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW,
+    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
+    HC_ACTION, HICON, HWND_TOPMOST, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
+    LR_DEFAULTCOLOR, LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MF_SEPARATOR, MF_STRING, MSG,
+    MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_HIDE, SW_RESTORE, SW_SHOWNA, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WH_MOUSE_LL,
+    WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NULL, WM_QUERYENDSESSION, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
     WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
     WS_EX_TRANSPARENT, WS_POPUP,
 };
@@ -71,7 +76,9 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
-use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentProcessId, GetCurrentThreadId};
+use windows::Win32::System::Threading::{
+    AttachThreadInput, CreateMutexW, GetCurrentProcessId, GetCurrentThreadId,
+};
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -85,7 +92,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SPI_SETFOREGROUNDLOCKTIMEOUT,
     SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
     WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_PAINT, WM_SETCURSOR, WM_TIMER, WM_USER, WS_CHILD,
-    LoadCursorW, SetCursor, IDC_ARROW, IDC_HAND,
+    LoadCursorW, LoadIconW, SetCursor, IDC_ARROW, IDC_HAND,
 };
 use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
@@ -319,6 +326,18 @@ fn drag_active() -> bool {
 
 /// WndProc for the marker window: nothing custom, the class brush paints it red.
 unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_CLOSE || msg == WM_QUERYENDSESSION || msg == WM_ENDSESSION {
+        let raw = TRAY_HWND.load(Ordering::Relaxed);
+        if raw != 0 {
+            tray_remove(hwnd_from(raw));
+        }
+        restore_all_windows();
+        if msg == WM_CLOSE {
+            PostQuitMessage(0);
+            return LRESULT(0);
+        }
+        return DefWindowProcW(h, msg, w, l);
+    }
     if msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED {
         // Reposition/create bars for the new monitor layout/DPI, then retile.
         ensure_bars();
@@ -1723,6 +1742,10 @@ fn restore_on_panic() {
 /// Console control handler: on Ctrl+C / window-close / logoff, un-hide every
 /// managed window before the process dies so the user never loses them.
 unsafe extern "system" fn console_handler(_ctrl_type: u32) -> BOOL {
+    let raw = TRAY_HWND.load(Ordering::Relaxed);
+    if raw != 0 {
+        tray_remove(hwnd_from(raw));
+    }
     restore_all_windows();
     BOOL(0) // not fully handled — let the default handler terminate us
 }
@@ -4636,7 +4659,176 @@ fn print_startup_banner(cfg: &Config) {
     println!("  ws1=mon1, ws2=mon2, ws3=mon3, ws4=mon1 (2nd), and so on.");
     println!("  Edit %USERPROFILE%\\.astur\\astur.conf then restart.");
     println!("  workspace_mode = shared | per_monitor; set terminal/browser too.");
-    println!("Press Ctrl+C in this window to quit (windows are restored).");
+    println!("Press Ctrl+C or use the system tray icon to quit (windows are restored).");
+}
+
+// =========================================================================
+// Single-instance guard & system tray
+// =========================================================================
+
+const INSTANCE_MUTEX: PCWSTR = w!(r"Local\astur.instance");
+static INSTANCE_LOCK: AtomicIsize = AtomicIsize::new(0);
+
+/// Take the single-instance lock. `false` = another Astur already owns it.
+unsafe fn claim_single_instance() -> bool {
+    let Ok(handle) = CreateMutexW(None, true, INSTANCE_MUTEX) else {
+        return true; // cannot create mutex: do not block the user
+    };
+    if windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
+        let _ = CloseHandle(handle);
+        return false;
+    }
+    INSTANCE_LOCK.store(handle.0 as isize, Ordering::Relaxed);
+    true
+}
+
+/// Attach to the console that launched us, if any, so terminal launches
+/// print the startup banner. No AllocConsole: launching from Explorer
+/// or shortcut runs with no console window.
+unsafe fn attach_parent_console() {
+    let already =
+        matches!(GetStdHandle(STD_OUTPUT_HANDLE), Ok(h) if !h.is_invalid() && !h.0.is_null());
+    if already {
+        return;
+    }
+    let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+}
+
+const WM_TRAY: u32 = WM_USER + 20;
+const TRAY_OPEN_CONFIG: usize = 1;
+const TRAY_QUIT: usize = 2;
+
+static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
+
+// Embedded tray icon PNG (32x32 transparent).
+const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+
+/// Build the tray HICON from the embedded PNG (Win10/11 accept PNG icon bits).
+/// Falls back to the stock application icon if creation fails.
+unsafe fn tray_icon() -> HICON {
+    CreateIconFromResourceEx(
+        TRAY_ICON_PNG,
+        BOOL(1),
+        0x0003_0000,
+        0,
+        0,
+        LR_DEFAULTCOLOR,
+    )
+    .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default())
+}
+
+unsafe fn tray_add(hwnd: HWND) {
+    let mut nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
+        uCallbackMessage: WM_TRAY,
+        hIcon: tray_icon(),
+        ..Default::default()
+    };
+    for (i, c) in "Astur".encode_utf16().enumerate().take(127) {
+        nid.szTip[i] = c;
+    }
+    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+unsafe fn tray_remove(hwnd: HWND) {
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+}
+
+/// Open the configuration directory in Windows File Explorer (%USERPROFILE%\.astur).
+fn open_config_directory() {
+    let dir = config_path("ASTUR_CONFIG", "astur.conf")
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| {
+            let mut d = std::env::var("USERPROFILE")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|_| std::path::PathBuf::from("."));
+            d.push(".astur");
+            d
+        });
+    let _ = std::fs::create_dir_all(&dir);
+    let _ = std::process::Command::new("explorer.exe").arg(&dir).spawn();
+}
+
+unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_TRAY {
+        let event = (l.0 as u32) & 0xFFFF;
+        if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
+            open_config_directory();
+        } else if event == WM_RBUTTONUP {
+            if let Ok(menu) = CreatePopupMenu() {
+                let s1: Vec<u16> = "Open Configuration\0".encode_utf16().collect();
+                let s2: Vec<u16> = "Quit Astur\0".encode_utf16().collect();
+                let _ = AppendMenuW(menu, MF_STRING, TRAY_OPEN_CONFIG, PCWSTR(s1.as_ptr()));
+                let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+                let _ = AppendMenuW(menu, MF_STRING, TRAY_QUIT, PCWSTR(s2.as_ptr()));
+
+                let mut pt = POINT::default();
+                let _ = GetCursorPos(&mut pt);
+                let _ = SetForegroundWindow(h);
+                let cmd = TrackPopupMenu(
+                    menu,
+                    TPM_RETURNCMD | TPM_RIGHTBUTTON,
+                    pt.x,
+                    pt.y,
+                    0,
+                    h,
+                    None,
+                );
+                let _ = PostMessageW(h, WM_NULL, WPARAM(0), LPARAM(0));
+                let _ = DestroyMenu(menu);
+                match cmd.0 as usize {
+                    TRAY_OPEN_CONFIG => open_config_directory(),
+                    TRAY_QUIT => {
+                        tray_remove(h);
+                        restore_all_windows();
+                        PostQuitMessage(0);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        return LRESULT(0);
+    }
+    DefWindowProcW(h, msg, w, l)
+}
+
+/// Register + create the hidden tray window and add the tray icon. Returns its HWND.
+unsafe fn setup_tray(hinst: HINSTANCE) -> Option<HWND> {
+    let wc = WNDCLASSW {
+        lpfnWndProc: Some(tray_wndproc),
+        hInstance: hinst,
+        lpszClassName: w!("astur_tray"),
+        ..Default::default()
+    };
+    RegisterClassW(&wc);
+    let hwnd = CreateWindowExW(
+        WS_EX_TOOLWINDOW,
+        w!("astur_tray"),
+        w!("Astur"),
+        WS_POPUP,
+        0,
+        0,
+        0,
+        0,
+        None,
+        None,
+        hinst,
+        None,
+    )
+    .ok()?;
+    TRAY_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
+    tray_add(hwnd);
+    Some(hwnd)
 }
 
 fn main() {
@@ -4649,6 +4841,18 @@ fn main() {
         eprintln!("Astur: panic — managed windows restored. {info}");
     }));
     unsafe {
+        attach_parent_console();
+
+        if !claim_single_instance() {
+            println!("Astur is already running.");
+            let _ = MessageBoxW(
+                None,
+                w!("Astur is already running.\n\nUse the system tray icon to open configuration or quit."),
+                w!("Astur"),
+                MB_OK | MB_ICONINFORMATION,
+            );
+            std::process::exit(0);
+        }
         // Per-Monitor V2 DPI awareness so that low-level mouse hooks, monitor
         // rects, window positioning, and DWM frames all share true physical pixels
         // across displays with different scaling factors (e.g. high-DPI laptop screen + external monitor).
@@ -4756,6 +4960,9 @@ fn main() {
         // hidden on another workspace when Astur exits.
         let _ = SetConsoleCtrlHandler(Some(console_handler), BOOL(1));
 
+        // System tray icon — provides Open Configuration and Quit.
+        let _tray = setup_tray(hinst);
+
         // Reduce the foreground lock so the manager can focus windows reliably.
         let _ = SystemParametersInfoW(
             SPI_SETFOREGROUNDLOCKTIMEOUT,
@@ -4834,9 +5041,15 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
+        let raw = TRAY_HWND.load(Ordering::Relaxed);
+        if raw != 0 {
+            tray_remove(hwnd_from(raw));
+        }
+        restore_all_windows();
         let _ = UnhookWindowsHookEx(kbd_hook);
         let _ = UnhookWindowsHookEx(mouse_hook);
         let _ = windows::Win32::Media::timeEndPeriod(1);
+        std::process::exit(0);
     }
 }
 
@@ -4853,6 +5066,16 @@ mod tests {
         win_alt_c.modifier = "win_alt".to_string();
         win_alt_c.passthrough_classes = vec!["Emacs".to_string()];
         print_startup_banner(&win_alt_c);
+    }
+
+    #[test]
+    fn test_tray_icon_bytes_valid() {
+        assert!(!TRAY_ICON_PNG.is_empty());
+        assert_eq!(&TRAY_ICON_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        unsafe {
+            let icon = tray_icon();
+            assert!(!icon.0.is_null());
+        }
     }
 }
 
