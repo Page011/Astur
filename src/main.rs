@@ -782,6 +782,7 @@ static BAR_HEIGHT: AtomicIsize = AtomicIsize::new(0); // 0 = bar disabled
 static BAR_BOTTOM: AtomicBool = AtomicBool::new(false);
 static BAR_AUTOHIDE: AtomicBool = AtomicBool::new(false);
 static BAR_AUTOHIDE_MS: AtomicU64 = AtomicU64::new(3000);
+static BAR_AUTOHIDE_FADE_MS: AtomicIsize = AtomicIsize::new(150);
 static BAR_HIDE_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static BAR_FONT_SIZE: AtomicIsize = AtomicIsize::new(0); // 0 = auto from height
 // Width of each workspace pill in px, and the bar text height, set from config.
@@ -857,6 +858,181 @@ fn pill_anim_x(hmon: isize) -> Option<(i32, bool)> {
     let t = (a.start.elapsed().as_secs_f64() * 1000.0 / PILL_ANIM_MS).min(1.0);
     let x = (a.from_x as f64 + (a.to_x - a.from_x) as f64 * ease_in_out_cubic(t)).round() as i32;
     Some((x, t >= 1.0))
+}
+
+#[derive(Clone, Copy)]
+struct BarFade {
+    current_alpha: u8,
+    from_alpha: u8,
+    to_alpha: u8,
+    start: Instant,
+    duration_ms: f64,
+}
+static BAR_FADE: Mutex<Option<HashMap<isize, BarFade>>> = Mutex::new(None);
+
+fn bar_fade_in(h: HWND) {
+    let hwnd_key = h.0 as isize;
+    let fade_ms = BAR_AUTOHIDE_FADE_MS.load(Ordering::Relaxed);
+    if fade_ms <= 0 {
+        unsafe {
+            let _ = KillTimer(h, FADE_TIMER_ID);
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+            let _ = ShowWindow(h, SW_SHOWNA);
+        }
+        let mut g = BAR_FADE.lock().unwrap();
+        if let Some(map) = g.as_mut() {
+            if let Some(entry) = map.get_mut(&hwnd_key) {
+                entry.current_alpha = 255;
+                entry.from_alpha = 255;
+                entry.to_alpha = 255;
+            }
+        }
+        return;
+    }
+
+    let mut g = BAR_FADE.lock().unwrap();
+    let map = g.get_or_insert_with(HashMap::new);
+    if let Some(f) = map.get(&hwnd_key) {
+        // If already fading in towards 255, let the animation continue smoothly
+        if f.to_alpha == 255 && f.current_alpha < 255 {
+            return;
+        }
+        if f.current_alpha == 255 {
+            unsafe {
+                let _ = KillTimer(h, FADE_TIMER_ID);
+                let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
+                let _ = ShowWindow(h, SW_SHOWNA);
+            }
+            return;
+        }
+    }
+
+    let current = map.get(&hwnd_key).map(|f| f.current_alpha).unwrap_or(0);
+    let duration_ms = (fade_ms as f64 * ((255 - current) as f64 / 255.0)).max(20.0);
+    map.insert(
+        hwnd_key,
+        BarFade {
+            current_alpha: current,
+            from_alpha: current,
+            to_alpha: 255,
+            start: Instant::now(),
+            duration_ms,
+        },
+    );
+    drop(g);
+
+    unsafe {
+        let _ = SetLayeredWindowAttributes(h, COLORREF(0), current, LWA_ALPHA);
+        let _ = ShowWindow(h, SW_SHOWNA);
+        SetTimer(h, FADE_TIMER_ID, 16, None);
+    }
+}
+
+fn bar_fade_out(h: HWND) {
+    let hwnd_key = h.0 as isize;
+    let fade_ms = BAR_AUTOHIDE_FADE_MS.load(Ordering::Relaxed);
+    if fade_ms <= 0 {
+        unsafe {
+            let _ = KillTimer(h, FADE_TIMER_ID);
+            let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
+            let _ = SetLayeredWindowAttributes(h, COLORREF(0), 0, LWA_ALPHA);
+            let _ = ShowWindow(h, SW_HIDE);
+        }
+        let mut g = BAR_FADE.lock().unwrap();
+        if let Some(map) = g.as_mut() {
+            if let Some(entry) = map.get_mut(&hwnd_key) {
+                entry.current_alpha = 0;
+                entry.from_alpha = 0;
+                entry.to_alpha = 0;
+            }
+        }
+        return;
+    }
+
+    let mut g = BAR_FADE.lock().unwrap();
+    let map = g.get_or_insert_with(HashMap::new);
+    if let Some(f) = map.get(&hwnd_key) {
+        // If already fading out towards 0 or already hidden, nothing to do
+        if f.to_alpha == 0 || f.current_alpha == 0 {
+            return;
+        }
+    }
+
+    let current = map.get(&hwnd_key).map(|f| f.current_alpha).unwrap_or(255);
+    let duration_ms = (fade_ms as f64 * (current as f64 / 255.0)).max(20.0);
+    map.insert(
+        hwnd_key,
+        BarFade {
+            current_alpha: current,
+            from_alpha: current,
+            to_alpha: 0,
+            start: Instant::now(),
+            duration_ms,
+        },
+    );
+    drop(g);
+
+    unsafe {
+        SetTimer(h, FADE_TIMER_ID, 16, None);
+    }
+}
+
+unsafe fn bar_fade_tick(h: HWND) {
+    let hwnd_key = h.0 as isize;
+
+    let anim = {
+        let g = BAR_FADE.lock().unwrap();
+        g.as_ref().and_then(|m| m.get(&hwnd_key).copied())
+    };
+
+    let Some(anim) = anim else {
+        let _ = KillTimer(h, FADE_TIMER_ID);
+        return;
+    };
+
+    // If fading out and cursor moves over the bar, cancel fade out and reveal!
+    if anim.to_alpha == 0 {
+        let mut pt = POINT::default();
+        if GetCursorPos(&mut pt).is_ok() {
+            let mut r = RECT::default();
+            if GetWindowRect(h, &mut r).is_ok() {
+                if pt.x >= r.left && pt.x < r.right && pt.y >= r.top && pt.y < r.bottom {
+                    let delay_ms = BAR_AUTOHIDE_MS.load(Ordering::Relaxed);
+                    *BAR_HIDE_AT.lock().unwrap() =
+                        Some(Instant::now() + Duration::from_millis(delay_ms));
+                    bar_fade_in(h);
+                    SetTimer(h, AUTOHIDE_TIMER_ID, 100, None);
+                    return;
+                }
+            }
+        }
+    }
+
+    let t = (anim.start.elapsed().as_secs_f64() * 1000.0 / anim.duration_ms).min(1.0);
+    let eased = ease_in_out_cubic(t);
+    let alpha = (anim.from_alpha as f64 + (anim.to_alpha as f64 - anim.from_alpha as f64) * eased)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+
+    let _ = SetLayeredWindowAttributes(h, COLORREF(0), alpha, LWA_ALPHA);
+
+    {
+        let mut g = BAR_FADE.lock().unwrap();
+        if let Some(map) = g.as_mut() {
+            if let Some(entry) = map.get_mut(&hwnd_key) {
+                entry.current_alpha = alpha;
+            }
+        }
+    }
+
+    if t >= 1.0 {
+        let _ = KillTimer(h, FADE_TIMER_ID);
+        if anim.to_alpha == 0 {
+            // Fade out finished: hide the window and stop the autohide timer
+            let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
+            let _ = ShowWindow(h, SW_HIDE);
+        }
+    }
 }
 
 /// Per-monitor paint data. One entry per drawn pill: `slots[i]` is the local
@@ -935,6 +1111,8 @@ const WM_BAR_REVEAL: u32 = WM_USER + 4;
 const BAR_TIMER_ID: usize = 1;
 // SetTimer id for autohide countdown.
 const AUTOHIDE_TIMER_ID: usize = 3;
+// SetTimer id for autohide fade animation.
+const FADE_TIMER_ID: usize = 4;
 
 fn push_cmd(c: Cmd) {
     let mut q = CMDQ.lock().unwrap();
@@ -3214,11 +3392,16 @@ unsafe fn ensure_bars() {
     let mut bars = BARS.lock().unwrap();
     // Destroy and remove bar windows whose monitors disappeared.
     let present: Vec<isize> = raw.iter().map(|(h, _)| *h).collect();
+    let mut fade_guard = BAR_FADE.lock().unwrap();
     for b in bars.iter() {
         if !present.contains(&b.hmon) {
             let _ = DestroyWindow(hwnd_from(b.hwnd));
+            if let Some(map) = fade_guard.as_mut() {
+                map.remove(&b.hwnd);
+            }
         }
     }
+    drop(fade_guard);
     bars.retain(|b| present.contains(&b.hmon));
 
     for &(hmon, rcm) in &raw {
@@ -3238,11 +3421,20 @@ unsafe fn ensure_bars() {
                 SWP_NOACTIVATE | if autohide { SWP_NOZORDER } else { SWP_SHOWWINDOW },
             );
             if !autohide {
+                let _ = SetLayeredWindowAttributes(hwnd_from(b.hwnd), COLORREF(0), 255, LWA_ALPHA);
                 let _ = ShowWindow(hwnd_from(b.hwnd), SW_SHOWNA);
+                let mut g = BAR_FADE.lock().unwrap();
+                if let Some(map) = g.as_mut() {
+                    if let Some(entry) = map.get_mut(&b.hwnd) {
+                        entry.current_alpha = 255;
+                        entry.from_alpha = 255;
+                        entry.to_alpha = 255;
+                    }
+                }
             }
         } else {
             let hb = CreateWindowExW(
-                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_LAYERED,
                 w!("astur_bar"),
                 w!(""),
                 WS_POPUP,
@@ -3257,6 +3449,22 @@ unsafe fn ensure_bars() {
             )
             .expect("bar window failed");
             SetWindowLongPtrW(hb, GWLP_USERDATA, hmon);
+            let init_alpha = if autohide { 0 } else { 255 };
+            let _ = SetLayeredWindowAttributes(hb, COLORREF(0), init_alpha, LWA_ALPHA);
+            {
+                let mut g = BAR_FADE.lock().unwrap();
+                let map = g.get_or_insert_with(HashMap::new);
+                map.insert(
+                    hb.0 as isize,
+                    BarFade {
+                        current_alpha: init_alpha,
+                        from_alpha: init_alpha,
+                        to_alpha: init_alpha,
+                        start: Instant::now(),
+                        duration_ms: 0.0,
+                    },
+                );
+            }
             if !autohide {
                 let _ = ShowWindow(hb, SW_SHOWNA);
             }
@@ -3813,15 +4021,21 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             LRESULT(0)
         }
         WM_BAR_REVEAL => {
-            let _ = ShowWindow(h, SW_SHOWNA);
+            bar_fade_in(h);
             let _ = InvalidateRect(h, None, BOOL(0));
             SetTimer(h, AUTOHIDE_TIMER_ID, 100, None);
             LRESULT(0)
         }
         WM_TIMER => {
+            if w.0 == FADE_TIMER_ID {
+                bar_fade_tick(h);
+                return LRESULT(0);
+            }
             if w.0 == AUTOHIDE_TIMER_ID {
                 if !BAR_AUTOHIDE.load(Ordering::Relaxed) {
                     let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
+                    let _ = KillTimer(h, FADE_TIMER_ID);
+                    let _ = SetLayeredWindowAttributes(h, COLORREF(0), 255, LWA_ALPHA);
                     let _ = ShowWindow(h, SW_SHOWNA);
                     return LRESULT(0);
                 }
@@ -3837,19 +4051,17 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                 }
                 if hovered {
                     let delay_ms = BAR_AUTOHIDE_MS.load(Ordering::Relaxed);
-                    *BAR_HIDE_AT.lock().unwrap() = Some(Instant::now() + Duration::from_millis(delay_ms));
+                    *BAR_HIDE_AT.lock().unwrap() =
+                        Some(Instant::now() + Duration::from_millis(delay_ms));
+                    bar_fade_in(h);
                 } else {
                     let hide_at = *BAR_HIDE_AT.lock().unwrap();
-                    if let Some(target) = hide_at {
-                        if Instant::now() >= target {
-                            let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
-                            let _ = ShowWindow(h, SW_HIDE);
-                            return LRESULT(0);
-                        }
-                    } else {
-                        let _ = KillTimer(h, AUTOHIDE_TIMER_ID);
-                        let _ = ShowWindow(h, SW_HIDE);
-                        return LRESULT(0);
+                    let expired = match hide_at {
+                        Some(target) => Instant::now() >= target,
+                        None => true,
+                    };
+                    if expired {
+                        bar_fade_out(h);
                     }
                 }
                 return LRESULT(0);
@@ -3969,6 +4181,14 @@ fn apply_bar_statics(cfg: &Config) {
     BAR_BOTTOM.store(cfg.bar_bottom, Ordering::Relaxed);
     BAR_AUTOHIDE.store(cfg.bar_autohide, Ordering::Relaxed);
     BAR_AUTOHIDE_MS.store(cfg.bar_autohide_delay, Ordering::Relaxed);
+    BAR_AUTOHIDE_FADE_MS.store(
+        if cfg.animations {
+            cfg.bar_autohide_fade_ms as isize
+        } else {
+            0
+        },
+        Ordering::Relaxed,
+    );
     BAR_FONT_SIZE.store(cfg.bar_font_size as isize, Ordering::Relaxed);
     BAR_PADDING.store(cfg.bar_padding as isize, Ordering::Relaxed);
     *BAR_FONT_NAME.lock().unwrap() = cfg.bar_font_name.clone();
