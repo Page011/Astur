@@ -45,8 +45,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_LBUTTON, VK_LMENU, VK_MENU, VK_RBUTTON,
-    VK_TAB,
+    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LCONTROL, VK_LMENU,
+    VK_LWIN, VK_MENU, VK_RBUTTON, VK_RCONTROL, VK_RWIN, VK_TAB,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DispatchMessageW, GetAncestor,
@@ -270,7 +270,19 @@ unsafe fn vk_down(vk: VIRTUAL_KEY) -> bool {
 }
 
 #[inline]
+unsafe fn is_compound_modifier_down() -> bool {
+    vk_down(VK_LWIN)
+        || vk_down(VK_RWIN)
+        || vk_down(VK_CONTROL)
+        || vk_down(VK_LCONTROL)
+        || vk_down(VK_RCONTROL)
+}
+
+#[inline]
 unsafe fn left_alt_down() -> bool {
+    if is_compound_modifier_down() {
+        return false;
+    }
     // Trust the hook flag, but fall back to the live key state so a missed
     // key-down (e.g. Alt held before the hook saw it) can't wedge the modifier.
     ALT_DOWN.load(Ordering::Relaxed) || vk_down(VK_LMENU)
@@ -346,22 +358,50 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 PRESSED[kb.vkCode as usize].store(false, Ordering::Relaxed);
             }
 
+            // If Left Alt was held (claimed by Astur) and the user presses Win or Ctrl,
+            // transition out of the WM modifier state so compound shortcuts (e.g. Win+Alt+Space,
+            // Ctrl+Alt+...) pass cleanly to the system and applications.
+            if down && ALT_DOWN.load(Ordering::Relaxed) {
+                if kb.vkCode == VK_LWIN.0 as u32
+                    || kb.vkCode == VK_RWIN.0 as u32
+                    || kb.vkCode == VK_CONTROL.0 as u32
+                    || kb.vkCode == VK_LCONTROL.0 as u32
+                    || kb.vkCode == VK_RCONTROL.0 as u32
+                {
+                    if ALT_DOWN.swap(false, Ordering::Relaxed) {
+                        if FAKE_ALT.swap(false, Ordering::Relaxed) {
+                            inject_key(VK_MENU, true);
+                        }
+                        inject_key(VK_LMENU, false);
+                    }
+                    return CallNextHookEx(None, code, wparam, lparam);
+                }
+            }
+
             if kb.vkCode == VK_LMENU.0 as u32 {
                 if down {
-                    ALT_DOWN.store(true, Ordering::Relaxed);
-                } else if up {
-                    ALT_DOWN.store(false, Ordering::Relaxed);
-                    // Release the synthetic Alt so the task switcher commits.
-                    if FAKE_ALT.swap(false, Ordering::Relaxed) {
-                        inject_key(VK_MENU, true);
+                    // Do not claim Left Alt if a compound modifier (Win or Ctrl) is already held.
+                    if is_compound_modifier_down() {
+                        return CallNextHookEx(None, code, wparam, lparam);
                     }
+                    ALT_DOWN.store(true, Ordering::Relaxed);
+                    return LRESULT(1); // never let apps see Left Alt
+                } else if up {
+                    // Only swallow keyup if Astur claimed the corresponding keydown.
+                    if ALT_DOWN.swap(false, Ordering::Relaxed) {
+                        // Release the synthetic Alt so the task switcher commits.
+                        if FAKE_ALT.swap(false, Ordering::Relaxed) {
+                            inject_key(VK_MENU, true);
+                        }
+                        return LRESULT(1);
+                    }
+                    return CallNextHookEx(None, code, wparam, lparam);
                 }
-                return LRESULT(1); // never let apps see Left Alt
             }
 
             // Alt+Tab (and Alt+Shift+Tab): drive the switcher with injected keys
             // and swallow the physical Tab so it isn't counted twice.
-            if kb.vkCode == VK_TAB.0 as u32 && ALT_DOWN.load(Ordering::Relaxed) {
+            if kb.vkCode == VK_TAB.0 as u32 && ALT_DOWN.load(Ordering::Relaxed) && !is_compound_modifier_down() {
                 if down {
                     if !FAKE_ALT.swap(true, Ordering::Relaxed) {
                         inject_key(VK_MENU, false);
@@ -373,7 +413,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             }
 
             // Tiling hotkeys: Alt + key. Swallowed from apps (Alt is reserved).
-            if down && ALT_DOWN.load(Ordering::Relaxed) {
+            if down && ALT_DOWN.load(Ordering::Relaxed) && !is_compound_modifier_down() {
                 let shift = vk_down(VK_SHIFT);
                 if let Some(cmd) = resolve_hotkey(kb.vkCode, shift) {
                     let vk = kb.vkCode as usize;
