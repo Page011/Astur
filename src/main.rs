@@ -87,11 +87,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SetWindowLongPtrW, GWLP_USERDATA, PM_REMOVE,
     KillTimer, PW_RENDERFULLCONTENT, SetForegroundWindow, SetTimer, SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
-    EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
     EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWL_EXSTYLE, GWL_STYLE, GW_OWNER,
     SPI_SETFOREGROUNDLOCKTIMEOUT,
     SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
     WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_PAINT, WM_SETCURSOR, WM_TIMER, WM_USER, WS_CHILD,
+    WS_THICKFRAME, WS_MAXIMIZEBOX,
     LoadCursorW, LoadIconW, SetCursor, IDC_ARROW, IDC_HAND,
 };
 use windows::Win32::UI::HiDpi::{
@@ -1406,6 +1408,18 @@ unsafe fn tracked_window_alive(hwnd: HWND) -> bool {
     !hwnd.0.is_null() && IsWindow(hwnd).as_bool()
 }
 
+/// Is this window cloaked by DWM (e.g. UWP suspended app, virtual desktop)?
+unsafe fn is_cloaked(hwnd: HWND) -> bool {
+    let mut cloaked = 0u32;
+    let ok = DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_CLOAKED,
+        &mut cloaked as *mut _ as *mut c_void,
+        core::mem::size_of::<u32>() as u32,
+    );
+    ok.is_ok() && cloaked != 0
+}
+
 /// Is this a normal top-level application window we should tile?
 unsafe fn is_manageable(hwnd: HWND) -> bool {
     if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() {
@@ -1436,20 +1450,6 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
     {
         return false;
     }
-    if GetWindowTextLengthW(hwnd) == 0 {
-        return false;
-    }
-    // Skip cloaked windows (e.g. UWP ghost windows on other virtual desktops).
-    let mut cloaked = 0u32;
-    let _ = DwmGetWindowAttribute(
-        hwnd,
-        DWMWA_CLOAKED,
-        &mut cloaked as *mut _ as *mut c_void,
-        core::mem::size_of::<u32>() as u32,
-    );
-    if cloaked != 0 {
-        return false;
-    }
     // Reject known shell/desktop classes and any user-configured ignore list.
     let class = window_class(hwnd);
     if BLOCK_CLASSES.contains(&class.as_str()) {
@@ -1461,6 +1461,26 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
         .iter()
         .any(|c| c.eq_ignore_ascii_case(&class))
     {
+        return false;
+    }
+    if GetWindowTextLengthW(hwnd) == 0 {
+        // ApplicationFrameWindow with an empty title is a background phantom frame;
+        // real UWP apps (e.g. Settings, Calculator) always have a non-empty title.
+        if class == "ApplicationFrameWindow" {
+            return false;
+        }
+        // Major browsers and desktop applications (Firefox 'MozillaWindowClass',
+        // Chromium/Electron 'Chrome_WidgetWin_1') create their top-level resizable
+        // window and show it before setting the initial window/tab title. If it is
+        // a standard resizable, maximizable top-level application window, permit it;
+        // otherwise reject.
+        let is_standard_app = (style & WS_THICKFRAME.0 != 0) && (style & WS_MAXIMIZEBOX.0 != 0);
+        if !is_standard_app {
+            return false;
+        }
+    }
+    // Skip cloaked windows (e.g. UWP ghost windows on other virtual desktops).
+    if is_cloaked(hwnd) {
         return false;
     }
     true
@@ -1659,7 +1679,11 @@ unsafe fn window_under_point(mgr: &Manager, mi: usize, pt: POINT, exclude: isize
     let a = mgr.monitors[mi].active;
     let ws = &mgr.monitors[mi].workspaces[a];
     for &w in &ws.windows {
-        if w == exclude || ws.floating.contains(&w) {
+        if w == exclude
+            || ws.floating.contains(&w)
+            || IsIconic(hwnd_from(w)).as_bool()
+            || is_cloaked(hwnd_from(w))
+        {
             continue;
         }
         let mut r = RECT::default();
@@ -1839,7 +1863,11 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
         .windows
         .iter()
         .copied()
-        .filter(|h| !ws.floating.contains(h) && !IsIconic(hwnd_from(*h)).as_bool())
+        .filter(|h| {
+            !ws.floating.contains(h)
+                && !IsIconic(hwnd_from(*h)).as_bool()
+                && !is_cloaked(hwnd_from(*h))
+        })
         .collect();
     let n = tiled.len();
     if n == 0 {
@@ -1915,6 +1943,8 @@ fn schedule_retile() {
         std::thread::sleep(std::time::Duration::from_millis(60));
         push_cmd(Cmd::Retile);
         std::thread::sleep(std::time::Duration::from_millis(80));
+        push_cmd(Cmd::Retile);
+        std::thread::sleep(std::time::Duration::from_millis(150));
         push_cmd(Cmd::Retile);
     });
 }
@@ -3046,7 +3076,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     .windows
                     .iter()
                     .copied()
-                    .filter(|h| !ws.floating.contains(h) && !IsIconic(hwnd_from(*h)).as_bool())
+                    .filter(|h| {
+                        !ws.floating.contains(h)
+                            && !IsIconic(hwnd_from(*h)).as_bool()
+                            && !is_cloaked(hwnd_from(*h))
+                    })
                     .collect();
                 let n = tiled.len();
                 if n >= 2 {
@@ -4448,9 +4482,37 @@ unsafe extern "system" fn win_event_proc(
         return;
     }
     match event {
-        EVENT_OBJECT_SHOW => {
+        EVENT_OBJECT_SHOW | EVENT_OBJECT_UNCLOAKED => {
             if !SUPPRESS.load(Ordering::Relaxed) {
+                let h = hwnd.0 as isize;
+                push_cmd(Cmd::Add(h));
+                if event == EVENT_OBJECT_UNCLOAKED {
+                    push_cmd(Cmd::Retile);
+                }
+            }
+        }
+        EVENT_OBJECT_NAMECHANGE => {
+            if !SUPPRESS.load(Ordering::Relaxed) {
+                // If a window opened with an empty title (e.g. Firefox) and was not
+                // yet managed, managing it now will tile it once the title appears.
                 push_cmd(Cmd::Add(hwnd.0 as isize));
+            }
+        }
+        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY => {
+            if !SUPPRESS.load(Ordering::Relaxed) {
+                push_cmd(Cmd::Remove(hwnd.0 as isize));
+            }
+        }
+        EVENT_OBJECT_CLOAKED => {
+            if !SUPPRESS.load(Ordering::Relaxed) {
+                // When a UWP app (e.g. Windows Settings) is closed, Windows cloaks it
+                // instead of destroying or hiding it. If it is iconic (minimized),
+                // retile so it stops taking space; if not iconic, it was closed so remove it.
+                if IsIconic(hwnd).as_bool() {
+                    push_cmd(Cmd::Retile);
+                } else {
+                    push_cmd(Cmd::Remove(hwnd.0 as isize));
+                }
             }
         }
         EVENT_SYSTEM_FOREGROUND => {
@@ -4463,11 +4525,6 @@ unsafe extern "system" fn win_event_proc(
             push_cmd(Cmd::Focused(h));
             if !SUPPRESS.load(Ordering::Relaxed) {
                 push_cmd(Cmd::Add(h));
-            }
-        }
-        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY => {
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                push_cmd(Cmd::Remove(hwnd.0 as isize));
             }
         }
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND => {
@@ -4983,8 +5040,17 @@ fn main() {
             WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
         );
         let _ = SetWinEventHook(
-            EVENT_OBJECT_SHOW,
-            EVENT_OBJECT_SHOW,
+            EVENT_OBJECT_NAMECHANGE,
+            EVENT_OBJECT_NAMECHANGE,
+            None,
+            Some(win_event_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+        );
+        let _ = SetWinEventHook(
+            EVENT_OBJECT_CLOAKED,
+            EVENT_OBJECT_UNCLOAKED,
             None,
             Some(win_event_proc),
             0,
