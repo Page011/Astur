@@ -15,7 +15,7 @@
 
 #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -76,8 +76,13 @@ use windows::Win32::Graphics::Dwm::{
     DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
+use windows::Win32::Security::{
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TokenIntegrityLevel,
+    TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
+};
 use windows::Win32::System::Threading::{
-    AttachThreadInput, CreateMutexW, GetCurrentProcessId, GetCurrentThreadId,
+    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+    OpenProcess, OpenProcessToken, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
@@ -1420,6 +1425,90 @@ unsafe fn is_cloaked(hwnd: HWND) -> bool {
     ok.is_ok() && cloaked != 0
 }
 
+/// Cached integrity level RID of our own Astur process (e.g. 0x2000 for Medium, 0x3000 for High).
+static CURRENT_INTEGRITY: AtomicU32 = AtomicU32::new(0x2000);
+
+/// Query and cache our own process integrity level RID.
+unsafe fn init_current_integrity() {
+    let mut token = Default::default();
+    if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_ok() {
+        let mut len = 0u32;
+        let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut len);
+        if len > 0 {
+            let mut buf = vec![0u8; len as usize];
+            if GetTokenInformation(
+                token,
+                TokenIntegrityLevel,
+                Some(buf.as_mut_ptr() as *mut _),
+                len,
+                &mut len,
+            )
+            .is_ok()
+            {
+                let tml = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+                let count_ptr = GetSidSubAuthorityCount(tml.Label.Sid);
+                if !count_ptr.is_null() && *count_ptr > 0 {
+                    let sub_auth_ptr = GetSidSubAuthority(tml.Label.Sid, (*count_ptr - 1) as u32);
+                    if !sub_auth_ptr.is_null() {
+                        CURRENT_INTEGRITY.store(*sub_auth_ptr, Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        let _ = CloseHandle(token);
+    }
+}
+
+/// Does the target process have a higher integrity level than Astur?
+/// A non-elevated (Medium IL) process cannot move or resize windows of an elevated (High IL)
+/// process (SetWindowPos fails with ERROR_ACCESS_DENIED, leaving a phantom/ghost tile),
+/// nor can it receive WH_KEYBOARD_LL hook events when an elevated window is focused.
+unsafe fn is_elevated_above_us(pid: u32) -> bool {
+    let my_integrity = CURRENT_INTEGRITY.load(Ordering::Relaxed);
+    // If Astur is running elevated (High IL 0x3000 or System 0x4000), no normal app is elevated above us.
+    if my_integrity >= 0x3000 {
+        return false;
+    }
+    let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+        // Cannot even query limited info -> inaccessible / protected process.
+        return true;
+    };
+    let mut token = Default::default();
+    let res = OpenProcessToken(handle, TOKEN_QUERY, &mut token);
+    let _ = CloseHandle(handle);
+    if res.is_err() {
+        return true;
+    }
+    let mut len = 0u32;
+    let _ = GetTokenInformation(token, TokenIntegrityLevel, None, 0, &mut len);
+    if len == 0 {
+        let _ = CloseHandle(token);
+        return false;
+    }
+    let mut buf = vec![0u8; len as usize];
+    let ok = GetTokenInformation(
+        token,
+        TokenIntegrityLevel,
+        Some(buf.as_mut_ptr() as *mut _),
+        len,
+        &mut len,
+    );
+    let _ = CloseHandle(token);
+    if ok.is_err() {
+        return false;
+    }
+    let tml = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
+    let count_ptr = GetSidSubAuthorityCount(tml.Label.Sid);
+    if count_ptr.is_null() || *count_ptr == 0 {
+        return false;
+    }
+    let sub_auth_ptr = GetSidSubAuthority(tml.Label.Sid, (*count_ptr - 1) as u32);
+    if sub_auth_ptr.is_null() {
+        return false;
+    }
+    *sub_auth_ptr > my_integrity
+}
+
 /// Is this a normal top-level application window we should tile?
 unsafe fn is_manageable(hwnd: HWND) -> bool {
     if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() {
@@ -1428,7 +1517,11 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
     // Never manage our own windows (console, marker, bars).
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    if pid == GetCurrentProcessId() {
+    if pid == GetCurrentProcessId() || pid == 0 {
+        return false;
+    }
+    // Reject windows whose process is elevated above ours (UIPI block).
+    if is_elevated_above_us(pid) {
         return false;
     }
     // Only true top-level roots, no owned tool/dialog windows.
@@ -4899,6 +4992,7 @@ fn main() {
     }));
     unsafe {
         attach_parent_console();
+        init_current_integrity();
 
         if !claim_single_instance() {
             println!("Astur is already running.");
@@ -5143,5 +5237,37 @@ mod tests {
             assert!(!icon.0.is_null());
         }
     }
+
+    #[test]
+    fn test_integrity_and_elevation_check() {
+        unsafe {
+            init_current_integrity();
+            let my_rid = CURRENT_INTEGRITY.load(Ordering::Relaxed);
+            assert!(my_rid >= 0x1000);
+            // Our own process should never be elevated above ourselves
+            assert!(!is_elevated_above_us(std::process::id()));
+        }
+    }
+
+    #[test]
+    fn test_taskmgr_detected_as_elevated() {
+        unsafe {
+            init_current_integrity();
+            let my_rid = CURRENT_INTEGRITY.load(Ordering::Relaxed);
+            if my_rid < 0x3000 {
+                if let Ok(hwnd) = FindWindowW(w!("TaskManagerWindow"), PCWSTR::null()) {
+                    if !hwnd.0.is_null() {
+                        let mut pid = 0u32;
+                        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+                        if pid != 0 {
+                            assert!(is_elevated_above_us(pid));
+                            assert!(!is_manageable(hwnd));
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
+
 
