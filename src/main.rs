@@ -1306,11 +1306,25 @@ struct Manager {
     // HMONITOR a launched terminal/browser should land on (the cursor's monitor at
     // launch time); consumed by the next Add. 0 = none.
     pending_launch_mon: isize,
+    // Remembers whether a window is floating or tiled across workspace and
+    // virtual desktop moves.
+    floating_state: HashMap<isize, bool>,
 }
 
 impl Manager {
     fn mon_by_hmon(&self, raw: isize) -> Option<usize> {
         self.monitors.iter().position(|m| m.hmon == raw)
+    }
+
+    fn is_window_floating(&self, h: isize) -> bool {
+        match self.floating_state.get(&h) {
+            Some(&f) => f,
+            None => unsafe { should_float(hwnd_from(h)) },
+        }
+    }
+
+    fn set_window_floating(&mut self, h: isize, floating: bool) {
+        self.floating_state.insert(h, floating);
     }
 
     /// Map a global (shared-mode) workspace index to (monitor, local workspace).
@@ -1941,6 +1955,33 @@ unsafe fn animate_to(hwnd: HWND, target: RECT) {
     }
 }
 
+/// Adjust a floating window's position when moving across monitors so it lands
+/// within the target monitor's work area at the same relative offset.
+unsafe fn translate_floating_to_monitor(hwnd: HWND, from_wa: RECT, to_wa: RECT) {
+    let mut wr = RECT::default();
+    if GetWindowRect(hwnd, &mut wr).is_ok() {
+        let rel_x = wr.left - from_wa.left;
+        let rel_y = wr.top - from_wa.top;
+        let w = wr.right - wr.left;
+        let h_px = wr.bottom - wr.top;
+        let max_x = (to_wa.right - w).max(to_wa.left);
+        let max_y = (to_wa.bottom - h_px).max(to_wa.top);
+        let new_x = (to_wa.left + rel_x).clamp(to_wa.left, max_x);
+        let new_y = (to_wa.top + rel_y).clamp(to_wa.top, max_y);
+        SUPPRESS.store(true, Ordering::Relaxed);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            new_x,
+            new_y,
+            w,
+            h_px,
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+        );
+        SUPPRESS.store(false, Ordering::Relaxed);
+    }
+}
+
 /// Compute the tiled (hwnd, screen-rect) targets for one workspace, in tiling
 /// order — shared by retiling and the slide compositor. Rects are raw layout
 /// rects (not yet border-corrected); callers adjust as needed.
@@ -2272,9 +2313,11 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
         let mi = monitor_index_for_window(mgr, hwnd_from(h));
         let a = mgr.monitors[mi].active;
         mgr.monitors[mi].workspaces[a].windows.push(h);
-        if should_float(hwnd_from(h)) {
+        let float = mgr.is_window_floating(h);
+        if float {
             mgr.monitors[mi].workspaces[a].floating.push(h);
         }
+        mgr.set_window_floating(h, float);
         mgr.monitors[mi].workspaces[a].focused = h;
     }
 }
@@ -2963,16 +3006,19 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             let (mi, local) = mgr.global_to_ml(global);
             (mi, local.min(mgr.monitors[mi].workspaces.len() - 1))
         };
-        let ws = &mut mgr.monitors[mi].workspaces[target_wi];
-        if !ws.windows.contains(&h) {
-            ws.windows.push(h);
-            if floating && !ws.floating.contains(&h) {
-                ws.floating.push(h);
-            }
-            if ws.focused == 0 {
-                ws.focused = h;
+        {
+            let ws = &mut mgr.monitors[mi].workspaces[target_wi];
+            if !ws.windows.contains(&h) {
+                ws.windows.push(h);
+                if floating && !ws.floating.contains(&h) {
+                    ws.floating.push(h);
+                }
+                if ws.focused == 0 {
+                    ws.focused = h;
+                }
             }
         }
+        mgr.set_window_floating(h, floating);
     }
     // Normalize visibility: windows re-homed from a hidden (inactive) workspace
     // onto a now-active one must be re-shown, and vice versa. Without this they
@@ -3014,9 +3060,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     .unwrap_or_else(|| monitor_index_for_window(mgr, hwnd_from(h)));
                 let a = mgr.monitors[mi].active;
                 mgr.monitors[mi].workspaces[a].windows.push(h);
-                if should_float(hwnd_from(h)) {
+                let float = mgr.is_window_floating(h);
+                if float {
                     mgr.monitors[mi].workspaces[a].floating.push(h);
                 }
+                mgr.set_window_floating(h, float);
                 mgr.monitors[mi].workspaces[a].focused = h;
                 mgr.focused_mon = mi;
                 retile_monitor(mgr, mi);
@@ -3035,6 +3083,14 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     retile_monitor(mgr, mi);
                 }
             }
+            // Clean up floating state for dead/destroyed windows so HWNDs don't leak
+            // or collide with future windows. Windows that are merely cloaked/hidden
+            // (e.g. on another Windows virtual desktop) remain valid windows and
+            // retain their floating status.
+            if !IsWindow(hwnd_from(h)).as_bool() {
+                mgr.floating_state.remove(&h);
+            }
+            mgr.floating_state.retain(|&k, _| IsWindow(hwnd_from(k)).as_bool());
         }
         Cmd::Focused(h) => {
             if let Some((mi, wi)) = mgr.locate(h) {
@@ -3228,7 +3284,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
         }
         Cmd::MoveToWs(i) => {
-            if i >= mgr.cfg.workspaces || !mgr.tiling || mgr.monitors.is_empty() {
+            if i >= mgr.cfg.workspaces || mgr.monitors.is_empty() {
                 return;
             }
             if mgr.cfg.bar_autohide {
@@ -3247,6 +3303,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             if to_mi == from_mi && to_local == from_a {
                 return;
             }
+            let was_floating = mgr.monitors[from_mi].workspaces[from_a].floating.contains(&h);
             {
                 let ws = &mut mgr.monitors[from_mi].workspaces[from_a];
                 ws.windows.retain(|&x| x != h);
@@ -3254,6 +3311,17 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 ws.focused = ws.windows.first().copied().unwrap_or(0);
             }
             mgr.monitors[to_mi].workspaces[to_local].windows.push(h);
+            if was_floating {
+                mgr.monitors[to_mi].workspaces[to_local].floating.push(h);
+                if to_mi != from_mi {
+                    translate_floating_to_monitor(
+                        hwnd_from(h),
+                        mgr.monitors[from_mi].work_area,
+                        mgr.monitors[to_mi].work_area,
+                    );
+                }
+            }
+            mgr.set_window_floating(h, was_floating);
             mgr.monitors[to_mi].workspaces[to_local].focused = h;
             retile_monitor(mgr, from_mi);
             // Follow the window: show its destination workspace, focus it, warp.
@@ -3296,8 +3364,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let ws = &mut mgr.monitors[mi].workspaces[a];
             if let Some(p) = ws.floating.iter().position(|&x| x == h) {
                 ws.floating.remove(p);
+                mgr.set_window_floating(h, false);
             } else {
                 ws.floating.push(h);
+                mgr.set_window_floating(h, true);
             }
             retile_monitor(mgr, mi);
         }
@@ -3318,16 +3388,33 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let Some((from_mi, from_wi)) = mgr.locate(h) else {
                 return;
             };
-            // Floating windows are left wherever the user dropped them.
-            if mgr.monitors[from_mi].workspaces[from_wi].floating.contains(&h) {
-                return;
-            }
+            let was_floating = mgr.monitors[from_mi].workspaces[from_wi].floating.contains(&h);
             let from_a = mgr.monitors[from_mi].active;
             if from_wi != from_a {
                 return;
             }
             let pt = POINT { x, y };
             let to_mi = monitor_index_for_point(mgr, pt);
+            if was_floating {
+                if to_mi != from_mi {
+                    // Floating window dragged onto another monitor: re-home to destination monitor's active workspace.
+                    {
+                        let ws = &mut mgr.monitors[from_mi].workspaces[from_a];
+                        ws.windows.retain(|&w| w != h);
+                        ws.floating.retain(|&w| w != h);
+                        ws.focused = ws.windows.first().copied().unwrap_or(0);
+                    }
+                    let to_a = mgr.monitors[to_mi].active;
+                    let ws = &mut mgr.monitors[to_mi].workspaces[to_a];
+                    ws.windows.push(h);
+                    ws.floating.push(h);
+                    ws.focused = h;
+                    mgr.focused_mon = to_mi;
+                    mgr.set_window_floating(h, true);
+                    focus_window(h);
+                }
+                return;
+            }
             let target = window_under_point(mgr, to_mi, pt, h);
             if to_mi == from_mi {
                 // Reorder within the same monitor: swap with the window dropped onto.
@@ -3357,6 +3444,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
                 ws.focused = h;
                 mgr.focused_mon = to_mi;
+                mgr.set_window_floating(h, false);
                 retile_monitor(mgr, from_mi);
                 retile_monitor(mgr, to_mi);
                 schedule_retile();
@@ -3505,6 +3593,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
             } else if let Some(to_mi) = adjacent_monitor(mgr, mi, dir) {
                 // Move the window to the adjacent monitor's active workspace.
+                let was_floating = mgr.monitors[mi].workspaces[a].floating.contains(&h);
                 {
                     let ws = &mut mgr.monitors[mi].workspaces[a];
                     ws.windows.retain(|&w| w != h);
@@ -3513,6 +3602,15 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
                 let ta = mgr.monitors[to_mi].active;
                 mgr.monitors[to_mi].workspaces[ta].windows.push(h);
+                if was_floating {
+                    mgr.monitors[to_mi].workspaces[ta].floating.push(h);
+                    translate_floating_to_monitor(
+                        hwnd_from(h),
+                        mgr.monitors[mi].work_area,
+                        mgr.monitors[to_mi].work_area,
+                    );
+                }
+                mgr.set_window_floating(h, was_floating);
                 mgr.monitors[to_mi].workspaces[ta].focused = h;
                 mgr.focused_mon = to_mi;
                 retile_monitor(mgr, mi);
@@ -4512,6 +4610,7 @@ fn manager_loop(cfg: Config) {
             tiling: cfg.start_tiled,
             cfg,
             pending_launch_mon: 0,
+            floating_state: HashMap::new(),
         };
         assign_existing_windows(&mut m);
         if m.tiling {
@@ -5267,6 +5366,125 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_move_to_ws_retains_floating_and_tiled_status() {
+        let cfg = Config::defaults();
+        let mon = Monitor::new(
+            1,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            3,
+        );
+        let mut mgr = Manager {
+            monitors: vec![mon],
+            focused_mon: 0,
+            primary: 0,
+            tiling: true,
+            cfg,
+            pending_launch_mon: 0,
+            floating_state: HashMap::new(),
+        };
+
+        let h_float: isize = 1001;
+        let h_tiled: isize = 1002;
+
+        // Setup workspace 0 with h_float (floating) and h_tiled (tiled)
+        mgr.monitors[0].workspaces[0].windows.push(h_float);
+        mgr.monitors[0].workspaces[0].floating.push(h_float);
+        mgr.set_window_floating(h_float, true);
+
+        mgr.monitors[0].workspaces[0].windows.push(h_tiled);
+        mgr.set_window_floating(h_tiled, false);
+
+        // Focus h_float and move to workspace 1 (index 1)
+        mgr.monitors[0].workspaces[0].focused = h_float;
+        unsafe {
+            process(&mut mgr, Cmd::MoveToWs(1));
+        }
+
+        // Verify h_float moved to workspace 1 and is in both windows and floating
+        assert!(!mgr.monitors[0].workspaces[0].windows.contains(&h_float));
+        assert!(!mgr.monitors[0].workspaces[0].floating.contains(&h_float));
+        assert!(mgr.monitors[0].workspaces[1].windows.contains(&h_float));
+        assert!(mgr.monitors[0].workspaces[1].floating.contains(&h_float));
+        assert!(mgr.is_window_floating(h_float));
+
+        // Switch focus back to workspace 0 and move h_tiled to workspace 1
+        mgr.monitors[0].active = 0;
+        mgr.focused_mon = 0;
+        mgr.monitors[0].workspaces[0].focused = h_tiled;
+        unsafe {
+            process(&mut mgr, Cmd::MoveToWs(1));
+        }
+
+        // Verify h_tiled moved to workspace 1 and is in windows but NOT in floating
+        assert!(!mgr.monitors[0].workspaces[0].windows.contains(&h_tiled));
+        assert!(mgr.monitors[0].workspaces[1].windows.contains(&h_tiled));
+        assert!(!mgr.monitors[0].workspaces[1].floating.contains(&h_tiled));
+        assert!(!mgr.is_window_floating(h_tiled));
+    }
+
+    #[test]
+    fn test_floating_state_retention_and_toggle() {
+        let cfg = Config::defaults();
+        let mon = Monitor::new(
+            1,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            2,
+        );
+        let mut mgr = Manager {
+            monitors: vec![mon],
+            focused_mon: 0,
+            primary: 0,
+            tiling: true,
+            cfg,
+            pending_launch_mon: 0,
+            floating_state: HashMap::new(),
+        };
+
+        let h: isize = 2001;
+        mgr.monitors[0].workspaces[0].windows.push(h);
+        mgr.monitors[0].workspaces[0].focused = h;
+
+        // Initially not floating
+        assert!(!mgr.is_window_floating(h));
+
+        // Toggle float -> becomes floating
+        unsafe {
+            process(&mut mgr, Cmd::ToggleFloat);
+        }
+        assert!(mgr.monitors[0].workspaces[0].floating.contains(&h));
+        assert!(mgr.is_window_floating(h));
+
+        // Simulate virtual desktop switch: window gets removed (cloaked) while handle is retained
+        // ws retains are done in Cmd::Remove
+        let ws = &mut mgr.monitors[0].workspaces[0];
+        ws.windows.retain(|&x| x != h);
+        ws.floating.retain(|&x| x != h);
+
+        // floating_state still remembers it is floating
+        assert!(mgr.is_window_floating(h));
+
+        // Toggle float back to tiled
+        mgr.monitors[0].workspaces[0].windows.push(h);
+        mgr.monitors[0].workspaces[0].floating.push(h);
+        mgr.monitors[0].workspaces[0].focused = h;
+        unsafe {
+            process(&mut mgr, Cmd::ToggleFloat);
+        }
+        assert!(!mgr.monitors[0].workspaces[0].floating.contains(&h));
+        assert!(!mgr.is_window_floating(h));
     }
 }
 
