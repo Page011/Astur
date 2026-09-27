@@ -27,6 +27,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_Graphics_Dwm",
     "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
     "Win32_UI_Accessibility",
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_System_LibraryLoader",
@@ -36,4 +37,6 @@ features = [
     "Win32_System_Power",
     "Win32_Media",
     "Win32_Storage_Xps",
+    "Win32_UI_Shell",
+    "Win32_Security",
 ]

@@ -18,17 +18,26 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
 
-      - name: Build release binary
-        run: cargo build --release
+      - name: Build release binaries
+        run: |
+          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --release --target aarch64-pc-windows-msvc
 
-      - name: Stage artifact
+      - name: Stage artifacts
         # Edition-specific asset name so Lite and Full never collide on the shared
-        # repo's releases (Full ships astur-windows-x64.exe from the `main` branch).
-        run: Copy-Item target\release\astur.exe astur-lite-windows-x64.exe
+        # repo's releases (Full ships astur-windows-*.exe from the `main` branch).
+        run: |
+          Copy-Item target\x86_64-pc-windows-msvc\release\astur.exe astur-lite-windows-x64.exe
+          Copy-Item target\aarch64-pc-windows-msvc\release\astur.exe astur-lite-windows-arm64.exe
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: astur-lite-windows-x64.exe
+          files: |
+            astur-lite-windows-x64.exe
+            astur-lite-windows-arm64.exe
           generate_release_notes: true
+

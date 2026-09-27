@@ -24,6 +24,10 @@ pub(crate) struct Config {
     pub(crate) animation_ms: i32,          // animation duration in ms (0 disables; clamp 0..2000)
     pub(crate) workspace_slide: bool,      // GPU thumbnail slide transition on workspace switch
     pub(crate) bar_enabled: bool,          // draw the status bar on every monitor
+    pub(crate) bar_autohide: bool,         // autohide the bar (reveals on ws/window switch or hover)
+    pub(crate) bar_autohide_delay: u64,    // ms the bar remains visible before hiding
+    pub(crate) bar_autohide_fade_ms: i32,  // fade in/out animation duration in ms (0 = disable fade)
+    pub(crate) bar_autohide_window_switch: bool, // reveal the bar when switching windows
     pub(crate) bar_height: i32,            // bar thickness in px (work area is reserved for it)
     pub(crate) bar_bottom: bool,           // dock the bar at the bottom instead of the top
     pub(crate) bar_font_size: i32,         // text height in px; 0 = auto from bar_height
@@ -45,6 +49,8 @@ pub(crate) struct Config {
     pub(crate) bar_show_battery: bool,     // show battery %
     pub(crate) ignore_classes: Vec<String>, // window classes never tiled/managed
     pub(crate) float_classes: Vec<String>,   // window classes managed but auto-floated
+    pub(crate) passthrough_classes: Vec<String>, // window classes that bypass Left Alt reservation (e.g. Emacs)
+    pub(crate) modifier: String,           // Astur modifier: "alt" (default) or "win_alt"
     pub(crate) key_focus_next: u32,        // Alt+<key> focus next window in the stack (default J)
     pub(crate) key_focus_prev: u32,        // Alt+<key> focus previous window in the stack (default K)
     pub(crate) key_shrink_master: u32,     // Alt+<key> shrink the master area (default H)
@@ -78,6 +84,10 @@ impl Config {
             animation_ms: 140,
             workspace_slide: true,
             bar_enabled: true,
+            bar_autohide: false,
+            bar_autohide_delay: 3000,
+            bar_autohide_fade_ms: 150,
+            bar_autohide_window_switch: false,
             bar_height: 28,
             bar_bottom: false,
             bar_font_size: 0,
@@ -99,6 +109,8 @@ impl Config {
             bar_show_battery: true,
             ignore_classes: Vec::new(),
             float_classes: Vec::new(),
+            passthrough_classes: vec!["Emacs".to_string()],
+            modifier: "alt".to_string(),
             key_focus_next: 0x4A,     // J
             key_focus_prev: 0x4B,     // K
             key_shrink_master: 0x48,  // H
@@ -245,6 +257,10 @@ ignore_classes =
 # Manage but always float these (let the app place them; don't tile).
 # Example: float_classes = #32770, MsiDialogCloseClass
 float_classes =
+# Bypass Astur's Left Alt reservation for these window classes. When focused,
+# all Left Alt keys pass straight through to the app (essential for Emacs Meta).
+# Example: passthrough_classes = Emacs
+passthrough_classes = Emacs
 
 # ---------------------------------------------------------------------------
 # Launchers
@@ -258,26 +274,34 @@ terminal = wt.exe
 browser =
 
 # ============================================================================
-# Hotkeys (LEFT ALT is the modifier)
+# Hotkeys
 # ============================================================================
-#   Alt + left-drag      move window under cursor (drops back into the tiling)
-#   Alt + right-drag     resize nearest corner (red bracket marker)
-#   Alt+T                toggle tiling on/off (floating mode; workspaces kept)
-#   Alt+J / Alt+K        focus next / previous window in the stack
-#   Alt+Shift+J / K      swap window order in the stack
-#   Alt+arrows           focus window by direction (cursor follows)
-#   Alt+Shift+arrows     move window by direction (across monitors)
-#   Alt+M                promote focused window to master
-#   Alt+H / Alt+L        master layout: shrink / grow the master column;
-#                        dwindle layout: shrink / grow the focused window's split
-#   Alt+F                toggle floating for the focused window
-#   Alt+W                close the focused window
-#   Alt+Enter            launch terminal
-#   Alt+Shift+Enter      launch browser
-#   Alt+<workspace_key>  switch to that workspace (see workspace_keys above)
-#   Alt+Shift+<ws key>   move focused window to that workspace (and follow it)
-#   Alt+Tab              normal task switcher (still works)
-#   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by Astur)
+# Modifier key for Astur window management (drag move/resize, tiling, hotkeys).
+#   alt     = Left Alt is reserved by Astur (default). Apps never see Left Alt.
+#   win_alt = Win + Left Alt together. Leaves plain Left Alt 100% free for
+#             Emacs Meta and apps, leaves plain Win 100% free for Windows
+#             shortcuts, and lets you manage windows from anywhere.
+# values: alt | win_alt
+modifier = alt
+#
+#   [Mod] + left-drag      move window under cursor (drops back into the tiling)
+#   [Mod] + right-drag     resize nearest corner (red bracket marker)
+#   [Mod]+T                toggle tiling on/off (floating mode; workspaces kept)
+#   [Mod]+J / [Mod]+K      focus next / previous window in the stack
+#   [Mod]+Shift+J / K      swap window order in the stack
+#   [Mod]+arrows           focus window by direction (cursor follows)
+#   [Mod]+Shift+arrows     move window by direction (across monitors)
+#   [Mod]+M                promote focused window to master
+#   [Mod]+H / [Mod]+L      master layout: shrink / grow the master column;
+#                          dwindle layout: shrink / grow the focused window's split
+#   [Mod]+F                toggle floating for the focused window
+#   [Mod]+W                close the focused window
+#   [Mod]+Enter            launch terminal
+#   [Mod]+Shift+Enter      launch browser
+#   [Mod]+<workspace_key>  switch to that workspace (see workspace_keys above)
+#   [Mod]+Shift+<ws key>   move focused window to that workspace (and follow it)
+#   Alt+Tab                normal task switcher (in alt mode)
+#   RIGHT ALT              normal Alt behaviour (in alt mode; LEFT ALT is reserved)
 #
 # The letter keys above (J K H L M T F W) are rebindable. Each takes a single
 # key name (see the 'keys' type at the top of this file). Arrows and Enter
@@ -311,6 +335,14 @@ const DEFAULT_NAVBAR: &str = "\
 
 # Show the bars.  bool   (set false to disable entirely)
 enabled = true
+# Autohide the bar (reveals on workspace switch or edge hover).  bool
+autohide = false
+# Reveal the bar when switching windows.  bool (default false)
+# autohide_window_switch = false
+# Time in seconds (or ms if > 60) the bar remains visible before hiding.  int (default 3)
+autohide_delay = 3
+# Fade animation duration in ms (0 disables fade).  int 0 - 2000 (default 150)
+# autohide_fade_ms = 150
 # Bar thickness in pixels.  int 0 - 200  (0 also disables it)
 height = 28
 # Dock the bars at the bottom of each screen instead of the top.  bool
@@ -390,6 +422,17 @@ pub(crate) fn key_to_vk(name: &str) -> Option<u32> {
         }
     }
     None
+}
+
+/// Convert a VK code back to its display name (e.g. 0x4A -> "J", 0x70 -> "F1").
+pub(crate) fn vk_to_key(vk: u32) -> String {
+    if (0x30..=0x39).contains(&vk) || (0x41..=0x5A).contains(&vk) {
+        ((vk as u8) as char).to_string()
+    } else if (0x70..=0x87).contains(&vk) {
+        format!("F{}", vk - 0x70 + 1)
+    } else {
+        format!("0x{:02X}", vk)
+    }
 }
 
 /// Parse a space/comma-separated list of key names into VK codes.
@@ -526,6 +569,8 @@ fn parse_into(c: &mut Config, text: &str) {
             "workspace_slide" => c.workspace_slide = parse_bool(v),
             "ignore_classes" => c.ignore_classes = parse_list(v),
             "float_classes" => c.float_classes = parse_list(v),
+            "passthrough_classes" => c.passthrough_classes = parse_list(v),
+            "modifier" => c.modifier = v.to_ascii_lowercase(),
             "key_focus_next" => {
                 if let Some(k) = key_to_vk(v) {
                     c.key_focus_next = k;
@@ -568,6 +613,21 @@ fn parse_into(c: &mut Config, text: &str) {
             }
             // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
             "enabled" | "bar_enabled" => c.bar_enabled = parse_bool(v),
+            "autohide" | "bar_autohide" => c.bar_autohide = parse_bool(v),
+            "autohide_window_switch"
+            | "bar_autohide_window_switch"
+            | "autohide_on_window_switch" => c.bar_autohide_window_switch = parse_bool(v),
+            "autohide_delay" | "bar_autohide_delay" => {
+                if let Ok(n) = v.parse::<u64>() {
+                    let ms = if n <= 60 { n * 1000 } else { n };
+                    c.bar_autohide_delay = ms.clamp(500, 60_000);
+                }
+            }
+            "autohide_fade_ms" | "bar_autohide_fade_ms" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_autohide_fade_ms = n.clamp(0, 2000);
+                }
+            }
             "height" | "bar_height" => {
                 if let Ok(n) = v.parse::<i32>() {
                     c.bar_height = n.clamp(0, 200);
@@ -696,5 +756,55 @@ mod tests {
         parse_into(&mut c, "workspace_mode = per_monitor\nlayout = MASTER");
         assert!(c.per_monitor);
         assert_eq!(c.layout, "master"); // lowercased
+    }
+
+    #[test]
+    fn parse_into_autohide() {
+        let mut c = Config::defaults();
+        assert!(!c.bar_autohide_window_switch);
+        parse_into(
+            &mut c,
+            "autohide = true\nautohide_delay = 5\nautohide_fade_ms = 200\nautohide_window_switch = true",
+        );
+        assert!(c.bar_autohide);
+        assert_eq!(c.bar_autohide_delay, 5000);
+        assert_eq!(c.bar_autohide_fade_ms, 200);
+        assert!(c.bar_autohide_window_switch);
+
+        parse_into(
+            &mut c,
+            "bar_autohide = off\nbar_autohide_delay = 2500\nbar_autohide_fade_ms = 0\nbar_autohide_window_switch = false",
+        );
+        assert!(!c.bar_autohide);
+        assert_eq!(c.bar_autohide_delay, 2500);
+        assert_eq!(c.bar_autohide_fade_ms, 0);
+        assert!(!c.bar_autohide_window_switch);
+    }
+
+    #[test]
+    fn parse_into_passthrough_classes() {
+        let mut c = Config::defaults();
+        assert_eq!(c.passthrough_classes, vec!["Emacs".to_string()]);
+        parse_into(&mut c, "passthrough_classes = Emacs, Ghostty, Alacritty");
+        assert_eq!(
+            c.passthrough_classes,
+            vec!["Emacs".to_string(), "Ghostty".to_string(), "Alacritty".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_into_modifier() {
+        let mut c = Config::defaults();
+        assert_eq!(c.modifier, "alt");
+        parse_into(&mut c, "modifier = win_alt");
+        assert_eq!(c.modifier, "win_alt");
+    }
+
+    #[test]
+    fn test_vk_to_key() {
+        assert_eq!(vk_to_key(0x4A), "J");
+        assert_eq!(vk_to_key(0x31), "1");
+        assert_eq!(vk_to_key(0x70), "F1");
+        assert_eq!(vk_to_key(0x87), "F24");
     }
 }

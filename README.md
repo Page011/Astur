@@ -4,13 +4,13 @@
 with **Alt-drag** window movement, nearest-corner resize,
 dwindle/master tiling, a per-monitor status bar, and up to 10 virtual
 workspaces — all in a single portable Rust `.exe` with no installer (~1 MB,
-console window). A lightweight alternative to
+system tray icon, runs silently in the background). A lightweight alternative to
 [komorebi](https://github.com/LGUG2Z/komorebi),
 [GlazeWM](https://github.com/glzr-io/glazewm), and PowerToys FancyZones for
 keyboard-driven, i3-style window management on Windows 10 and 11.
 
 > **Astur Lite** is the minimal edition. Want an **app launcher + file search**
-> (Alt+Space), a **power menu** (Alt+Shift+Space), a **tray icon**, and a settings
+> (Alt+Space), a **power menu** (Alt+Shift+Space), and a settings
 > GUI? Use the full **[Astur](https://github.com/Page011/Astur)** (the `main` branch).
 
 [![GitHub release](https://img.shields.io/github/v/release/Page011/Astur)](https://github.com/Page011/Astur/releases/latest)
@@ -34,43 +34,50 @@ No installer. Single `.exe`.
 
 ## What it does
 
-- **Alt + left-drag** — move any window by clicking anywhere on it, no title bar needed
-- **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
+- **Alt + left-drag** (or **Win+Alt + left-drag**) — move any window by clicking anywhere on it, no title bar needed
+- **Alt + right-drag** (or **Win+Alt + right-drag**) — resize from the nearest corner (red bracket shows which corner)
 - **Tiling mode** — `dwindle` (spiral, default) or `master` layout across up to 10
   virtual workspaces
+- **Configurable modifier** — choose `modifier = win_alt` or `alt` (default). In `win_alt` mode, plain Left Alt is 100% free for apps (e.g. Emacs Meta key `M-x`) and Windows key shortcuts are untouched. In `alt` mode, `passthrough_classes` lets specific apps bypass interception when focused.
+- **Compound shortcut passthrough** — chords like `Win + Alt + Space` (PowerToys / Windows Command Palette) and `Ctrl + Alt + ...` pass straight through cleanly.
 - **Status bar** — a per-monitor bar with workspace pills, focused title, clock,
   and optional date / CPU / RAM / battery widgets
+- **Autohide & smooth fade** — optional OLED-friendly autohide with smooth cubic-ease alpha fade animations, zero idle CPU usage, and mouse edge reveal
+- **Multi-monitor & DPI scaling** — Per-Monitor V2 DPI awareness with physical monitor bounding prevents window shadow bleed and cross-monitor scaling ballooning
+- **System tray icon** — runs quietly with no persistent console window; left-click to open config folder, right-click to open configuration or quit cleanly; single-instance guard prevents duplicate processes
 - **Animations** — workspace switches slide in; opening / moving / re-tiling
   glide to place (positional tweens, configurable speed or off)
 - **Extras** — coloured window borders, unfocused-window dimming,
   focus-follows-mouse, per-app window rules, and live config hot-reload
 
-Left Alt is fully reserved as the Astur modifier — apps never see it.
-Right Alt is untouched for normal use. Alt+Tab still works.
+By default, Left Alt is reserved as the Astur modifier (apps never see it). Set `modifier = win_alt` in `astur.conf` to use Win+Alt instead, freeing Left Alt for your applications. Right Alt is untouched for normal use. Alt+Tab and compound chords still work.
 
 ## Hotkeys
 
+> **Note:** Hotkeys use your configured modifier (`Alt` by default, or `Win + Alt` if `modifier = win_alt` in `astur.conf`). Below, `[Mod]` represents your configured modifier (`Alt` or `Win+Alt`).
+
 | Shortcut | Action |
 |---|---|
-| `Alt` + left-drag | Move window |
-| `Alt` + right-drag | Resize from nearest corner |
-| `Alt` + `T` | Toggle tiling mode on/off |
-| `Alt` + `J` / `K` | Focus next / previous window |
-| `Alt` + `Shift+J` / `Shift+K` | Swap window with next / previous |
-| `Alt` + arrows | Focus window by direction (cursor follows) |
-| `Alt` + `Shift` + arrows | Move window by direction (across monitors) |
-| `Alt` + `H` / `L` | Shrink / grow master column (`master` layout) |
-| `Alt` + `M` | Promote focused window to master |
-| `Alt` + `F` | Toggle float for focused window |
-| `Alt` + `W` | Close focused window |
-| `Alt` + `Enter` | Launch terminal |
-| `Alt` + `Shift+Enter` | Launch browser |
-| `Alt` + `1`–`9`, `0` | Switch to workspace 1–10 |
-| `Alt` + `Shift` + `1`–`9`, `0` | Move focused window to workspace |
+| `[Mod]` + left-drag | Move window |
+| `[Mod]` + right-drag | Resize from nearest corner |
+| `[Mod]` + `T` | Toggle tiling mode on/off |
+| `[Mod]` + `J` / `K` | Focus next / previous window |
+| `[Mod]` + `Shift+J` / `Shift+K` | Swap window with next / previous |
+| `[Mod]` + arrows | Focus window by direction (cursor follows) |
+| `[Mod]` + `Shift` + arrows | Move window by direction (across monitors) |
+| `[Mod]` + `H` / `L` | Shrink / grow master column (`master` layout) |
+| `[Mod]` + `M` | Promote focused window to master |
+| `[Mod]` + `F` | Toggle float for focused window |
+| `[Mod]` + `W` | Close focused window |
+| `[Mod]` + `Enter` | Launch terminal |
+| `[Mod]` + `Shift+Enter` | Launch browser |
+| `[Mod]` + `1`–`9`, `0` | Switch to workspace 1–10 |
+| `[Mod]` + `Shift` + `1`–`9`, `0` | Move focused window to workspace |
 | `Alt` + `Tab` | Switch apps (pass-through preserved) |
+| `Win` + `Alt` + `Space` | Windows Command Palette / PowerToys (pass-through preserved) |
 
-In the default `dwindle` layout, resize tiles with **Alt + right-drag** (the
-split reflows); `Alt + H` / `L` adjust the master width in `master` layout.
+In the default `dwindle` layout, resize tiles with **[Mod] + right-drag** (the
+split reflows); `[Mod] + H` / `L` adjust the master width in `master` layout.
 
 The letter binds (`J K H L M T F W`) are rebindable in
 `%USERPROFILE%\.astur\astur.conf` (`key_focus_next`, `key_close_window`,
@@ -83,11 +90,17 @@ status bar is configured separately in `navbar.conf` (same folder). Arrows and
 Two files are created in `%USERPROFILE%\.astur\` on first run, both
 fully commented and **hot-reloaded on save**:
 
-- **`astur.conf`** — window manager: workspace mode/count, layout, gaps,
-  master ratio, borders, dimming, focus-follows-mouse, cursor warping,
-  animations (`animations`, `animation_ms`), launchers, per-app window rules
-  (`ignore_classes` / `float_classes`), workspace keys, and the rebindable
-  letter hotkeys.
+- **`astur.conf`** — window manager:
+  - `modifier = alt | win_alt`: sets the primary modifier chord. Use `win_alt` if you rely heavily on Left Alt in applications (e.g. Emacs Meta key `M-x`).
+  - `passthrough_classes`: comma-separated window classes (e.g. `Emacs, VirtualBox`) that bypass Astur's modifier when focused (in `modifier = alt` mode).
+  - `workspace_mode` / `workspace_count`: shared or per-monitor virtual workspaces.
+  - `layout`, `gaps`, `master_ratio`: tiling behavior and geometry.
+  - `borders`, `dimming`: colored active borders and unfocused window dimming.
+  - `focus_follows_mouse`, `warp_cursor`: mouse navigation options.
+  - `animations`, `animation_ms`: window glide and workspace slide transitions.
+  - `terminal_cmd`, `browser_cmd`: custom hotkey launchers.
+  - `ignore_classes` / `float_classes`: per-app window rules.
+  - Workspace keys and rebindable letter hotkeys (`key_focus_next`, `key_close_window`, etc.).
 - **`navbar.conf`** — the status bar (see below).
 
 Workspaces default to **shared** mode: numbered globally from your primary
@@ -103,6 +116,10 @@ the focused window title in the centre, and a widget cluster on the right.
 | Option | Description |
 |---|---|
 | `enabled`, `height`, `bottom`, `padding` | Show/size/dock the bar |
+| `autohide` | Auto-hide the bar when inactive (`true` / `false`, default `false`) |
+| `autohide_delay` | Delay before hiding after activity (e.g. `2s`, `500ms`, default `2s`) |
+| `autohide_fade_ms` | Smooth fade-out duration in milliseconds (`180`, default `180`, `0` = instant) |
+| `autohide_window_switch` | Whether switching windows reveals the bar (`true` / `false`, default `false`) |
 | `font_name`, `font_size` | Any installed font family + text height |
 | `hide_empty_workspaces` | Show only active + occupied pills |
 | `show_title` | Focused window title (centre) |
@@ -125,15 +142,25 @@ cargo build --release
 
 ## How it works
 
-Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`)
-that intercept input before it reaches any application. Left Alt is swallowed
-so it never triggers app menus or Alt shortcuts — only Astur sees it. Window
-moves and resizes are dispatched to a dedicated worker thread so the hooks never
-stall on a slow application's `SetWindowPos`.
+Astur runs as a native Windows subsystem application (`windows_subsystem = "windows"`),
+operating quietly in the background without keeping a console window open. If launched from a
+terminal or command prompt, it automatically attaches to the parent console to print its dynamic
+startup banner and hotkey summary.
+
+Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) that intercept
+input before it reaches applications. Depending on your configuration (`modifier = alt` or `win_alt`),
+Astur captures its modifier chords while intelligently passing through compound shortcuts (such as
+`Win + Alt + Space` or `Ctrl + Alt + ...`) and respecting per-app passthrough rules (`passthrough_classes`).
+
+Window moves and resizes are dispatched to a dedicated worker thread so hooks never stall on a slow
+application's `SetWindowPos`. Tile geometries are clamped strictly within physical monitor bounds with
+Per-Monitor V2 DPI awareness, preventing shadow bleed and cross-monitor scaling ballooning.
 
 ## Quit
 
-Press `Ctrl+C` in the console window. (Or kill the process from Task Manager.)
+- **System Tray**: Right-click the Astur hawk icon in the system notification tray and select **Quit Astur**.
+- **Console**: Press `Ctrl+C` if launched from a terminal.
+- (All managed windows are cleanly restored to their normal state upon exiting.)
 
 ## How Astur compares
 
