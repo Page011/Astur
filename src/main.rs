@@ -88,7 +88,7 @@ use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, FindWindowExW, FindWindowW, SendMessageTimeoutW, SMTO_ABORTIFHUNG,
-    GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowTextLengthW,
+    GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW,
     GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SetWindowLongPtrW, GWLP_USERDATA, PM_REMOVE,
     KillTimer, PW_RENDERFULLCONTENT, SetForegroundWindow, SetTimer, SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
@@ -1269,6 +1269,21 @@ impl Workspace {
             splits: Vec::new(),
         }
     }
+
+    unsafe fn tiled_windows(&self, active: bool) -> Vec<isize> {
+        self.windows
+            .iter()
+            .copied()
+            .filter(|h| {
+                let hwnd = hwnd_from(*h);
+                IsWindow(hwnd).as_bool()
+                    && (!active || IsWindowVisible(hwnd).as_bool())
+                    && !self.floating.contains(h)
+                    && !IsIconic(hwnd).as_bool()
+                    && !is_cloaked(hwnd)
+            })
+            .collect()
+    }
 }
 
 /// One physical display: its own workspaces, tiled on its own work area.
@@ -1413,6 +1428,8 @@ const BLOCK_CLASSES: &[&str] = &[
     "IME",
     "MSCTFIME UI",
     "Default IME",
+    "GDI+ Hook Window Class",
+    "CiceroUIWndFrame",
     "astur_marker",
     "astur_bar",
     "astur_slide",
@@ -1570,7 +1587,26 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
     {
         return false;
     }
-    if GetWindowTextLengthW(hwnd) == 0 {
+    let title = window_title(hwnd);
+    // Framework internal background/notification windows
+    if title == "Hidden Window"
+        || title == "MediaContextNotificationWindow"
+        || title == "SystemResourceNotifyWindow"
+    {
+        return false;
+    }
+    // WPF windows without a title or without resizable frame and maximize box
+    // are splash screens, popups, or helper windows, not main application windows.
+    if class.starts_with("HwndWrapper") {
+        if title.is_empty() {
+            return false;
+        }
+        let is_standard_app = (style & WS_THICKFRAME.0 != 0) && (style & WS_MAXIMIZEBOX.0 != 0);
+        if !is_standard_app {
+            return false;
+        }
+    }
+    if title.is_empty() {
         // ApplicationFrameWindow with an empty title is a background phantom frame;
         // real UWP apps (e.g. Settings, Calculator) always have a non-empty title.
         if class == "ApplicationFrameWindow" {
@@ -1786,10 +1822,13 @@ unsafe fn window_under_point(mgr: &Manager, mi: usize, pt: POINT, exclude: isize
     let a = mgr.monitors[mi].active;
     let ws = &mgr.monitors[mi].workspaces[a];
     for &w in &ws.windows {
+        let hwnd = hwnd_from(w);
         if w == exclude
+            || !IsWindow(hwnd).as_bool()
+            || !IsWindowVisible(hwnd).as_bool()
             || ws.floating.contains(&w)
-            || IsIconic(hwnd_from(w)).as_bool()
-            || is_cloaked(hwnd_from(w))
+            || IsIconic(hwnd).as_bool()
+            || is_cloaked(hwnd)
         {
             continue;
         }
@@ -1993,16 +2032,7 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
     let Some(ws) = mon.workspaces.get(wi) else {
         return Vec::new();
     };
-    let tiled: Vec<isize> = ws
-        .windows
-        .iter()
-        .copied()
-        .filter(|h| {
-            !ws.floating.contains(h)
-                && !IsIconic(hwnd_from(*h)).as_bool()
-                && !is_cloaked(hwnd_from(*h))
-        })
-        .collect();
+    let tiled = ws.tiled_windows(wi == mon.active);
     let n = tiled.len();
     if n == 0 {
         return Vec::new();
@@ -2302,6 +2332,39 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     BOOL(1)
 }
 
+/// Purge any destroyed window handles from all workspaces and floating state.
+unsafe fn prune_dead_windows(mgr: &mut Manager) {
+    let mut any_removed = false;
+    let mut mons_to_retile = Vec::new();
+    for (mi, mon) in mgr.monitors.iter_mut().enumerate() {
+        let mut mon_changed = false;
+        for (wi, ws) in mon.workspaces.iter_mut().enumerate() {
+            let before = ws.windows.len();
+            ws.windows.retain(|&h| IsWindow(hwnd_from(h)).as_bool());
+            ws.floating.retain(|&h| IsWindow(hwnd_from(h)).as_bool());
+            if ws.windows.len() != before {
+                any_removed = true;
+                if !ws.windows.contains(&ws.focused) {
+                    ws.focused = ws.windows.first().copied().unwrap_or(0);
+                }
+                if wi == mon.active {
+                    mon_changed = true;
+                }
+            }
+        }
+        if mon_changed {
+            mons_to_retile.push(mi);
+        }
+    }
+    if any_removed {
+        mgr.floating_state.retain(|&k, _| IsWindow(hwnd_from(k)).as_bool());
+        sync_managed(mgr);
+        for mi in mons_to_retile {
+            retile_monitor(mgr, mi);
+        }
+    }
+}
+
 /// Add every currently-manageable window to its monitor's active workspace.
 unsafe fn assign_existing_windows(mgr: &mut Manager) {
     let mut v: Vec<isize> = Vec::new();
@@ -2320,6 +2383,7 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
         mgr.set_window_floating(h, float);
         mgr.monitors[mi].workspaces[a].focused = h;
     }
+    prune_dead_windows(mgr);
 }
 
 /// A cosmetic workspace-slide request handed from the manager to the transition
@@ -3082,6 +3146,26 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 if wi == mgr.monitors[mi].active {
                     retile_monitor(mgr, mi);
                 }
+            } else {
+                let mut retile_mons = Vec::new();
+                for (mi, mon) in mgr.monitors.iter_mut().enumerate() {
+                    for (wi, ws) in mon.workspaces.iter_mut().enumerate() {
+                        let before = ws.windows.len();
+                        ws.windows.retain(|&x| x != h);
+                        ws.floating.retain(|&x| x != h);
+                        if ws.windows.len() != before {
+                            if ws.focused == h {
+                                ws.focused = ws.windows.first().copied().unwrap_or(0);
+                            }
+                            if wi == mon.active {
+                                retile_mons.push(mi);
+                            }
+                        }
+                    }
+                }
+                for mi in retile_mons {
+                    retile_monitor(mgr, mi);
+                }
             }
             // Clean up floating state for dead/destroyed windows so HWNDs don't leak
             // or collide with future windows. Windows that are merely cloaked/hidden
@@ -3221,16 +3305,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 // something useful here too (master_ratio is unused by dwindle).
                 let a = mgr.monitors[mi].active;
                 let ws = &mgr.monitors[mi].workspaces[a];
-                let tiled: Vec<isize> = ws
-                    .windows
-                    .iter()
-                    .copied()
-                    .filter(|h| {
-                        !ws.floating.contains(h)
-                            && !IsIconic(hwnd_from(*h)).as_bool()
-                            && !is_cloaked(hwnd_from(*h))
-                    })
-                    .collect();
+                let tiled = ws.tiled_windows(true);
                 let n = tiled.len();
                 if n >= 2 {
                     if let Some(idx) = tiled.iter().position(|&h| h == ws.focused) {
@@ -4634,6 +4709,7 @@ fn manager_loop(cfg: Config) {
             }
         };
         unsafe {
+            prune_dead_windows(&mut mgr);
             process(&mut mgr, cmd);
             apply_styles(&mgr);
             update_bar(&mgr);
@@ -4690,21 +4766,22 @@ unsafe extern "system" fn win_event_proc(
                 push_cmd(Cmd::Add(hwnd.0 as isize));
             }
         }
-        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY => {
+        EVENT_OBJECT_DESTROY => {
+            push_cmd(Cmd::Remove(hwnd.0 as isize));
+        }
+        EVENT_OBJECT_HIDE => {
             if !SUPPRESS.load(Ordering::Relaxed) {
                 push_cmd(Cmd::Remove(hwnd.0 as isize));
             }
         }
         EVENT_OBJECT_CLOAKED => {
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                // When a UWP app (e.g. Windows Settings) is closed, Windows cloaks it
-                // instead of destroying or hiding it. If it is iconic (minimized),
-                // retile so it stops taking space; if not iconic, it was closed so remove it.
-                if IsIconic(hwnd).as_bool() {
-                    push_cmd(Cmd::Retile);
-                } else {
-                    push_cmd(Cmd::Remove(hwnd.0 as isize));
-                }
+            // When a UWP app (e.g. Windows Settings) is closed, Windows cloaks it
+            // instead of destroying or hiding it. If it is iconic (minimized),
+            // retile so it stops taking space; if not iconic, it was closed so remove it.
+            if IsIconic(hwnd).as_bool() {
+                push_cmd(Cmd::Retile);
+            } else {
+                push_cmd(Cmd::Remove(hwnd.0 as isize));
             }
         }
         EVENT_SYSTEM_FOREGROUND => {
@@ -5485,6 +5562,50 @@ mod tests {
         }
         assert!(!mgr.monitors[0].workspaces[0].floating.contains(&h));
         assert!(!mgr.is_window_floating(h));
+    }
+
+    #[test]
+    fn test_prune_dead_windows_and_tiled_filter() {
+        let cfg = Config::defaults();
+        let mon = Monitor::new(
+            1,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            1,
+        );
+        let mut mgr = Manager {
+            monitors: vec![mon],
+            focused_mon: 0,
+            primary: 0,
+            tiling: true,
+            cfg,
+            pending_launch_mon: 0,
+            floating_state: HashMap::new(),
+        };
+
+        // Fake HWNDs that do not exist (dead handles)
+        let dead_h1: isize = 0xDEAD01;
+        let dead_h2: isize = 0xDEAD02;
+
+        mgr.monitors[0].workspaces[0].windows.push(dead_h1);
+        mgr.monitors[0].workspaces[0].windows.push(dead_h2);
+        mgr.monitors[0].workspaces[0].focused = dead_h1;
+
+        unsafe {
+            // Verify tiled_windows excludes dead windows
+            let tiled = mgr.monitors[0].workspaces[0].tiled_windows(true);
+            assert!(tiled.is_empty());
+
+            // Pruning removes them from the workspace
+            prune_dead_windows(&mut mgr);
+            assert!(!mgr.monitors[0].workspaces[0].windows.contains(&dead_h1));
+            assert!(!mgr.monitors[0].workspaces[0].windows.contains(&dead_h2));
+            assert_eq!(mgr.monitors[0].workspaces[0].focused, 0);
+        }
     }
 }
 
