@@ -46,12 +46,12 @@ use windows::Win32::Graphics::Gdi::{
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, EnumDisplayMonitors,
     ExtCreatePen, FillRect, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
     LineTo, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, MoveToEx, PolyBezier, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, SetWindowRgn, StretchBlt,
-    UpdateWindow, BLENDFUNCTION, BS_SOLID, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
-    COLORONCOLOR, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER,
-    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC, HGDIOBJ, HMONITOR,
-    LOGBRUSH, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
-    PS_GEOMETRIC, PS_SOLID, RGN_DIFF, RGN_OR, SRCCOPY, TRANSPARENT,
+    RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, BLENDFUNCTION,
+    BS_SOLID, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
+    DEFAULT_GUI_FONT, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
+    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC, HGDIOBJ, HMONITOR, LOGBRUSH, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_GEOMETRIC, PS_SOLID,
+    RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::Media::Audio::{
     eConsole, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -141,10 +141,8 @@ use core::ffi::c_void;
 use std::collections::{HashMap, VecDeque};
 use windows::core::s;
 use windows::Win32::Graphics::Dwm::{
-    DwmFlush, DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute,
-    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
     DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
@@ -171,11 +169,11 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowLongW, SetWindowPlacement,
     SystemParametersInfoW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
     EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
-    GW_OWNER, MB_ICONERROR, MB_OK, MSGFLT_ALLOW, OBJID_CURSOR, PM_REMOVE, PW_RENDERFULLCONTENT,
-    SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
-    SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA, SPI_SETDESKWALLPAPER,
-    SPI_SETFOREGROUNDLOCKTIMEOUT, SPI_SETWORKAREA, SW_SHOW, SW_SHOWNORMAL,
+    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+    GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, MB_ICONERROR, MB_OK, MSGFLT_ALLOW,
+    OBJID_CURSOR, PM_REMOVE, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN,
+    SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA,
+    SPI_SETDESKWALLPAPER, SPI_SETFOREGROUNDLOCKTIMEOUT, SPI_SETWORKAREA, SW_SHOW, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
     WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_QUERYENDSESSION, WM_SETTINGCHANGE, WM_TIMER,
@@ -422,7 +420,7 @@ fn p50_max(v: &mut [u32]) -> (u32, u32) {
 }
 
 /// Every SetWindowPos Astur issues on a real window (set_pos_raw, commit_rect,
-/// the drag park). Diagnostics, and the per-Cmd probe line reports the delta.
+/// live dragging). Diagnostics, and the per-Cmd probe line reports the delta.
 static SWP_CALLS: AtomicU64 = AtomicU64::new(0);
 
 /// WinEvent intake counters, bumped on the main thread by `win_event_proc`
@@ -753,6 +751,7 @@ enum Mode {
 
 struct Drag {
     mode: Mode,
+    generation: u64,
     hwnd: isize,
     // cursor position when the drag began (screen coords)
     origin_x: i32,
@@ -765,8 +764,8 @@ struct Drag {
     // for resize: which corner is being dragged
     left: bool,
     top: bool,
-    // latest previewed rect shown by the drag outline; committed to the real
-    // window once on release, so there is no per-frame cross-process SetWindowPos.
+    // Latest pointer geometry, sampled by the manager once per frame.
+    // The hook never renders a preview or positions a foreign window.
     cur_x: i32,
     cur_y: i32,
     cur_w: i32,
@@ -777,6 +776,7 @@ impl Drag {
     const fn new() -> Self {
         Drag {
             mode: Mode::None,
+            generation: 0,
             hwnd: 0,
             origin_x: 0,
             origin_y: 0,
@@ -796,165 +796,114 @@ impl Drag {
 
 static STATE: Mutex<Drag> = Mutex::new(Drag::new());
 
-/// Drag previews never touch the real window per frame. Moving/resizing a foreign
-/// window live means a cross-process SetWindowPos per mouse event, which stalls on
-/// the target app's own repaint (a browser re-layouts per pixel — the "resizing is
-/// slow" complaint). The primary preview is a live DWM thumbnail (below); this
-/// outline frame is the fallback when a thumbnail can't register. Either way the
-/// final rect is committed to the real window ONCE on release, by the manager.
-static OUTLINE_HWND: AtomicIsize = AtomicIsize::new(0);
-const OUTLINE_THICK: i32 = 3;
+// Live drag sampling is independent of mouse polling rate. The same manager
+// owns live samples and final drops: no worker can overwrite a released rect.
+const DRAG_FRAME_TIME: std::time::Duration = std::time::Duration::from_micros(8_333);
+const DRAG_RETRY_TIME: std::time::Duration = std::time::Duration::from_millis(100);
+static RETILE_AFTER_DRAG: AtomicBool = AtomicBool::new(false);
+static NATIVE_DRAG: AtomicIsize = AtomicIsize::new(0);
 
-/// Show the drag outline as a hollow rectangle at (x, y, w, h): region-shaped to a
-/// frame so only the border paints. Layered / click-through / topmost overlay.
-unsafe fn show_outline(x: i32, y: i32, w: i32, h: i32) {
-    let raw = OUTLINE_HWND.load(Ordering::Relaxed);
-    if raw == 0 || w <= 0 || h <= 0 {
-        return;
-    }
-    let hwnd = hwnd_from(raw);
-    let t = dpi_px(OUTLINE_THICK, drag_dpi()).max(1);
-    let region = CreateRectRgn(0, 0, w, h);
-    if w > 2 * t && h > 2 * t {
-        let inner = CreateRectRgn(t, t, w - t, h - t);
-        CombineRgn(region, region, inner, RGN_DIFF);
-        let _ = DeleteObject(HGDIOBJ(inner.0));
-    }
-    // The window takes ownership of `region`; the system frees the previous one.
-    SetWindowRgn(hwnd, region, BOOL(1));
-    let _ = SetWindowPos(
-        hwnd,
-        HWND_TOPMOST,
-        x,
-        y,
-        w,
-        h,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DragFrame {
+    hwnd: isize,
+    rect: RECT,
+    resize: bool,
 }
 
-unsafe fn hide_outline() {
-    let raw = OUTLINE_HWND.load(Ordering::Relaxed);
-    if raw != 0 {
-        let _ = ShowWindow(hwnd_from(raw), SW_HIDE);
+struct DragPlacement {
+    frame: DragFrame,
+    before: RECT,
+    sent: Instant,
+}
+
+fn drag_placement_pending(before: RECT, live: RECT, frame: DragFrame) -> bool {
+    let at_target = live.left == frame.rect.left
+        && live.top == frame.rect.top
+        && (!frame.resize || live == frame.rect);
+    live == before && !at_target
+}
+
+fn drag_frame(s: &Drag, last: Option<DragFrame>, generation: u64) -> Option<DragFrame> {
+    // A fast release/re-grab can replace STATE before its lifecycle commands
+    // are processed. Never sample the new drag ahead of the old final drop.
+    if s.mode == Mode::None || s.generation != generation {
+        return None;
     }
-}
-
-/// Trivial WndProc for the outline / thumbnail overlays. Must be its OWN proc (not
-/// the marker's, which handles WM_DISPLAYCHANGE/WM_RELOAD and would double-fire the
-/// bar rebuild).
-unsafe extern "system" fn outline_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    DefWindowProcW(h, msg, w, l)
-}
-
-// --- Live DWM-thumbnail drag preview (move + resize) -----------------------
-// The dragged window is mirrored live with a DWM thumbnail (GPU-composited — works
-// even on Chrome, where PrintWindow returns black). The manager parks the real
-// window off-screen for the duration (Cmd::DragPark) so only the mirror is visible,
-// and puts it back on release (Cmd::DragMoved/DragResized: the final rect, or for a
-// tiled resize drop placed instantly an un-park plus its tile) — the hook
-// itself never does a cross-process SetWindowPos. Thumbnails preserve the source
-// aspect ratio, so a resize letterboxes while the aspect changes (accepted for live
-// content); registration failure falls back to the outline (and no park).
-static THUMB_HWND: AtomicIsize = AtomicIsize::new(0); // overlay DWM renders into
-static THUMB_ID: AtomicIsize = AtomicIsize::new(0); // HTHUMBNAIL (0 = none active)
-static DRAG_THUMB: AtomicBool = AtomicBool::new(false); // this drag uses the thumbnail
-
-unsafe fn thumb_props(id: isize, w: i32, h: i32) {
-    let props = DWM_THUMBNAIL_PROPERTIES {
-        dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
-        rcDestination: RECT {
-            left: 0,
-            top: 0,
-            right: w,
-            bottom: h,
+    let frame = DragFrame {
+        hwnd: s.hwnd,
+        rect: RECT {
+            left: s.cur_x,
+            top: s.cur_y,
+            right: s.cur_x + s.cur_w,
+            bottom: s.cur_y + s.cur_h,
         },
-        opacity: 255,
-        fVisible: BOOL(1),
-        fSourceClientAreaOnly: BOOL(0),
-        ..Default::default()
+        resize: s.mode == Mode::Resize,
     };
-    let _ = DwmUpdateThumbnailProperties(id, &props);
+    (Some(frame) != last).then_some(frame)
 }
 
-/// Begin a live thumbnail preview of `src` at (x, y, w, h). Returns false if the
-/// thumbnail can't be registered (caller falls back to the outline).
-unsafe fn thumb_begin(src: isize, x: i32, y: i32, w: i32, h: i32) -> bool {
-    let ov = THUMB_HWND.load(Ordering::Relaxed);
-    if ov == 0 || w <= 0 || h <= 0 {
-        return false;
+/// Manager only, including the final move on release. SWP_NOSIZE preserves the
+/// app's DPI-adjusted size when a move crosses monitors at different scales.
+unsafe fn place_drag(frame: DragFrame) -> bool {
+    let r = frame.rect;
+    let mut flags = SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+    if !frame.resize {
+        flags |= SWP_NOSIZE;
     }
-    let id = match DwmRegisterThumbnail(hwnd_from(ov), hwnd_from(src)) {
-        Ok(id) => id,
-        Err(_) => return false,
-    };
-    THUMB_ID.store(id, Ordering::Relaxed);
-    let _ = SetWindowPos(
-        hwnd_from(ov),
-        HWND_TOPMOST,
-        x,
-        y,
-        w,
-        h,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
-    thumb_props(id, w, h);
-    let _ = src; // parked by the manager (Cmd::DragPark) — never from the hook
-    true
+    SWP_CALLS.fetch_add(1, Ordering::Relaxed);
+    SetWindowPos(
+        hwnd_from(frame.hwnd),
+        None,
+        r.left,
+        r.top,
+        r.right - r.left,
+        r.bottom - r.top,
+        foreign_swp_flags(flags, ASYNC_WINDOW_POS.load(Ordering::Relaxed)),
+    )
+    .is_ok()
 }
 
-unsafe fn thumb_update(x: i32, y: i32, w: i32, h: i32) {
-    let ov = THUMB_HWND.load(Ordering::Relaxed);
-    let id = THUMB_ID.load(Ordering::Relaxed);
-    if ov == 0 || id == 0 || w <= 0 || h <= 0 {
+/// Copy under STATE, then release it before any Win32 call. A busy app must
+/// never hold the input hook's mutex while processing a position request.
+unsafe fn place_drag_frame(last: &mut Option<DragPlacement>, generation: u64) {
+    let frame = drag_frame(
+        &STATE.lock().unwrap(),
+        last.as_ref().map(|p| p.frame),
+        generation,
+    );
+    let Some(frame) = frame else { return };
+    let hwnd = hwnd_from(frame.hwnd);
+    let before = window_rect_of(frame.hwnd);
+    if !IsWindowVisible(hwnd).as_bool() || IsHungAppWindow(hwnd).as_bool() {
         return;
     }
-    let _ = SetWindowPos(hwnd_from(ov), HWND_TOPMOST, x, y, w, h, SWP_NOACTIVATE);
-    thumb_props(id, w, h);
-}
-
-unsafe fn thumb_end() {
-    let id = THUMB_ID.load(Ordering::Relaxed);
-    if id != 0 {
-        let _ = DwmUnregisterThumbnail(id);
-        THUMB_ID.store(0, Ordering::Relaxed);
+    if let Some(pending) = last.as_ref() {
+        // Do not post a frame's worth of requests into a slow app every tick.
+        // Wait for its geometry to progress; a bounded retry also lets apps
+        // that reject/constrain a rectangle respond to a later pointer target.
+        if pending.frame.hwnd == frame.hwnd
+            && drag_placement_pending(pending.before, before, pending.frame)
+            && pending.sent.elapsed() < DRAG_RETRY_TIME
+        {
+            return;
+        }
     }
-    let ov = THUMB_HWND.load(Ordering::Relaxed);
-    if ov != 0 {
-        let _ = ShowWindow(hwnd_from(ov), SW_HIDE);
-    }
-}
-
-// Drag preview: a live thumbnail when it registers, else the outline frame.
-unsafe fn drag_preview_begin(src: isize, x: i32, y: i32, w: i32, h: i32) {
-    if thumb_begin(src, x, y, w, h) {
-        DRAG_THUMB.store(true, Ordering::Relaxed);
-        // The mirror overlay is up (frame 0 == the window's own pixels). Now ask
-        // the manager to park the real window off-screen so the user sees only the
-        // thumbnail — via the queue, because the hook must never do a cross-process
-        // SetWindowPos. The park lands under/behind the already-covering overlay.
-        push_cmd(Cmd::DragPark(src));
-    } else {
-        DRAG_THUMB.store(false, Ordering::Relaxed);
-        show_outline(x, y, w, h);
-    }
-}
-unsafe fn drag_preview_update(x: i32, y: i32, w: i32, h: i32) {
-    if DRAG_THUMB.load(Ordering::Relaxed) {
-        thumb_update(x, y, w, h);
-    } else {
-        show_outline(x, y, w, h);
-    }
-}
-unsafe fn drag_preview_end() {
-    if DRAG_THUMB.load(Ordering::Relaxed) {
-        thumb_end();
-    } else {
-        hide_outline();
+    if place_drag(frame) {
+        *last = Some(DragPlacement {
+            frame,
+            before,
+            sent: Instant::now(),
+        });
     }
 }
 
-/// Commit a previewed rect to the real window in one SetWindowPos (posted, not
+fn begin_drag(src: isize, generation: u64) {
+    cancel_glide();
+    // Wakes the idle manager; subsequent mouse moves only replace STATE.
+    push_cmd(Cmd::DragStarted(src, generation));
+}
+
+/// Commit the final resize rect in one SetWindowPos (posted, not
 /// waited on, with async placement: see `foreign_swp_flags`). Runs on the
 /// MANAGER thread (DragMoved/DragResized/DragUnmaximize handlers), never on a
 /// hook. Handles floating windows (which keep this dropped rect) and tiled ones
@@ -992,8 +941,7 @@ unsafe fn commit_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
 ///
 /// Consequences handled elsewhere, because a SetWindowPos no longer means the
 /// window is there yet: the cursor warp centres on the requested tile, not the
-/// live rect (`center_cursor_on`); a drop waits (bounded) for its own commit
-/// to land before a glide captures the screen (`drop_retile_force_instant`);
+/// live rect (`center_cursor_on`); drag drops place directly without a capture;
 /// the border correction rejects a read that straddles a landing
 /// (`adjust_for_border`). Set by apply_hook_config; a reload that turns it off
 /// while a posted move is still queued can land that older rect after a newer
@@ -1002,7 +950,7 @@ static ASYNC_WINDOW_POS: AtomicBool = AtomicBool::new(true);
 
 /// Flags for a SetWindowPos on an app's (foreign) window: `base`, plus
 /// SWP_ASYNCWINDOWPOS when async placement is on. Every such call goes through
-/// here (set_pos_raw, commit_rect, the drag park and un-park) so the requests
+/// here (set_pos_raw, commit_rect, place_drag) so the requests
 /// one window gets are all posted, FIFO in its queue, or all synchronous:
 /// mixing the two could land an older rect after a newer one. ShowWindow and
 /// SetWindowPlacement stay synchronous; each is followed, in the same call, by
@@ -1013,51 +961,6 @@ fn foreign_swp_flags(base: SET_WINDOW_POS_FLAGS, async_on: bool) -> SET_WINDOW_P
     } else {
         base
     }
-}
-
-/// What an Alt-resize drop does before its retile (INPUT-5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ResizeDrop {
-    /// Land the preview rect first, as every drop used to: untiled windows
-    /// keep it, and a glide captures the window there.
-    Commit,
-    /// Tiled, instant, parked: move back to where the park took it from,
-    /// position only, and let the retile size it once.
-    UnparkOrigin,
-    /// Tiled, instant, never parked (the outline preview): the retile's one
-    /// SetWindowPos is all it needs.
-    NoUnpark,
-}
-
-/// `tiled`: the retile will place the window (see `tile_target`), and a
-/// parked one has a recorded origin. `will_glide`: the glide can run now.
-fn resize_drop_plan(tiled: bool, parked: bool, will_glide: bool) -> ResizeDrop {
-    if !tiled || will_glide {
-        ResizeDrop::Commit
-    } else if parked {
-        ResizeDrop::UnparkOrigin
-    } else {
-        ResizeDrop::NoUnpark
-    }
-}
-
-/// Move a parked window back to `origin` without resizing it: a pure move
-/// costs the app no relayout, and it brings the window back on the monitor
-/// (and DPI) it was parked from, so the retile's resize is a same-monitor one.
-unsafe fn unpark_to(h: isize, origin: POINT) {
-    SWP_CALLS.fetch_add(1, Ordering::Relaxed);
-    let _ = SetWindowPos(
-        hwnd_from(h),
-        None,
-        origin.x,
-        origin.y,
-        0,
-        0,
-        foreign_swp_flags(
-            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-            ASYNC_WINDOW_POS.load(Ordering::Relaxed),
-        ),
-    );
 }
 
 /// A screen rect as WINDOWPLACEMENT's rcNormalPosition. For a top-level window
@@ -1253,7 +1156,7 @@ unsafe fn left_alt_down() -> bool {
 
 #[inline]
 fn drag_active() -> bool {
-    STATE.lock().unwrap().mode != Mode::None
+    ANY_DRAG.load(Ordering::Relaxed)
 }
 
 /// WndProc for the marker window: nothing custom, the class brush paints it red.
@@ -1400,6 +1303,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             let msg = wparam.0 as u32;
             let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
             let up = matches!(msg, WM_KEYUP | WM_SYSKEYUP);
+            if down && GLIDE_BUSY.load(Ordering::Acquire) {
+                cancel_glide();
+            }
 
             // Clear the auto-repeat guard on release.
             if up && (kb.vkCode as usize) < 256 {
@@ -1722,6 +1628,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let pt = info.pt;
     let msg = wparam.0 as u32;
     let suppress = LRESULT(1);
+    if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MOUSEWHEEL)
+        && GLIDE_BUSY.load(Ordering::Acquire)
+    {
+        cancel_glide();
+    }
 
     // Popup mouse routing (launcher + system menu). Closed = one atomic load, the
     // common case. Open: a click OUTSIDE dismisses (eaten, so it doesn't also act
@@ -1812,7 +1723,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     // the launcher and Alt-drag die with no error (review B-02;
                     // this had regressed after the 2026-07-10 clean-up).
                     // The hook only predicts the rect (pure arithmetic) and
-                    // seeds the drag from it, so the preview follows the cursor
+                    // seeds the drag from it, so the real window follows the cursor
                     // from the first WM_MOUSEMOVE.
                     let work = work_area_at(pt);
                     let w = ((work.right - work.left) * RESTORE_NUM / RESTORE_DEN).max(MIN_W);
@@ -1832,6 +1743,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     ));
                     let mut s = STATE.lock().unwrap();
                     s.mode = Mode::Move;
+                    s.generation = s.generation.wrapping_add(1);
                     s.hwnd = hwnd.0 as isize;
                     s.origin_x = pt.x;
                     s.origin_y = pt.y;
@@ -1843,14 +1755,15 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = y;
                     s.cur_w = w;
                     s.cur_h = h;
-                    let src = s.hwnd;
+                    let (src, generation) = (s.hwnd, s.generation);
                     ANY_DRAG.store(true, Ordering::Relaxed);
                     drop(s);
-                    drag_preview_begin(src, x, y, w, h);
+                    begin_drag(src, generation);
                     return suppress;
                 } else if GetWindowRect(hwnd, &mut rect).is_ok() {
                     let mut s = STATE.lock().unwrap();
                     s.mode = Mode::Move;
+                    s.generation = s.generation.wrapping_add(1);
                     s.hwnd = hwnd.0 as isize;
                     s.origin_x = pt.x;
                     s.origin_y = pt.y;
@@ -1862,16 +1775,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = rect.top;
                     s.cur_w = rect.right - rect.left;
                     s.cur_h = rect.bottom - rect.top;
-                    let src = s.hwnd;
+                    let (src, generation) = (s.hwnd, s.generation);
                     ANY_DRAG.store(true, Ordering::Relaxed);
                     drop(s);
-                    drag_preview_begin(
-                        src,
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                    );
+                    begin_drag(src, generation);
                     return suppress;
                 }
             }
@@ -1891,6 +1798,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     show_marker(corner_x, corner_y, left, top);
                     let mut s = STATE.lock().unwrap();
                     s.mode = Mode::Resize;
+                    s.generation = s.generation.wrapping_add(1);
                     s.hwnd = hwnd.0 as isize;
                     s.origin_x = pt.x;
                     s.origin_y = pt.y;
@@ -1904,16 +1812,10 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = rect.top;
                     s.cur_w = rect.right - rect.left;
                     s.cur_h = rect.bottom - rect.top;
-                    let src = s.hwnd;
+                    let (src, generation) = (s.hwnd, s.generation);
                     ANY_DRAG.store(true, Ordering::Relaxed);
                     drop(s);
-                    drag_preview_begin(
-                        src,
-                        rect.left,
-                        rect.top,
-                        rect.right - rect.left,
-                        rect.bottom - rect.top,
-                    );
+                    begin_drag(src, generation);
                     return suppress;
                 }
             }
@@ -1938,7 +1840,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = ny;
                     s.cur_w = s.win_w;
                     s.cur_h = s.win_h;
-                    drag_preview_update(nx, ny, s.win_w, s.win_h);
                 }
                 Mode::Resize => {
                     // Drag the nearest corner; the opposite corner stays fixed.
@@ -1976,7 +1877,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_y = y;
                     s.cur_w = w;
                     s.cur_h = h;
-                    drag_preview_update(x, y, w, h);
                     let corner_x = if s.left { x } else { x + w };
                     let corner_y = if s.top { y } else { y + h };
                     show_marker(corner_x, corner_y, s.left, s.top);
@@ -1996,8 +1896,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
-                // Push first so the manager can commit the previewed rect (and
-                // restore a parked window) at the earliest; then drop the preview.
+                // The same manager orders this after every live sample.
                 push_cmd(Cmd::DragMoved(
                     h,
                     pt.x,
@@ -2009,7 +1908,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                         bottom: cy + ch,
                     },
                 ));
-                drag_preview_end();
                 return suppress;
             }
         }
@@ -2021,9 +1919,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
-                // Push first (the manager brings a parked window back: to the
-                // previewed rect, or, for a tiled window placed instantly,
-                // straight to its new tile), then tear the preview down.
+                // Apply the final ratio/rect after every live sample.
                 push_cmd(Cmd::DragResized(
                     h,
                     Some(RECT {
@@ -2034,7 +1930,6 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     }),
                 ));
                 hide_marker();
-                drag_preview_end();
                 return suppress;
             }
         }
@@ -2092,10 +1987,8 @@ enum Cmd {
     RefreshMonitors,
     /// A work area may have moved with no display change (SPI_SETWORKAREA).
     RefreshWorkAreas,
-    // Alt-drag lifecycle. The hook never touches the real window (a cross-process
-    // SetWindowPos can stall on a busy app) — it previews with an overlay and
-    // pushes these; the manager parks/commits the real window.
-    DragPark(isize), // thumbnail drag began: park the window off-screen
+    // The hook stores geometry; the manager places live samples and final drops.
+    DragStarted(isize, u64),
     /// Alt+left-drag started on a MAXIMIZED window: un-maximize it and put it
     /// at the predicted restored rect. `ShowWindow(SW_RESTORE)` drives the
     /// target's own message loop, so it must never run on the hook.
@@ -2148,7 +2041,7 @@ impl Cmd {
             Cmd::RetileFor(_) => "RetileFor",
             Cmd::RefreshMonitors => "RefreshMonitors",
             Cmd::RefreshWorkAreas => "RefreshWorkAreas",
-            Cmd::DragPark(_) => "DragPark",
+            Cmd::DragStarted(..) => "DragStarted",
             Cmd::DragUnmaximize(..) => "DragUnmaximize",
             Cmd::DragMoved(..) => "DragMoved",
             Cmd::DragResized(..) => "DragResized",
@@ -3081,10 +2974,6 @@ struct Manager {
     // HMONITOR a launched terminal/browser should land on (the cursor's monitor at
     // launch time); consumed by the next Add. 0 = none.
     pending_launch_mon: isize,
-    // Where Cmd::DragPark took a window from (hwnd, top-left before the park),
-    // so a tiled resize drop can move it back position-only, onto its own
-    // monitor and DPI, before the retile sizes it (INPUT-5). Taken by the drop.
-    park_origin: Option<(isize, POINT)>,
 }
 
 impl Manager {
@@ -4543,11 +4432,15 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
     retile_monitor_opts(mgr, mi, false);
 }
 
-/// `retile_monitor`, with the glide ruled out by the caller. A drop decides
-/// glide or instant once, up front (`drop_retile_force_instant`), and passes
-/// that decision here: re-reading GLIDE_BUSY instead could see the worker go
-/// idle in between and glide a window from a rect it is not at.
+/// Shared placement entry. Drag drops force direct placement; capturing before
+/// their posted final position lands would animate stale pixels.
 unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
+    // A new layout must never remain hidden beneath an obsolete glide.
+    let generation = cancel_glide();
+    if ANY_DRAG.load(Ordering::Relaxed) || NATIVE_DRAG.load(Ordering::Relaxed) != 0 {
+        RETILE_AFTER_DRAG.store(true, Ordering::Relaxed);
+        return;
+    }
     if !mgr.tiling {
         return;
     }
@@ -4562,8 +4455,11 @@ unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
     // slot via a cosmetic overlay (the real placement is still instant, done
     // underneath). Only when enabled, idle, and the layout actually changed —
     // a no-op retile (e.g. refocus) must not raise an overlay.
-    let want_glide =
-        !force_instant && glide_enabled(&mgr.cfg) && !GLIDE_BUSY.load(Ordering::Relaxed);
+    let want_glide = !force_instant
+        && glide_enabled(&mgr.cfg)
+        && !GLIDE_BUSY.load(Ordering::Acquire)
+        && !SLIDE_BUSY.load(Ordering::Acquire)
+        && !ANY_DRAG.load(Ordering::Relaxed);
     // The glide composes over the capture thread's wallpaper crop and bails
     // to instant without a current one. Check that lock-free BEFORE paying the
     // ~18 ms capture_monitor and the worker round trip for nothing: no Explorer,
@@ -4584,15 +4480,19 @@ unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
         for (h, target) in &rects {
             let hwnd = hwnd_from(*h);
             let mut cur = RECT::default();
-            // A parked window (a drag's DragPark, or a drop whose posted
-            // commit has not landed yet) is not in the capture: its glide item
-            // would sample off-bitmap and the window would vanish for the
-            // whole glide. Place instantly instead.
+            // Off-screen windows have no usable pixels in the monitor capture.
             if GetWindowRect(hwnd, &mut cur).is_err() || rect_parked(&cur) {
                 ok = false;
                 break;
             }
             let to = adjust_for_border(hwnd, *target);
+            // Resizing a screenshot stretches glyphs/controls, then jumps to
+            // the application's new layout on reveal. Place such layouts
+            // directly, before paying for capture or the overlay handshake.
+            if !glide_can_translate(&cur, &to, &full) {
+                ok = false;
+                break;
+            }
             let old = RECT {
                 left: cur.left - full.left,
                 top: cur.top - full.top,
@@ -4660,12 +4560,13 @@ unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
             probe.mark("capture");
             if out != 0 {
                 GLIDE_HMON.store(hmon, Ordering::Relaxed);
-                GLIDE_BUSY.store(true, Ordering::Relaxed);
+                GLIDE_BUSY.store(true, Ordering::Release);
                 // `out` is selected on the glide thread next: flush this
                 // thread's GDI batch before the hand-off.
                 let _ = GdiFlush();
                 dispatch_glide(GlideReq {
                     out_bmp: out,
+                    generation,
                     hmon,
                     rect: full,
                     area,
@@ -4677,6 +4578,9 @@ unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
                 // Wait until the overlay covers the monitor, then place the real
                 // windows underneath it (hidden), exactly like the workspace slide.
                 let up = wait_glide_overlay_up();
+                if !up {
+                    cancel_glide(); // A delayed worker must not show stale frame 0.
+                }
                 probe.mark(if up { "glide_up" } else { "glide_TIMEOUT" });
                 place_tiles(rects, &mut probe);
                 return;
@@ -4692,6 +4596,12 @@ unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
 /// under SUPPRESS. With probes on it also times each window, because one slow
 /// app's synchronous SetWindowPos is what stretches a whole retile.
 unsafe fn place_tiles(rects: Vec<(isize, RECT)>, probe: &mut Probe) {
+    // A drag can start while capture/overlay setup is in flight. Re-check at
+    // placement too, so that older layout cannot pull the window off the cursor.
+    if ANY_DRAG.load(Ordering::Relaxed) || NATIVE_DRAG.load(Ordering::Relaxed) != 0 {
+        RETILE_AFTER_DRAG.store(true, Ordering::Relaxed);
+        return;
+    }
     let timed = probe.on();
     let mut slowest = (0u128, 0isize);
     SUPPRESS.store(true, Ordering::Relaxed);
@@ -4707,95 +4617,14 @@ unsafe fn place_tiles(rects: Vec<(isize, RECT)>, probe: &mut Probe) {
     probe.note(format_args!("slowest={}us@{:#x}", slowest.0, slowest.1));
 }
 
-/// Is the window glide configured on? (Whether one can run right now also
-/// needs the worker idle and a current wallpaper crop.)
+/// Glide translates pixels; resizing uses the real application surface.
 fn glide_enabled(cfg: &Config) -> bool {
     cfg.animations && cfg.animation_ms > 0 && cfg.window_anim == "glide"
 }
 
-/// Off-screen where Cmd::DragPark puts a window (-32000, which is also where
-/// Windows keeps minimised ones). No monitor sits that far out.
 fn rect_parked(r: &RECT) -> bool {
     r.left <= -30000
 }
-
-/// Has a drop's own posted commit landed? `before` is the window's rect read
-/// just before the commit was posted, `live` its rect now, `committed` the rect
-/// asked for. Landed = at the committed rect, or moved off `before` to anywhere
-/// but the park (the app may round or constrain the rect; a park posted
-/// earlier and still pending must not count as the commit).
-fn swp_landed(before: RECT, live: RECT, committed: RECT) -> bool {
-    !rect_parked(&live) && (live == committed || live != before)
-}
-
-/// How a tiled drop's retile may run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum DropRetile {
-    /// The glide may run: the window is on screen at its dropped rect, so the
-    /// capture and the glide's start rect agree.
-    Glide,
-    /// Place instantly: the glide was off or busy when decided, or the window
-    /// is still parked or not yet landed.
-    Instant,
-}
-
-fn drop_glide_plan(glide_wanted: bool, landed: bool) -> DropRetile {
-    if glide_wanted && landed {
-        DropRetile::Glide
-    } else {
-        DropRetile::Instant
-    }
-}
-
-/// Could a glide start right now? Configured on, the worker idle, and a
-/// current wallpaper crop. Only the manager ever sets GLIDE_BUSY, so a true
-/// here stays true until this thread dispatches something itself.
-fn glide_can_run(cfg: &Config) -> bool {
-    glide_enabled(cfg) && !GLIDE_BUSY.load(Ordering::Relaxed) && wp_ready()
-}
-
-/// Must the retile after a drop of `h` skip the glide (TILE-1 G2)?
-/// `glide_wanted` is `glide_can_run`, sampled once by the caller: re-reading
-/// GLIDE_BUSY later could see the worker go idle and glide a window that is
-/// not where the glide thinks. The drop's commit is posted, so a glide started
-/// straight after it reads h's rect, and captures the screen, while h may still
-/// be parked off-screen: h would vanish for the whole glide and pop back. So
-/// wait for the commit to land (at most DROP_LAND_WAIT_MS, in 1 ms steps: only
-/// a busy or hung app takes that long) and go instant if it did not. With
-/// synchronous placement the commit has landed already.
-unsafe fn drop_retile_force_instant(
-    glide_wanted: bool,
-    h: isize,
-    before: RECT,
-    committed: RECT,
-) -> bool {
-    if !glide_wanted {
-        return true;
-    }
-    if !ASYNC_WINDOW_POS.load(Ordering::Relaxed) {
-        return false;
-    }
-    let t0 = Instant::now();
-    let deadline = std::time::Duration::from_millis(DROP_LAND_WAIT_MS);
-    let landed = loop {
-        if swp_landed(before, window_rect_of(h), committed) {
-            break true;
-        }
-        if t0.elapsed() >= deadline {
-            break false;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    };
-    let plan = drop_glide_plan(glide_wanted, landed);
-    log_debug!(
-        "drop {h:#x}: commit landed={landed} after {}us -> {plan:?}",
-        t0.elapsed().as_micros()
-    );
-    plan == DropRetile::Instant
-}
-
-/// Longest a drop waits for its own posted commit before placing instantly.
-const DROP_LAND_WAIT_MS: u64 = 32;
 
 /// GetWindowRect, or an empty rect when the window is gone.
 unsafe fn window_rect_of(h: isize) -> RECT {
@@ -6282,6 +6111,25 @@ struct GlideItem {
     new: RECT,
 }
 
+/// A screenshot is safe only for a full, size-preserving translation. Even a
+/// one-pixel resize shimmers text; a clipped source captures missing pixels.
+fn glide_can_translate(old: &RECT, new: &RECT, bounds: &RECT) -> bool {
+    let width = old.right - old.left;
+    let height = old.bottom - old.top;
+    let inside = |r: &RECT| {
+        r.left >= bounds.left
+            && r.top >= bounds.top
+            && r.right <= bounds.right
+            && r.bottom <= bounds.bottom
+    };
+    width > 0
+        && height > 0
+        && width == new.right - new.left
+        && height == new.bottom - new.top
+        && inside(old)
+        && inside(new)
+}
+
 /// Edge jitter (px) under which a window counts as not moving: DWM shadow and
 /// rounding noise. Shared by the "did the layout change?" test and the 1:1 draw.
 const GLIDE_STILL_PX: i32 = 2;
@@ -6356,31 +6204,11 @@ fn rects_overlap(a: &RECT, b: &RECT) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
-/// How one glide item is drawn this frame.
-#[derive(Debug, PartialEq, Eq)]
-enum GlideBlit {
-    /// Same size as the source: a plain BitBlt, no scaling path at all.
-    Blit,
-    /// Scaled: StretchBlt (COLORONCOLOR).
-    Stretch,
-    /// Degenerate source or destination: draw nothing.
-    Skip,
-}
-
-fn glide_blit_kind(dw: i32, dh: i32, sw: i32, sh: i32) -> GlideBlit {
-    if dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
-        GlideBlit::Skip
-    } else if dw == sw && dh == sh {
-        GlideBlit::Blit
-    } else {
-        GlideBlit::Stretch
-    }
-}
-
 /// A cosmetic window-glide request handed from the manager to the glide worker.
 /// The worker owns and frees `out_bmp`.
 struct GlideReq {
     out_bmp: isize,        // HBITMAP: frozen `area` before placement (worker frees)
+    generation: u64,       // Invalidated by a newer layout or direct interaction.
     hmon: isize,           // monitor, with `rect` the wallpaper-crop key
     rect: RECT,            // work area (the wallpaper crop's extent)
     area: RECT,            // screen rect glided (glide_damage): capture + overlay geometry
@@ -6396,6 +6224,13 @@ static GLIDE_READY_CV: Condvar = Condvar::new();
 // True from dispatch until the overlay tears down. Lets the manager skip
 // stacking a second glide over a running one (it places instantly instead).
 static GLIDE_BUSY: AtomicBool = AtomicBool::new(false);
+static GLIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+fn cancel_glide() -> u64 {
+    GLIDE_GENERATION
+        .fetch_add(1, Ordering::AcqRel)
+        .wrapping_add(1)
+}
 // The monitor that glide is on, stored with GLIDE_BUSY: a glide on one monitor
 // must not count as an overlay over another (see `overlay_up_on`).
 static GLIDE_HMON: AtomicIsize = AtomicIsize::new(0);
@@ -6454,14 +6289,14 @@ fn glide_worker() {
             }
         };
         unsafe { run_window_glide(req, &mut wp) };
-        GLIDE_BUSY.store(false, Ordering::Relaxed);
+        GLIDE_BUSY.store(false, Ordering::Release);
         wp_ttl_hint();
     }
 }
 
 /// Composite a window glide: wallpaper backdrop + each window's frozen image
-/// blitted from its old rect to an eased-interpolated rect (StretchBlt covers
-/// resizes). Worker owns and frees `out_bmp`; the wallpaper crop stays in `wpc`.
+/// translated at its original size. Resized layouts are placed directly.
+/// Worker owns and frees `out_bmp`; the wallpaper crop stays in `wpc`.
 unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
     let mut probe = Probe::start("glide");
     probe.note(format_args!("items={}", req.items.len()));
@@ -6482,7 +6317,12 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
     let free_out = || {
         let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
     };
-    if w <= 0 || h <= 0 || req.out_bmp == 0 || req.items.is_empty() {
+    let cancelled = || {
+        GLIDE_GENERATION.load(Ordering::Acquire) != req.generation
+            || ANY_DRAG.load(Ordering::Relaxed)
+            || NATIVE_DRAG.load(Ordering::Relaxed) != 0
+    };
+    if w <= 0 || h <= 0 || req.out_bmp == 0 || req.items.is_empty() || cancelled() {
         free_out();
         signal_glide_overlay_up();
         return;
@@ -6522,7 +6362,7 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
         signal_glide_overlay_up();
         return;
     };
-    if !overlay_make_visible(overlay, req.ex_style) {
+    if cancelled() || !overlay_make_visible(overlay, req.ex_style) {
         let _ = DestroyWindow(overlay);
         free_out();
         signal_glide_overlay_up();
@@ -6557,16 +6397,6 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
     let wpdc = CreateCompatibleDC(odc); // wallpaper backdrop
     let ob = SelectObject(backdc, HGDIOBJ(back.0));
     let owp = SelectObject(wpdc, HGDIOBJ(wp as *mut c_void));
-    // Nearest-neighbour, explicitly. HALFTONE was the frame budget (ANIM-7,
-    // measured in review at 950x1060, DDB, GdiFlush-synced): 6.4 ms per
-    // equal-size item and 15 ms scaled, against 0.83 / 1.5 ms for COLORONCOLOR.
-    // From those parts a 3-window frame ran an estimated 16-35 ms against an
-    // 8.3 ms budget, so the teardown landed late. Not the default BLACKONWHITE:
-    // it ANDs pixels together when shrinking. Accepted cost: slight aliasing on
-    // scaled mid-glide frames only; frame 0 is the exact capture and the
-    // reveal is the real window.
-    SetStretchBltMode(backdc, COLORONCOLOR);
-
     // Compose one frame at eased progress `e` (0..=1). At e=0 every window sits
     // at its old rect over the still wallpaper == current screen (no flash). At
     // e=1 every window is at its new rect, pixel-aligned with the real windows
@@ -6578,58 +6408,24 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
             let dl = lerp(it.old.left, it.new.left);
             let dt = lerp(it.old.top, it.new.top);
             let (sw, sh) = (it.old.right - it.old.left, it.old.bottom - it.old.top);
-            // A window that barely changes (within the jitter the manager
-            // already ignores) is drawn 1:1 at its gliding origin: stretching
-            // it by a pixel or two nearest-neighbour would shimmer its text for
-            // the whole glide.
-            let (dw, dh) = if glide_still(&it.old, &it.new) {
-                (sw, sh)
-            } else {
-                (
-                    lerp(it.old.right, it.new.right) - dl,
-                    lerp(it.old.bottom, it.new.bottom) - dt,
-                )
-            };
-            match glide_blit_kind(dw, dh, sw, sh) {
-                // Pure moves keep their exact size every frame (the lerped
-                // edges move together), so this is the common case.
-                GlideBlit::Blit => {
-                    let _ = BitBlt(
-                        backdc,
-                        dl,
-                        dt,
-                        dw,
-                        dh,
-                        srcdc,
-                        it.old.left,
-                        it.old.top,
-                        SRCCOPY,
-                    );
-                }
-                GlideBlit::Stretch => {
-                    let _ = StretchBlt(
-                        backdc,
-                        dl,
-                        dt,
-                        dw,
-                        dh,
-                        srcdc,
-                        it.old.left,
-                        it.old.top,
-                        sw,
-                        sh,
-                        SRCCOPY,
-                    );
-                }
-                GlideBlit::Skip => {}
-            }
+            // Keep source pixels 1:1 throughout the move. Size-changing layouts
+            // never reach this compositor; no scaled-text path remains.
+            let _ = BitBlt(
+                backdc,
+                dl,
+                dt,
+                sw,
+                sh,
+                srcdc,
+                it.old.left,
+                it.old.top,
+                SRCCOPY,
+            );
         }
     };
 
     let dur = req.dur_ms.max(1) as f64;
-    let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz
     let start = Instant::now();
-    let mut next = start;
     let mut msg = MSG::default();
     // compose+present time per frame (us), probes only.
     let mut frame_us: Vec<u32> = Vec::new();
@@ -6638,14 +6434,14 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if back.is_invalid() {
+        if cancelled() || back.is_invalid() {
             // No back buffer (GDI quota): presenting it would show garbage.
             // Frame 0 is on screen, the windows are placed under it; reveal.
             break;
         }
         let el = start.elapsed().as_secs_f64() * 1000.0;
         let tf = probe.on().then(Instant::now);
-        compose(ease_out_cubic((el / dur).min(1.0)));
+        compose(ease_in_out_cubic((el / dur).min(1.0)));
         let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
         if let Some(tf) = tf {
             if frame_us.is_empty() {
@@ -6656,18 +6452,16 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
         if el >= dur {
             break;
         }
-        next += frame_dur;
-        let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
-        } else {
-            next = now;
+        // Pace presentation with DWM instead of an unrelated 120 Hz timer.
+        if DwmFlush().is_err() {
+            std::thread::sleep(std::time::Duration::from_millis(8));
         }
     }
 
     SelectObject(backdc, ob);
     SelectObject(srcdc, os);
     SelectObject(wpdc, owp); // deselected: the crop goes back to `wpc` for reuse
+    let _ = GdiFlush(); // Finish bitmap reads before freeing or reusing them.
     let _ = DeleteObject(HGDIOBJ(back.0));
     let _ = DeleteDC(backdc);
     let _ = DeleteDC(srcdc);
@@ -7923,6 +7717,7 @@ unsafe fn process_extra(mgr: &mut Manager, index: usize) {
 /// burst that ends where it started does: focused_mon never changes without
 /// focus moving with it.
 unsafe fn show_workspace(mgr: &mut Manager, mi: usize, ws: usize) {
+    cancel_glide();
     mgr.focused_mon = mi;
     if ws != mgr.monitors[mi].active {
         // Shows the workspace, retiles, focuses + warps the cursor.
@@ -8483,58 +8278,24 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 );
             }
         }
-        Cmd::DragPark(h) => {
-            // Thumbnail drag began: park the real window far off-screen (size kept)
-            // so the user sees only the live DWM mirror. Off-screen, NOT SW_HIDE — a
-            // hidden window blanks its thumbnail. The drop (DragMoved/DragResized)
-            // brings it back on-screen: the committed rect, or an un-park and
-            // its tile (a tiled resize drop placed instantly).
-            if IsWindow(hwnd_from(h)).as_bool() {
-                // Where it came from, for a tiled resize drop's un-park. Read
-                // before the park is posted; an already-parked window keeps
-                // the origin it has.
-                let from = window_rect_of(h);
-                if !rect_parked(&from) {
-                    mgr.park_origin = Some((
-                        h,
-                        POINT {
-                            x: from.left,
-                            y: from.top,
-                        },
-                    ));
+        Cmd::DragStarted(h, _) => {
+            // Alt-resize can also start on a maximized window. Restoring may
+            // invoke its relayout, so it belongs here, never on the hook.
+            if IsZoomed(hwnd_from(h)).as_bool() {
+                let r = window_rect_of(h);
+                if !unmaximize_to(hwnd_from(h), r) {
+                    let _ = ShowWindow(hwnd_from(h), SW_RESTORE);
                 }
-                // Mixed-DPI check (INPUT-5 C2): compare with the dpi the drop logs.
-                log_debug!(
-                    "DragPark {h:#x} from {},{} dpi={}",
-                    from.left,
-                    from.top,
-                    window_dpi(hwnd_from(h))
-                );
-                SWP_CALLS.fetch_add(1, Ordering::Relaxed);
-                let _ = SetWindowPos(
-                    hwnd_from(h),
-                    None,
-                    -32000,
-                    -32000,
-                    0,
-                    0,
-                    // Same posting mode as the drop's commit, so the park can
-                    // never land after it (FIFO in the app's queue).
-                    foreign_swp_flags(
-                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
-                        ASYNC_WINDOW_POS.load(Ordering::Relaxed),
-                    ),
-                );
             }
         }
         Cmd::DragMoved(h, x, y, r) => {
-            // Land the previewed rect FIRST — the real window never moved during the
-            // drag (the thumbnail path even parked it off-screen), so this single
-            // SetWindowPos is the actual move. It must precede every early-out:
-            // floating, unmanaged, and tiling-off windows keep exactly this rect.
-            // `before`: to tell when the (posted) commit has landed.
-            let before = window_rect_of(h);
-            commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            // Preserve a DPI-driven size change while landing the release point.
+            // This is ordered after live samples by the manager's own queue.
+            place_drag(DragFrame {
+                hwnd: h,
+                rect: r,
+                resize: false,
+            });
             if !mgr.tiling {
                 return;
             }
@@ -8585,8 +8346,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     }
                 }
                 mgr.monitors[from_mi].workspaces[from_a].focused = h;
-                let force = drop_retile_force_instant(glide_can_run(&mgr.cfg), h, before, r);
-                retile_monitor_opts(mgr, from_mi, force);
+                retile_monitor_opts(mgr, from_mi, true);
             } else {
                 // Move the window to the monitor it was dropped on, landing it
                 // where it was dropped in the tiled order.
@@ -8601,55 +8361,18 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     return;
                 }
                 mgr.focused_mon = to_mi;
-                retile_monitor(mgr, from_mi);
-                // Decided after the source retile: a glide started there makes
-                // this one instant anyway, with no landing wait.
-                let force = drop_retile_force_instant(glide_can_run(&mgr.cfg), h, before, r);
-                retile_monitor_opts(mgr, to_mi, force);
+                retile_monitor_opts(mgr, from_mi, true);
+                retile_monitor_opts(mgr, to_mi, true);
             }
             focus_window(h);
         }
         Cmd::DragResized(h, rect) => {
-            // Alt-resize carries the previewed rect; the native MOVESIZEEND path
-            // passes None and the window already sits at its final rect.
-            //
-            // A tiled resize drop that will be placed instantly skips the commit
-            // of the preview rect (INPUT-5): the retile's one SetWindowPos sizes
-            // it into its slot, so the app relayouts once instead of twice
-            // (preview, then slot). A parked window first moves back, position
-            // only (no relayout), to where it was parked from, so it returns on
-            // its own monitor and DPI. This is the one exception to "commit
-            // before every early-out": every other drop still commits first
-            // (floating, unmanaged and tiling-off windows keep that rect, and a
-            // glide needs the window on screen at it for its capture).
-            let before = window_rect_of(h);
-            let origin = mgr
-                .park_origin
-                .take()
-                .filter(|&(w, _)| w == h)
-                .map(|(_, p)| p);
-            // Glide or instant is decided here, once, and handed to the retile.
-            let glide_wanted = glide_can_run(&mgr.cfg);
-            let plan = rect.map(|_| {
-                let parked = rect_parked(&before);
-                // Parked with no recorded origin: commit, as before.
-                let tiled = tile_target(mgr, h).is_some() && (!parked || origin.is_some());
-                resize_drop_plan(tiled, parked, glide_wanted)
-            });
-            match (rect, plan, origin) {
-                (Some(r), Some(ResizeDrop::Commit), _) => {
+            // Tiled resize: apply its final slot once. Floating/unmanaged
+            // windows keep the exact release rect; native drags already landed.
+            if let Some(r) = rect {
+                if tile_target(mgr, h).is_none() {
                     commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
                 }
-                (_, Some(ResizeDrop::UnparkOrigin), Some(o)) => {
-                    log_debug!(
-                        "DragResized {h:#x} un-park to {},{} dpi={}",
-                        o.x,
-                        o.y,
-                        window_dpi(hwnd_from(h))
-                    );
-                    unpark_to(h, o);
-                }
-                _ => {}
             }
             if !mgr.tiling {
                 return;
@@ -8705,27 +8428,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     r,
                 );
             }
-            let force = match plan {
-                Some(ResizeDrop::Commit) => drop_retile_force_instant(glide_wanted, h, before, r),
-                // Skipped commit: the glide was ruled out when the plan was made.
-                Some(_) => true,
-                // MOVESIZEEND: nothing committed, nothing in flight.
-                None => false,
-            };
-            retile_monitor_opts(mgr, mi, force);
-            // A skipped commit must never leave the window parked. The plan
-            // only skips it for a window this retile's layout contains (see
-            // tile_target), so it has been sent its slot. With synchronous
-            // placement that has also landed and is checked here; a posted one
-            // cannot be read back yet, and re-committing the preview after it
-            // would land the preview rect last, off the tile.
-            if matches!(plan, Some(ResizeDrop::UnparkOrigin | ResizeDrop::NoUnpark))
-                && !ASYNC_WINDOW_POS.load(Ordering::Relaxed)
-                && rect_parked(&window_rect_of(h))
-            {
-                log_error!("resize drop left {h:#x} off-screen; committing the preview rect");
-                commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
-            }
+            retile_monitor_opts(mgr, mi, true);
         }
         Cmd::LaunchTerminal => {
             // Land the new window on the workspace the cursor is on, not wherever
@@ -11197,7 +10900,6 @@ fn manager_loop(cfg: Config) {
             tiling: cfg.start_tiled,
             cfg,
             pending_launch_mon: 0,
-            park_origin: None,
         };
         assign_existing_windows(&mut m);
         // Warm the wallpaper cache now, not on the first animation. Until it
@@ -11222,6 +10924,9 @@ fn manager_loop(cfg: Config) {
     unsafe {
         update_bar(&mgr);
     }
+    let mut last_drag = None;
+    let mut drag_generation = 0;
+    let mut next_drag = Instant::now();
     loop {
         let (cmd, depth, burst) = {
             let mut q = CMDQ.lock().unwrap();
@@ -11229,8 +10934,28 @@ fn manager_loop(cfg: Config) {
                 if let Some(c) = q.pop_front() {
                     break c;
                 }
-                q = CMDCV.wait(q).unwrap();
+                if ANY_DRAG.load(Ordering::Relaxed) {
+                    let wait = next_drag.saturating_duration_since(Instant::now());
+                    if wait.is_zero() {
+                        // No command to overtake. Drop CMDQ before STATE/Win32.
+                        drop(q);
+                        unsafe { place_drag_frame(&mut last_drag, drag_generation) };
+                        next_drag = Instant::now() + DRAG_FRAME_TIME;
+                        q = CMDQ.lock().unwrap();
+                    } else {
+                        q = CMDCV.wait_timeout(q, wait).unwrap().0;
+                    }
+                } else {
+                    last_drag = None;
+                    next_drag = Instant::now();
+                    q = CMDCV.wait(q).unwrap();
+                }
             };
+            if let Cmd::DragStarted(_, generation) = &c {
+                drag_generation = *generation;
+                last_drag = None;
+                next_drag = Instant::now();
+            }
             // Switches that queued up while this thread was busy (a wheel
             // flick over the bar, fast key taps, an IPC batch) only matter for
             // where they end: fold them to that one workspace now, instead of
@@ -11258,6 +10983,16 @@ fn manager_loop(cfg: Config) {
                     }
                 }
                 None => process(&mut mgr, cmd),
+            }
+            // Replay layouts deferred by a drag, including opens/closes on a
+            // different monitor or a release of a floating/unmanaged window.
+            if !ANY_DRAG.load(Ordering::Relaxed)
+                && NATIVE_DRAG.load(Ordering::Relaxed) == 0
+                && RETILE_AFTER_DRAG.swap(false, Ordering::Relaxed)
+            {
+                for mi in 0..mgr.monitors.len() {
+                    retile_monitor_opts(&mgr, mi, true);
+                }
             }
         }
         let t1 = probe.map(|_| Instant::now());
@@ -11486,11 +11221,11 @@ const WINEVENT_RANGES: [(u32, u32, &str); 5] = [
         EVENT_SYSTEM_MINIMIZEEND,
         "minimize",
     ),
-    // Native (non-Alt) move/resize finished: re-tile so windows never overlap.
+    // Defer tiling during native move/resize, then re-integrate on release.
     (
+        EVENT_SYSTEM_MOVESIZESTART,
         EVENT_SYSTEM_MOVESIZEEND,
-        EVENT_SYSTEM_MOVESIZEEND,
-        "movesizeend",
+        "movesize",
     ),
 ];
 
@@ -11535,6 +11270,13 @@ unsafe extern "system" fn win_event_proc(
         _ => {}
     }
     let h = hwnd.0 as isize;
+    if matches!(
+        event,
+        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART
+    ) {
+        // Some apps disappear without MOVESIZEEND. Do not defer layouts forever.
+        let _ = NATIVE_DRAG.compare_exchange(h, 0, Ordering::Relaxed, Ordering::Relaxed);
+    }
     // SHOW prefilter (EVENTS-1): a child, tool or no-activate window can never
     // be adopted (app_surface_reject refuses the same bits), and every menu,
     // tooltip and child control fires SHOW. GetWindowLongW reads the window
@@ -11643,7 +11385,12 @@ unsafe extern "system" fn win_event_proc(
         // User finished a native (non-Alt) move/resize. Re-integrate the window
         // into the tiling: master keeps its new width as the ratio, everything
         // else snaps back so windows never overlap.
-        EVENT_SYSTEM_MOVESIZEEND if !SUPPRESS.load(Ordering::Relaxed) => {
+        EVENT_SYSTEM_MOVESIZESTART => {
+            NATIVE_DRAG.store(h, Ordering::Relaxed);
+            cancel_glide();
+        }
+        EVENT_SYSTEM_MOVESIZEEND => {
+            NATIVE_DRAG.store(0, Ordering::Relaxed);
             // No preview rect here — the window is already where the user put it;
             // the manager reads the live rect (None).
             push_cmd(Cmd::DragResized(hwnd.0 as isize, None));
@@ -17023,66 +16770,6 @@ fn main() {
             let _ = ChangeWindowMessageFilterEx(marker, taskbar_created, MSGFLT_ALLOW, None);
         }
 
-        // Drag-outline overlay: an accent-coloured hollow frame previewing the
-        // move/resize target. Region-shaped per drag; layered + click-through so it
-        // never eats input. A plain DefWindowProc window — it must NOT share
-        // marker_wndproc (that handles WM_DISPLAYCHANGE/WM_RELOAD, which would then
-        // double-fire the bar/monitor rebuild).
-        let outline_brush = CreateSolidBrush(COLORREF(LAUNCHER_SELBG)); // #366382 accent
-        let outline_wc = WNDCLASSW {
-            lpfnWndProc: Some(outline_wndproc),
-            hInstance: hinst,
-            hbrBackground: outline_brush,
-            lpszClassName: w!("astur_outline"),
-            ..Default::default()
-        };
-        RegisterClassW(&outline_wc);
-        let outline = CreateWindowExW(
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-            w!("astur_outline"),
-            w!(""),
-            WS_POPUP,
-            0,
-            0,
-            10,
-            10,
-            None,
-            None,
-            hinst,
-            None,
-        )
-        .expect("CreateWindowExW failed");
-        let _ = SetLayeredWindowAttributes(outline, COLORREF(0), 220, LWA_ALPHA);
-        OUTLINE_HWND.store(outline.0 as isize, Ordering::Relaxed);
-
-        // Thumbnail overlay: a plain (non-layered) topmost tool window DWM renders
-        // the live window mirror into during a move-drag. Black background is never
-        // seen — the thumbnail fills the whole client.
-        let thumb_wc = WNDCLASSW {
-            lpfnWndProc: Some(outline_wndproc),
-            hInstance: hinst,
-            hbrBackground: CreateSolidBrush(COLORREF(0)),
-            lpszClassName: w!("astur_thumb"),
-            ..Default::default()
-        };
-        RegisterClassW(&thumb_wc);
-        let thumb = CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
-            w!("astur_thumb"),
-            w!(""),
-            WS_POPUP,
-            0,
-            0,
-            10,
-            10,
-            None,
-            None,
-            hinst,
-            None,
-        )
-        .expect("CreateWindowExW failed");
-        THUMB_HWND.store(thumb.0 as isize, Ordering::Relaxed);
-
         // Seed per-monitor fullscreen state before first bar placement so apps
         // already maximized/fullscreen when Astur starts never get covered.
         seed_fullscreen_windows();
@@ -17304,19 +16991,6 @@ mod tests {
     // ---- drag drops (batch 17, INPUT-9 / INPUT-5) -----------------------------
 
     #[test]
-    fn a_resize_drop_skips_its_commit_only_when_tiled_and_instant() {
-        use ResizeDrop::*;
-        // Untiled windows, and any glide, commit the preview as before.
-        assert_eq!(resize_drop_plan(false, false, false), Commit);
-        assert_eq!(resize_drop_plan(false, true, false), Commit);
-        assert_eq!(resize_drop_plan(true, true, true), Commit);
-        assert_eq!(resize_drop_plan(true, false, true), Commit);
-        // Tiled + instant: un-park if parked, else straight to the retile.
-        assert_eq!(resize_drop_plan(true, true, false), UnparkOrigin);
-        assert_eq!(resize_drop_plan(true, false, false), NoUnpark);
-    }
-
-    #[test]
     fn placement_rects_shift_by_the_work_area_inset_not_its_origin() {
         let r = RECT {
             left: 2100,
@@ -17378,50 +17052,6 @@ mod tests {
         assert_eq!(bounded_insets(412, 7, -405, 7, 16), None);
         assert_eq!(bounded_insets(7, -1, 7, 7, 16), None);
         assert_eq!(bounded_insets(7, 0, 17, 7, 16), None);
-    }
-
-    #[test]
-    fn a_drop_commit_counts_as_landed_only_off_the_park() {
-        let rc = |l, t, r, b| RECT {
-            left: l,
-            top: t,
-            right: r,
-            bottom: b,
-        };
-        let parked = rc(-32000, -32000, -31360, -31520);
-        let drop = rc(100, 100, 740, 580);
-        // Parked during the drag, commit not processed yet.
-        assert!(!swp_landed(parked, parked, drop));
-        // Landed exactly, or where the app rounded it to.
-        assert!(swp_landed(parked, drop, drop));
-        assert!(swp_landed(parked, rc(100, 100, 740, 582), drop));
-        // Outline drag (never parked), dropped where it already was.
-        assert!(swp_landed(drop, drop, drop));
-        // The park itself was still queued at the drop and has just landed:
-        // that is not the commit.
-        let orig = rc(0, 0, 640, 480);
-        assert!(!swp_landed(orig, parked, drop));
-        assert!(!swp_landed(orig, orig, drop));
-    }
-
-    #[test]
-    fn a_drop_glides_only_when_wanted_and_landed() {
-        assert_eq!(drop_glide_plan(true, true), DropRetile::Glide);
-        assert_eq!(drop_glide_plan(true, false), DropRetile::Instant);
-        assert_eq!(drop_glide_plan(false, true), DropRetile::Instant);
-        assert_eq!(drop_glide_plan(false, false), DropRetile::Instant);
-        assert!(rect_parked(&RECT {
-            left: -32000,
-            top: -32000,
-            right: 0,
-            bottom: 0
-        }));
-        assert!(!rect_parked(&RECT {
-            left: -3840,
-            top: 0,
-            right: 0,
-            bottom: 2160
-        }));
     }
 
     // ---- event intake (batch 8) ---------------------------------------------
@@ -17601,16 +17231,180 @@ mod tests {
     // ---- glide compose ------------------------------------------------------
 
     #[test]
-    fn glide_blits_equal_sizes_and_stretches_the_rest() {
-        assert_eq!(glide_blit_kind(950, 1060, 950, 1060), GlideBlit::Blit);
-        // Off by one either way is a real scale.
-        assert_eq!(glide_blit_kind(951, 1060, 950, 1060), GlideBlit::Stretch);
-        assert_eq!(glide_blit_kind(950, 1059, 950, 1060), GlideBlit::Stretch);
-        // Any non-positive size draws nothing.
-        assert_eq!(glide_blit_kind(0, 1060, 950, 1060), GlideBlit::Skip);
-        assert_eq!(glide_blit_kind(950, -3, 950, 1060), GlideBlit::Skip);
-        assert_eq!(glide_blit_kind(950, 1060, 0, 1060), GlideBlit::Skip);
-        assert_eq!(glide_blit_kind(950, 1060, 950, -1), GlideBlit::Skip);
+    fn native_drag_moves_preserve_size_and_resizes_change_real_geometry() {
+        unsafe extern "system" fn wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+            if msg == WM_CLOSE {
+                let _ = DestroyWindow(h);
+                PostQuitMessage(0);
+                return LRESULT(0);
+            }
+            DefWindowProcW(h, msg, w, l)
+        }
+        // Hidden, owned test window: exercise Win32 placement without changing
+        // any user's windows, focus, or desktop layout. A separate input queue
+        // exercises SWP_ASYNCWINDOWPOS, not its synchronous same-thread fallback.
+        let (send, recv) = std::sync::mpsc::channel();
+        let owner = std::thread::spawn(move || unsafe {
+            let hinst = HINSTANCE(GetModuleHandleW(None).unwrap().0);
+            let class = w!("astur_drag_geometry_test");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(wndproc),
+                hInstance: hinst,
+                lpszClassName: class,
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let hwnd = CreateWindowExW(
+                WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                class,
+                w!(""),
+                WS_POPUP,
+                100,
+                100,
+                320,
+                240,
+                None,
+                None,
+                hinst,
+                None,
+            )
+            .unwrap();
+            send.send(hwnd.0 as isize).unwrap();
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).0 > 0 {
+                DispatchMessageW(&msg);
+            }
+        });
+        let h = recv
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .unwrap();
+        unsafe {
+            let wait_for = |expected: RECT| {
+                let deadline = Instant::now() + std::time::Duration::from_secs(1);
+                loop {
+                    let live = window_rect_of(h);
+                    if live == expected || Instant::now() >= deadline {
+                        break live;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            };
+            let moved = place_drag(DragFrame {
+                hwnd: h,
+                rect: rc(200, 150, 1000, 750),
+                resize: false,
+            });
+            let after_move = wait_for(rc(200, 150, 520, 390));
+            let resized = place_drag(DragFrame {
+                hwnd: h,
+                rect: rc(220, 170, 820, 570),
+                resize: true,
+            });
+            let after_resize = wait_for(rc(220, 170, 820, 570));
+            // Posted intermediate samples cannot overwrite the final tile.
+            let _ = place_drag(DragFrame {
+                hwnd: h,
+                rect: rc(250, 200, 850, 600),
+                resize: false,
+            });
+            let _ = place_drag(DragFrame {
+                hwnd: h,
+                rect: rc(270, 210, 870, 610),
+                resize: false,
+            });
+            set_pos_raw(h, rc(300, 250, 1000, 750));
+            let final_rect = wait_for(rc(300, 250, 1000, 750));
+            let visible = IsWindowVisible(hwnd_from(h)).as_bool();
+            let _ = PostMessageW(hwnd_from(h), WM_CLOSE, WPARAM(0), LPARAM(0));
+            owner.join().unwrap();
+            assert!(moved && resized);
+            assert_eq!(after_move, rc(200, 150, 520, 390));
+            assert_eq!(after_resize, rc(220, 170, 820, 570));
+            assert_eq!(final_rect, rc(300, 250, 1000, 750));
+            assert!(!visible);
+        }
+    }
+
+    #[test]
+    fn drag_samples_coalesce_motion_and_stop_at_release() {
+        let mut drag = Drag::new();
+        drag.mode = Mode::Move;
+        drag.hwnd = 7;
+        drag.cur_w = 640;
+        drag.cur_h = 480;
+        let first = drag_frame(&drag, None, 0).unwrap();
+        // A 1000 Hz input burst leaves only the newest sample to place.
+        for x in 1..=1000 {
+            drag.cur_x = x;
+        }
+        let latest = drag_frame(&drag, Some(first), 0).unwrap();
+        assert_eq!(latest.rect, rc(1000, 0, 1640, 480));
+        assert!(!latest.resize);
+        assert_eq!(drag_frame(&drag, Some(latest), 0), None);
+        drag.mode = Mode::Resize;
+        drag.cur_w = 800;
+        let resized = drag_frame(&drag, Some(latest), 0).unwrap();
+        assert!(resized.resize);
+        assert_eq!(resized.rect.right, 1800);
+        drag.mode = Mode::None;
+        assert_eq!(drag_frame(&drag, Some(resized), 0), None);
+        // A fresh drag at the same coordinates still belongs to a new window.
+        drag.mode = Mode::Resize;
+        drag.hwnd = 8;
+        assert_eq!(drag_frame(&drag, Some(resized), 0).unwrap().hwnd, 8);
+        // A newer drag must wait for its own queued start, even for the same HWND.
+        drag.generation = 1;
+        drag.cur_x = 2000;
+        assert_eq!(drag_frame(&drag, None, 0), None);
+        assert_eq!(drag_frame(&drag, None, 1).unwrap().rect.left, 2000);
+        // Busy apps hold their old geometry; constrained-but-processed requests
+        // can land at a different rectangle. Pure moves ignore DPI size changes.
+        let before = rc(0, 0, 640, 480);
+        assert!(drag_placement_pending(before, before, latest));
+        assert!(!drag_placement_pending(before, latest.rect, latest));
+        assert!(!drag_placement_pending(
+            before,
+            rc(1000, 0, 1800, 600),
+            latest
+        ));
+        assert!(!drag_placement_pending(before, rc(0, 0, 700, 500), resized));
+    }
+
+    #[test]
+    fn glide_rejects_resizing_and_partial_source_pixels() {
+        let bounds = rc(0, 0, 1920, 1080);
+        let old = rc(10, 10, 650, 490);
+        assert!(glide_can_translate(&old, &old, &bounds));
+        assert!(glide_can_translate(&old, &rc(800, 100, 1440, 580), &bounds));
+        // Even one pixel of scaling would shimmer text.
+        assert!(!glide_can_translate(
+            &old,
+            &rc(800, 100, 1441, 580),
+            &bounds
+        ));
+        assert!(!glide_can_translate(
+            &old,
+            &rc(800, 100, 1440, 579),
+            &bounds
+        ));
+        // Missing source pixels cannot be recovered from a monitor capture.
+        assert!(!glide_can_translate(&rc(-8, 10, 632, 490), &old, &bounds));
+        assert!(!glide_can_translate(
+            &old,
+            &rc(1600, 10, 2240, 490),
+            &bounds
+        ));
+        assert!(!glide_can_translate(
+            &rc(0, 0, 0, 10),
+            &rc(0, 0, 0, 10),
+            &bounds
+        ));
+        // Negative screen coordinates on a secondary monitor are valid.
+        assert!(glide_can_translate(
+            &rc(-1910, 10, -1270, 490),
+            &rc(-800, 20, -160, 500),
+            &rc(-1920, 0, 0, 1080),
+        ));
     }
 
     #[test]
@@ -17970,7 +17764,6 @@ mod tests {
             tiling: true,
             cfg: Config::defaults(),
             pending_launch_mon: 0,
-            park_origin: None,
         }
     }
 
