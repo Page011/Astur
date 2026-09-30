@@ -14,3 +14,11 @@ lto = true
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# Release plus line tables, for WPA / ETW sampling. It inherits every codegen
+# setting from release, so a trace measures the code that ships:
+#   cargo build --profile profiling -p astur   ->  target/profiling/astur.exe
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = "line-tables-only"

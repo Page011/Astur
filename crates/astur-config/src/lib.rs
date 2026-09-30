@@ -130,6 +130,11 @@ pub struct Config {
     /// This is a GLOBAL, system-wide setting; Astur restores the previous value
     /// on a graceful exit.
     pub foreground_lock_disable: bool,
+    /// Place app windows with posted (SWP_ASYNCWINDOWPOS) SetWindowPos calls,
+    /// so a retile waits for the slowest app rather than for every app in
+    /// turn. false = wait for each app, as before this key existed: the escape
+    /// hatch should some app misplace under posted placement.
+    pub async_window_pos: bool,
     pub persist_state: bool,
     /// Diagnostics verbosity: off | error | info | debug. Astur ships without a
     /// console, so this file log is the only way a user can report what broke.
@@ -341,6 +346,7 @@ impl Config {
             ipc_pipe: "astur".to_string(),
             ipc_allow_launch: false,
             foreground_lock_disable: true,
+            async_window_pos: true,
             persist_state: true,
             log_level: "error".to_string(),
             unknown_keys: Vec::new(),
@@ -431,8 +437,14 @@ const DEFAULT_CONFIG: &str = "\
 # Location : %USERPROFILE%\\.astur\\astur.conf
 #            (override with the ASTUR_CONFIG environment variable)
 # The status bar is configured separately in navbar.conf (same folder).
-# Apply    : save this file; Astur hot-reloads it within about one second.
+# Apply    : save this file; Astur hot-reloads it about 0.1 s after the save,
+#            redoing only what changed (a colour edit does not re-tile). The
+#            system menu's Reload (or IPC `reload`) always re-applies everything.
 # Regen    : delete this file and relaunch to get a fresh, fully-commented copy.
+# Encoding : save as UTF-8. The window manager never overwrites a file it
+#            cannot read (a UTF-16 \"Unicode\" save, or one locked mid-save): it
+#            keeps its current settings (built-in defaults at startup), logs the
+#            error to astur.log and tries again.
 #
 # Syntax   : one  key = value  per line. '#' starts a comment. Blank lines and
 #            surrounding whitespace are ignored. Unknown keys are ignored, so a
@@ -542,7 +554,10 @@ focus_follows_mouse = false
 # Enable animations.  bool
 animations = true
 # Animation duration in milliseconds. Lower = snappier, higher = smoother.
-# 0 disables (same as animations = false).  int 0-2000
+# 0 disables (same as animations = false). Up to 250, clicks and the wheel
+# pass through a running animation to the windows (already in their final
+# place underneath); above 250 the animation blocks mouse input until it ends.
+# int 0-2000
 animation_ms = 140
 # Workspace-switch animation style:
 #   off    - instant switch, no overlay
@@ -559,7 +574,10 @@ workspace_slide = true
 #   glide - windows glide from their old position to the new tile slot. Opening a
 #           window glides it in from where it spawned; closing reflows the rest.
 #           Composited on a brief overlay (the real windows are placed instantly
-#           underneath), so it stays smooth even with heavy apps.  string
+#           underneath), so it stays smooth even with heavy apps. Drawn over a
+#           cached copy of the wallpaper: for about 1.5 s after it changes (or a
+#           reload that re-tiles or changes animation settings), and without
+#           Explorer, placement is instant.  string
 window_anim = glide
 # Motion curve used by popup/placement transitions. values: cubic | smooth | spring
 animation_easing = cubic
@@ -697,7 +715,8 @@ persist_state = true
 #   off   = write nothing
 #   error = failures only (default)
 #   info  = + startup environment, monitors/DPI, hook re-arms, config reloads
-#   debug = + per-command detail. Verbose; for reproducing a bug.
+#   debug = + per-command detail and latency probes (switch/glide/retile
+#           stage timings, event counters). Verbose; for reproducing a bug.
 # Run `astur.exe --check` for a paste-ready diagnostics dump.
 log_level = error
 # Local named-pipe command API. Pipe name only; no remote/network listener.
@@ -716,6 +735,14 @@ ipc_allow_launch = false
 # back when Astur exits gracefully. Set false to leave the system setting alone
 # (focus may occasionally flash in the taskbar instead of switching).
 foreground_lock_disable = true
+# Place windows without waiting for each app to finish moving (posted
+# SetWindowPos). A re-tile then completes after the slowest app instead of
+# after every app in turn, and a busy app no longer delays the next command
+# that only moves windows. (Showing and hiding windows on a workspace switch
+# still waits for each app.) Set false if some app lands in the wrong place
+# after a re-tile; Astur then waits for each app, as it did before this key
+# existed.  bool
+async_window_pos = true
 # Extra bindings: chord|action|argument ;; chord|action|argument
 # Escape literal field separators with a leading backslash.
 extra_hotkeys = ALT+GRAVE|scratchpad|
@@ -763,7 +790,7 @@ const DEFAULT_NAVBAR: &str = "\
 # Location : %USERPROFILE%\\.astur\\navbar.conf
 #            (override with the ASTUR_NAVBAR environment variable)
 # Window-manager settings live separately in astur.conf (same folder).
-# Apply    : save this file; Astur hot-reloads it within about one second.
+# Apply    : save this file; Astur hot-reloads it about 0.1 s after the save.
 #
 # One bar is drawn on EVERY monitor. Each shows that monitor's workspaces and
 # focused window. The tiling work area is reserved so windows never sit under a
@@ -829,8 +856,10 @@ right = layout cpu mem net volume battery date clock
 # ---------------------------------------------------------------------------
 # Behaviour
 # ---------------------------------------------------------------------------
-# Mouse wheel over the bar switches to the previous/next workspace (the wheel
-# over the volume widget always adjusts volume instead).  bool
+# Mouse wheel over the bar switches to the previous/next workspace, one per
+# full wheel notch (a touchpad or smooth-scrolling wheel must scroll a whole
+# notch's worth), and a fast spin lands straight on its last workspace. The
+# wheel over the volume widget always adjusts volume instead.  bool
 wheel_workspaces = true
 # Hide empty workspace pills, showing only the active one and those with
 # windows. false = show every workspace the monitor owns.  bool
@@ -1212,30 +1241,65 @@ pub fn config_path(env: &str, name: &str) -> std::path::PathBuf {
     dir
 }
 
+/// A config file that exists (or may exist) but could not be read. The file
+/// has been left exactly as it was; the caller decides what to run on.
+#[derive(Debug)]
+pub struct ConfigReadError {
+    pub path: std::path::PathBuf,
+    pub error: std::io::Error,
+}
+
+impl std::fmt::Display for ConfigReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "cannot read {}: {}", self.path.display(), self.error)
+    }
+}
+
 /// Read a config file, writing `default` the first time it is missing.
-fn read_or_create(path: &std::path::Path, default: &str) -> String {
+///
+/// Only a file that is genuinely absent (`NotFound`) gets the defaults written.
+/// Any other failure — a sharing violation while an editor is mid-save, invalid
+/// UTF-8, a UTF-16 "Unicode" save from Notepad — means the user's file IS there,
+/// and writing over it would silently destroy it. That is exactly what the old
+/// `Err(_) => write(default)` arm did, on every such read, startup included.
+fn read_or_create(path: &std::path::Path, default: &str) -> Result<String, ConfigReadError> {
     match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(_) => {
+        Ok(t) => Ok(t),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
             let _ = std::fs::write(path, default);
             println!("wrote default config: {}", path.display());
-            default.to_string()
+            Ok(default.to_string())
         }
+        Err(error) => Err(ConfigReadError {
+            path: path.to_path_buf(),
+            error,
+        }),
     }
 }
 
 /// Load settings from astur.conf (window manager) and navbar.conf (status
-/// bar), creating each with documented defaults when missing.
-pub fn load_config() -> Config {
+/// bar), creating each with documented defaults when missing. A file that
+/// exists but cannot be read is an error, never a reason to rewrite it.
+pub fn load_config() -> Result<Config, ConfigReadError> {
     let mut c = Config::defaults();
     let wm = config_path("ASTUR_CONFIG", "astur.conf");
-    parse_into_from(&mut c, &read_or_create(&wm, DEFAULT_CONFIG), "astur.conf");
+    parse_into_from(&mut c, &read_or_create(&wm, DEFAULT_CONFIG)?, "astur.conf");
     let nav = config_path("ASTUR_NAVBAR", "navbar.conf");
-    parse_into_from(&mut c, &read_or_create(&nav, DEFAULT_NAVBAR), "navbar.conf");
-    c
+    parse_into_from(
+        &mut c,
+        &read_or_create(&nav, DEFAULT_NAVBAR)?,
+        "navbar.conf",
+    );
+    Ok(c)
+}
+
+/// The settings a freshly written pair of default files would give, built in
+/// memory and written nowhere. For a caller that could not read the real files.
+pub fn default_config() -> Config {
+    parse_pair(DEFAULT_CONFIG, DEFAULT_NAVBAR)
 }
 
 /// Apply `key = value` lines from `text` onto `c`. Unknown keys are ignored.
@@ -1482,6 +1546,7 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "persist_state" => c.persist_state = parse_bool(v),
             "ipc_allow_launch" => c.ipc_allow_launch = parse_bool(v),
             "foreground_lock_disable" => c.foreground_lock_disable = parse_bool(v),
+            "async_window_pos" => c.async_window_pos = parse_bool(v),
             "log_level" => {
                 if matches!(v, "off" | "error" | "info" | "debug") {
                     c.log_level = v.to_string()
@@ -1727,6 +1792,264 @@ pub fn parse_pair(wm_text: &str, nav_text: &str) -> Config {
     c
 }
 
+/// What a config reload has to redo, by subsystem. Each flag names work the
+/// WM does on reload; a key whose only consumer reads it where it is used
+/// (hotkeys, popups, commands, launcher filters) sets `live`, which needs
+/// nothing beyond storing the new config.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ReloadGroups {
+    /// Workspaces, layout, gaps and the bar's work-area reservation: the
+    /// manager redistributes workspaces, re-reserves the bar and re-tiles.
+    pub wm: bool,
+    /// Window dimming and borders: every managed window is unstyled and restyled.
+    pub style: bool,
+    /// Animation settings: whether (and where) the wallpaper cache renders.
+    pub anim: bool,
+    /// Bar windows, fonts and paint-time statics: the bars are rebuilt.
+    pub bar: bool,
+    /// The launcher's app list (and its icon size): re-enumerated.
+    pub launcher: bool,
+    /// Read where used; nothing to redo.
+    pub live: bool,
+}
+
+impl ReloadGroups {
+    /// Everything: an explicit reload, the user's recovery tool for windows
+    /// left mis-styled, and the answer for any change not classified here.
+    pub fn full() -> Self {
+        ReloadGroups {
+            wm: true,
+            style: true,
+            anim: true,
+            bar: true,
+            launcher: true,
+            live: true,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        *self == ReloadGroups::default()
+    }
+}
+
+/// The subsystems that differ between `old` and `new`. Pure data, so the WM
+/// can diff a reload instead of redoing everything: a colour edit used to
+/// unstyle, re-tile and restyle every window (a visible flash) and
+/// re-enumerate the launcher. Every field is destructured by name with no
+/// `..`, and an unused binding is an error, so a new field that nobody
+/// classified fails to compile rather than silently never applying.
+#[deny(unused_variables)]
+pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
+    let Config {
+        per_monitor,
+        start_tiled,
+        outer_gap,
+        inner_gap,
+        master_ratio,
+        workspaces,
+        workspace_keys,
+        workspace_names,
+        workspace_icons,
+        layout,
+        terminal,
+        browser,
+        unfocused_opacity,
+        border_enabled,
+        focused_border,
+        unfocused_border,
+        cursor_follows_focus,
+        focus_follows_mouse,
+        animations,
+        animation_ms,
+        workspace_slide,
+        workspace_anim,
+        window_anim,
+        animation_easing,
+        popup_font_name,
+        popup_font_size,
+        popup_font_weight,
+        popup_radius,
+        popup_border_width,
+        popup_opacity,
+        popup_bg,
+        popup_fg,
+        popup_muted,
+        popup_accent,
+        popup_accent_fg,
+        popup_border,
+        launcher_enabled,
+        launcher_width,
+        launcher_wide_width,
+        launcher_height,
+        launcher_row_height,
+        launcher_icon_size,
+        launcher_padding,
+        launcher_selection_radius,
+        launcher_placement,
+        launcher_source_apps,
+        launcher_source_files,
+        launcher_source_calc,
+        launcher_source_web,
+        launcher_source_windows,
+        launcher_source_clipboard,
+        launcher_source_emoji,
+        launcher_web_url,
+        launcher_max_results,
+        launcher_file_scope,
+        launcher_file_exclude,
+        launcher_mru,
+        launcher_entries,
+        system_menu_enabled,
+        system_menu_width,
+        system_power_items,
+        system_setup_items,
+        system_actions,
+        alt_tab_replacement,
+        scratchpad_enabled,
+        scratchpad_command,
+        scratchpad_class,
+        clipboard_history,
+        clipboard_limit,
+        clipboard_prefix,
+        emoji_picker,
+        emoji_prefix,
+        wallpaper_dir,
+        workspace_wallpapers,
+        media_enabled,
+        ipc_enabled,
+        ipc_pipe,
+        ipc_allow_launch,
+        foreground_lock_disable,
+        async_window_pos,
+        persist_state,
+        log_level,
+        unknown_keys,
+        extra_hotkeys,
+        window_rules,
+        bar_enabled,
+        bar_height,
+        bar_bottom,
+        bar_font_size,
+        bar_show_title,
+        bar_show_clock,
+        bar_clock_24h,
+        bar_show_layout,
+        bar_bg,
+        bar_fg,
+        bar_accent,
+        bar_inactive,
+        bar_font_name,
+        bar_hide_empty,
+        bar_widget_gap,
+        bar_icon_size,
+        bar_workspace_width,
+        bar_icon_mode,
+        bar_show_tooltips,
+        bar_show_app_labels,
+        bar_cpu_format,
+        bar_mem_format,
+        bar_battery_format,
+        bar_net_format,
+        bar_volume_format,
+        bar_clock_format,
+        bar_icon_cpu,
+        bar_icon_mem,
+        bar_icon_battery,
+        bar_icon_net,
+        bar_icon_volume,
+        bar_padding,
+        bar_show_date,
+        bar_date_format,
+        bar_show_cpu,
+        bar_show_mem,
+        bar_show_battery,
+        ignore_classes,
+        float_classes,
+        key_focus_next,
+        key_focus_prev,
+        key_shrink_master,
+        key_grow_master,
+        key_promote_master,
+        key_toggle_tiling,
+        key_toggle_float,
+        key_close_window,
+        theme,
+        acrylic,
+        bar_floating,
+        bar_margin,
+        bar_radius,
+        bar_autohide,
+        bar_wheel_ws,
+        bar_show_net,
+        bar_show_volume,
+        bar_show_apps,
+        bar_show_media,
+        bar_left,
+        bar_center,
+        bar_right,
+    } = new;
+    let mut g = ReloadGroups::default();
+    macro_rules! diff {
+        ($group:ident: $($field:ident),+ $(,)?) => {
+            $(if *$field != old.$field {
+                g.$group = true;
+            })+
+        };
+    }
+    // Workspace model and tile geometry. The bar keys here feed reserve_bar
+    // (the work area the tiles fill), so they re-tile as well as rebuild.
+    diff!(wm: per_monitor, workspaces, outer_gap, inner_gap, master_ratio, layout);
+    diff!(wm: bar_enabled, bar_height, bar_bottom, bar_floating, bar_margin, bar_autohide);
+    diff!(style: unfocused_opacity, border_enabled, focused_border, unfocused_border);
+    // wp_publish: whether any animation reads the wallpaper cache.
+    diff!(anim: animations, animation_ms, workspace_slide, workspace_anim, window_anim);
+    // Everything the bar draws. Snapshot fields (colours, formats, zones)
+    // would reach it through the manager's next bar update anyway; statics
+    // read at paint (padding, cell width, gap, radius, fonts) need the rebuild.
+    diff!(bar: bar_enabled, bar_height, bar_bottom, bar_font_size, bar_font_name, bar_padding);
+    diff!(bar: bar_floating, bar_margin, bar_radius, bar_autohide, bar_wheel_ws);
+    diff!(bar: bar_show_title, bar_show_clock, bar_clock_24h, bar_show_layout, bar_show_date);
+    diff!(bar: bar_show_cpu, bar_show_mem, bar_show_battery, bar_show_net, bar_show_volume);
+    diff!(bar: bar_show_apps, bar_show_media, media_enabled, bar_left, bar_center, bar_right);
+    diff!(bar: bar_bg, bar_fg, bar_accent, bar_inactive, theme, bar_hide_empty);
+    diff!(bar: bar_widget_gap, bar_icon_size, bar_workspace_width, bar_icon_mode);
+    diff!(bar: bar_show_tooltips, bar_show_app_labels, bar_date_format, bar_clock_format);
+    diff!(bar: bar_cpu_format, bar_mem_format, bar_battery_format, bar_net_format);
+    diff!(bar: bar_volume_format, bar_icon_cpu, bar_icon_mem, bar_icon_battery);
+    diff!(bar: bar_icon_net, bar_icon_volume, workspace_names, workspace_icons);
+    // LA_REFRESH: the enumerated app list, and the size its icons resolve at.
+    diff!(launcher: launcher_source_apps, launcher_entries, launcher_icon_size);
+    // Read where used: hooks and hotkeys (apply_hook_config), popups and the
+    // launcher (UI_CFG / apply_theme), manager commands (mgr.cfg), workers.
+    diff!(live: start_tiled, workspace_keys, terminal, browser, cursor_follows_focus);
+    diff!(live: focus_follows_mouse, animation_easing, theme, acrylic);
+    diff!(live: popup_font_name, popup_font_size, popup_font_weight, popup_radius);
+    diff!(live: popup_border_width, popup_opacity, popup_bg, popup_fg, popup_muted);
+    diff!(live: popup_accent, popup_accent_fg, popup_border);
+    diff!(live: launcher_enabled, launcher_width, launcher_wide_width, launcher_height);
+    diff!(live: launcher_row_height, launcher_padding, launcher_selection_radius);
+    diff!(live: launcher_placement, launcher_source_files, launcher_source_calc);
+    diff!(live: launcher_source_web, launcher_source_windows, launcher_source_clipboard);
+    diff!(live: launcher_source_emoji, launcher_web_url, launcher_max_results);
+    diff!(live: launcher_file_scope, launcher_file_exclude, launcher_mru);
+    diff!(live: system_menu_enabled, system_menu_width, system_power_items);
+    diff!(live: system_setup_items, system_actions, alt_tab_replacement);
+    diff!(live: scratchpad_enabled, scratchpad_command, scratchpad_class);
+    diff!(live: clipboard_history, clipboard_limit, clipboard_prefix, emoji_picker);
+    diff!(live: emoji_prefix, wallpaper_dir, workspace_wallpapers, ipc_enabled, ipc_pipe);
+    diff!(live: ipc_allow_launch, foreground_lock_disable, async_window_pos);
+    diff!(live: persist_state, log_level, unknown_keys, extra_hotkeys, window_rules);
+    diff!(live: ignore_classes, float_classes, key_focus_next, key_focus_prev);
+    diff!(live: key_shrink_master, key_grow_master, key_promote_master);
+    diff!(live: key_toggle_tiling, key_toggle_float, key_close_window);
+    // Fail-safe: a difference none of the above caught (a field compared in
+    // the wrong place, a PartialEq quirk) must still apply, so do it all.
+    if g.is_empty() && old != new {
+        return ReloadGroups::full();
+    }
+    g
+}
+
 /// Format a COLORREF (0x00BBGGRR) back to a `#RRGGBB` config string.
 pub fn color_to_hex(c: u32) -> String {
     let r = c & 0xFF;
@@ -1792,6 +2115,24 @@ outer_gap = 4
         );
         assert!(c.unknown_keys.is_empty());
         assert_eq!(c.outer_gap, 4);
+    }
+
+    #[test]
+    fn async_window_pos_defaults_on_parses_and_round_trips() {
+        assert!(Config::defaults().async_window_pos);
+        // The shipped template states the default, it does not override it.
+        assert!(parse_pair(default_config_text(), "").async_window_pos);
+        assert!(!parse_pair("async_window_pos = false\n", "").async_window_pos);
+        assert!(parse_pair("async_window_pos = true\n", "").async_window_pos);
+        let off = set_conf_key(default_config_text(), "async_window_pos", "false");
+        assert!(!parse_pair(&off, "").async_window_pos);
+        let on = set_conf_key(&off, "async_window_pos", "true");
+        assert!(parse_pair(&on, "").async_window_pos);
+        assert_eq!(
+            on,
+            default_config_text(),
+            "a round trip restores the template"
+        );
     }
 
     #[test]
@@ -1988,5 +2329,147 @@ outer_gap = 4
             let vk = key_to_vk(name).unwrap();
             assert_eq!(vk_to_key(vk), name);
         }
+    }
+
+    /// The keys a template assigns (every documented key, at its default).
+    fn template_keys(text: &str) -> Vec<&str> {
+        text.lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .filter_map(|l| l.split_once('=').map(|(k, _)| k.trim()))
+            .collect()
+    }
+
+    #[test]
+    fn every_documented_key_lands_in_a_reload_group() {
+        // The LAUNCH-19 guard: a key in no group would be saved, reloaded and
+        // silently never applied. Each key is set to the first of these values
+        // its parser accepts as a change from the default.
+        const VALUES: &[&str] = &[
+            "true",
+            "false",
+            "3",
+            "0.33",
+            "#123456",
+            "per_monitor",
+            "master",
+            "fade",
+            "off",
+            "smooth",
+            "light",
+            "primary_monitor",
+            "debug",
+            "icon",
+            "Q W E",
+            "clock",
+            "x y",
+            "a|b|c|d|true",
+            "float|x.exe||||",
+            "ALT+Q|launch|x",
+            "https://x/?q={query}",
+        ];
+        let base = parse_pair(DEFAULT_CONFIG, DEFAULT_NAVBAR);
+        assert!(reload_groups(&base, &base).is_empty());
+        for (is_nav, text) in [(false, DEFAULT_CONFIG), (true, DEFAULT_NAVBAR)] {
+            for key in template_keys(text) {
+                let changed = VALUES.iter().find_map(|v| {
+                    let edited = set_conf_key(text, key, v);
+                    let c = if is_nav {
+                        parse_pair(DEFAULT_CONFIG, &edited)
+                    } else {
+                        parse_pair(&edited, DEFAULT_NAVBAR)
+                    };
+                    (c != base).then_some(c)
+                });
+                let c = changed.unwrap_or_else(|| panic!("no test value changes `{key}`"));
+                let g = reload_groups(&base, &c);
+                assert!(!g.is_empty(), "`{key}` is in no reload group");
+                // Classified, not caught by the fail-safe.
+                assert_ne!(g, ReloadGroups::full(), "`{key}` fell through to full");
+            }
+        }
+    }
+
+    #[test]
+    fn bar_geometry_re_tiles_and_colours_only_repaint() {
+        let base = Config::defaults();
+        let mut c = base.clone();
+        c.bar_height = 40;
+        let g = reload_groups(&base, &c);
+        assert!(g.wm && g.bar, "the work area shrinks, so the tiles move");
+        assert!(!g.style && !g.launcher);
+
+        let mut c = base.clone();
+        c.bar_bg = Some(0x0012_3456);
+        let g = reload_groups(&base, &c);
+        assert_eq!(
+            g,
+            ReloadGroups {
+                bar: true,
+                ..ReloadGroups::default()
+            }
+        );
+
+        let mut c = base.clone();
+        c.focused_border = 0x0012_3456;
+        let g = reload_groups(&base, &c);
+        assert_eq!(
+            g,
+            ReloadGroups {
+                style: true,
+                ..ReloadGroups::default()
+            }
+        );
+
+        // The launcher list is re-enumerated only for its own keys.
+        let mut c = base.clone();
+        c.popup_bg = Some(0x0012_3456);
+        assert!(!reload_groups(&base, &c).launcher);
+        c.launcher_entries.push(LauncherEntry {
+            label: "a".into(),
+            target: "b".into(),
+            icon: String::new(),
+        });
+        assert!(reload_groups(&base, &c).launcher);
+    }
+
+    /// A fresh directory under the system temp dir, unique per test and run.
+    fn scratch_dir(test: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("astur-config-test-{}-{test}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn read_or_create_writes_defaults_only_when_missing() {
+        let dir = scratch_dir("missing");
+        let path = dir.join("sub").join("astur.conf");
+        let text = read_or_create(&path, DEFAULT_CONFIG).unwrap();
+        assert_eq!(text, DEFAULT_CONFIG);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_CONFIG);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_or_create_never_overwrites_an_unreadable_file() {
+        // The silent data-loss bug: any read error used to write the defaults
+        // over the user's file. Invalid UTF-8 and a UTF-16LE "Unicode" save
+        // (what Notepad writes) must both come back as errors, byte-identical.
+        let dir = scratch_dir("unreadable");
+        let invalid_utf8: Vec<u8> = b"outer_gap = 12\n\xff\xfe\xfd\n".to_vec();
+        let mut utf16le: Vec<u8> = vec![0xFF, 0xFE];
+        for u in "outer_gap = 12\r\n".encode_utf16() {
+            utf16le.extend_from_slice(&u.to_le_bytes());
+        }
+        for (name, bytes) in [("utf8.conf", &invalid_utf8), ("utf16.conf", &utf16le)] {
+            let path = dir.join(name);
+            std::fs::write(&path, bytes).unwrap();
+            let err = read_or_create(&path, DEFAULT_CONFIG).unwrap_err();
+            assert_eq!(err.path, path);
+            assert_eq!(&std::fs::read(&path).unwrap(), bytes, "{name} was modified");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

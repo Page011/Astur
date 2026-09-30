@@ -78,7 +78,10 @@ Manager) too.
 - **Animations** — workspace switches animate with a composited overlay:
   `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`. Windows
   also **glide** to their tile slot on open / move / resize / re-tile, composited so
-  the real windows land instantly underneath — smooth even with heavy apps.
+  the real windows land instantly underneath — smooth even with heavy apps. At
+  `animation_ms` up to 250 (default 140) clicks pass straight through a running
+  animation to those windows. A switch made while one is still sliding happens at
+  once underneath it, and the overlay then reveals the result.
 - **App launcher + file search** *(Astur)* — `Alt+Space` opens a fuzzy, MRU-ranked
   picker over installed apps (Start Menu and Store/UWP), custom commands/URLs, open
   windows, and indexed files. Optional prefix providers expose in-memory clipboard
@@ -144,13 +147,20 @@ in same folder. Both files **hot-reload** on save.
 ## Configuration
 
 Two files are created in `%USERPROFILE%\.astur\` on first run, both fully
-commented and **hot-reloaded on save**:
+commented and **hot-reloaded on save** (about 0.1 s after the save). A reload
+redoes only what the save changed: a colour edit does not re-tile or restyle
+windows. The system menu's **Reload** (or IPC `reload`) always re-applies
+everything, which also repairs any window left mis-styled:
 
 - **`astur.conf`** — workspaces/names/icons/wallpapers, five layouts, gaps, borders,
   focus, animations/easing, popup theme/geometry, launcher providers/custom entries,
   system actions, desktop tools, rich rules, persistence, IPC, and hotkeys.
 - **`navbar.conf`** — bar placement/style, three widget zones, labels/formats/icons,
   app buttons/tooltips, stats, volume, network, media, floating mode, and auto-hide.
+
+Save both as UTF-8. The window manager never overwrites a file it cannot read (a
+UTF-16 "Unicode" save, or one locked mid-save): it keeps its current settings
+(built-in defaults at startup), logs the error to `astur.log`, and tries again.
 
 Full Astur ships **`astur-settings.exe`** to edit both files. `.conf` remains source
 of truth; comments/layout survive saves. Structured records use `;;` between rows
@@ -184,8 +194,12 @@ intercept input before it reaches any application. Left Alt is swallowed so it n
 triggers app menus or Alt shortcuts — only Astur sees it. Drag commands are queued to
 the manager; a DWM-thumbnail overlay (outline fallback) previews movement while the
 real window is committed once on release. Slow application repainting stays out of
-the per-frame input path. File search queries the Windows Search index off the input
-path, so typing stays responsive.
+the per-frame input path. Tiles are placed with posted (`SWP_ASYNCWINDOWPOS`) moves,
+so a re-tile finishes after the slowest app instead of after every app in turn, and
+a busy app no longer holds up the next re-tile; `async_window_pos = false` in
+`astur.conf` makes Astur wait for each app instead. Showing and hiding windows on a
+workspace switch still waits for each app. File search queries the Windows Search
+index off the input path, so typing stays responsive.
 
 ## Quit
 
@@ -238,6 +252,12 @@ menu, tray, desktop tools, rich widgets/themes/rules, IPC, persistence, and sett
 
 - Workspace wallpaper changes Windows global wallpaper through
   `SystemParametersInfoW`; not independent per-monitor wallpaper.
+- Window glide and the slide's still-wallpaper backdrop draw from a cached copy of
+  the wallpaper, re-rendered about 1.5 s after it, the display or the config changes
+  (and once at startup). In
+  that gap — e.g. right after a per-workspace wallpaper switch — windows place
+  instantly instead of gliding and slides move the whole frame. Without Explorer (a
+  replacement shell) that is always the case.
 - Media widget reads titles from known player windows; no play/pause/skip controls or
   Windows media-session API yet.
 - Persisted state stores active workspace indexes and launcher MRU, not window-to-

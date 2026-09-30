@@ -44,14 +44,14 @@ use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CombineRgn, CreateBitmap, CreateCompatibleBitmap,
     CreateCompatibleDC, CreateFontW, CreatePen, CreateRectRgn, CreateRoundRectRgn,
     CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, EnumDisplayMonitors,
-    ExtCreatePen, FillRect, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect, LineTo,
-    MonitorFromPoint, MonitorFromWindow, MoveToEx, PolyBezier, ReleaseDC, RoundRect, SelectObject,
-    SetBkMode, SetStretchBltMode, SetTextColor, SetWindowRgn, StretchBlt, UpdateWindow,
-    BLENDFUNCTION, BS_SOLID, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_GUI_FONT, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HALFTONE, HDC, HGDIOBJ, HMONITOR, LOGBRUSH, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_GEOMETRIC, PS_SOLID,
-    RGN_DIFF, RGN_OR, SRCCOPY, TRANSPARENT,
+    ExtCreatePen, FillRect, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
+    LineTo, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, MoveToEx, PolyBezier, ReleaseDC,
+    RoundRect, SelectObject, SetBkMode, SetStretchBltMode, SetTextColor, SetWindowRgn, StretchBlt,
+    UpdateWindow, BLENDFUNCTION, BS_SOLID, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS,
+    COLORONCOLOR, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER,
+    DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC, HGDIOBJ, HMONITOR,
+    LOGBRUSH, MONITORINFO, MONITOR_DEFAULTTONEAREST, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_GEOMETRIC, PS_SOLID, RGN_DIFF, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::Media::Audio::{
     eConsole, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -61,9 +61,10 @@ use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
 };
 use windows::Win32::Security::{
-    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, TokenUser,
+    AdjustTokenPrivileges, GetTokenInformation, LookupPrivilegeValueW, TokenElevation, TokenUser,
     LUID_AND_ATTRIBUTES, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, SE_PRIVILEGE_ENABLED,
-    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_PRIVILEGES, TOKEN_QUERY, TOKEN_USER,
+    SE_SHUTDOWN_NAME, TOKEN_ADJUST_PRIVILEGES, TOKEN_ELEVATION, TOKEN_PRIVILEGES, TOKEN_QUERY,
+    TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
     ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX,
@@ -100,13 +101,13 @@ use windows::Win32::System::Shutdown::{
     SHUTDOWN_REASON,
 };
 use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount, GetTickCount64};
-use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT};
+use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, GetKeyState, GetLastInputInfo, SendInput, ToUnicode, INPUT, INPUT_0,
-    INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, LASTINPUTINFO, VIRTUAL_KEY,
-    VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LEFT,
-    VK_LMENU, VK_LSHIFT, VK_MENU, VK_RBUTTON, VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT,
-    VK_SPACE, VK_TAB, VK_UP,
+    GetAsyncKeyState, GetKeyState, GetLastInputInfo, SendInput, ToUnicode, TrackMouseEvent, INPUT,
+    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, LASTINPUTINFO,
+    TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE,
+    VK_LBUTTON, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RBUTTON, VK_RCONTROL,
+    VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, IEnumShellItems, IShellItem, IShellItemImageFactory,
@@ -123,14 +124,16 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetAncestor,
-    GetDesktopWindow, GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, RegisterClassW,
-    SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW, ShowWindow,
-    TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT, HC_ACTION, HHOOK,
-    HWND_TOPMOST, KBDLLHOOKSTRUCT, LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE,
-    SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA,
-    WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
-    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    GetDesktopWindow, GetLayeredWindowAttributes, GetMessageW, GetShellWindow, GetWindowRect,
+    IsZoomed, RegisterClassW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
+    GA_ROOTOWNER, HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
+    LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
+    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
+    SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
+    WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -145,10 +148,13 @@ use windows::Win32::Graphics::Dwm::{
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
-    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
-    OpenMutexW, OpenProcess, OpenProcessToken, QueryFullProcessImageNameW, WaitForSingleObject,
-    PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
-    SYNCHRONIZATION_ACCESS_RIGHTS,
+    AttachThreadInput, CreateMutexW, GetCurrentProcess, GetCurrentProcessId, GetCurrentThread,
+    GetCurrentThreadId, GetGuiResources, OpenMutexW, OpenProcess, OpenProcessToken,
+    QueryFullProcessImageNameW, SetThreadInformation, SetThreadPriority, ThreadPowerThrottling,
+    WaitForSingleObject, GR_GDIOBJECTS, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_SYNCHRONIZE, SYNCHRONIZATION_ACCESS_RIGHTS, THREAD_POWER_THROTTLING_CURRENT_VERSION,
+    THREAD_POWER_THROTTLING_EXECUTION_SPEED, THREAD_POWER_THROTTLING_STATE, THREAD_PRIORITY,
+    THREAD_PRIORITY_ABOVE_NORMAL, THREAD_PRIORITY_HIGHEST,
 };
 use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::HiDpi::{
@@ -157,21 +163,23 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    BringWindowToTop, EnumWindows, FindWindowExW, FindWindowW, GetClassNameW, GetClientRect,
-    GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow, GetWindowLongPtrW,
-    GetWindowLongW, GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId,
-    IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, KillTimer, MessageBoxW, PeekMessageW,
-    PostMessageW, SendMessageTimeoutW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
-    SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE,
-    EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
-    EVENT_SYSTEM_MOVESIZEEND, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, MB_ICONERROR, MB_OK,
-    PM_REMOVE, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE,
-    SPIF_UPDATEINIFILE, SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA, SPI_SETDESKWALLPAPER,
-    SPI_SETFOREGROUNDLOCKTIMEOUT, SW_SHOW, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE,
-    WM_DPICHANGED, WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_QUERYENDSESSION, WM_TIMER, WM_USER,
-    WS_CHILD,
+    BringWindowToTop, ChangeWindowMessageFilterEx, EnumWindows, FindWindowExW, FindWindowW,
+    GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow,
+    GetWindowLongPtrW, GetWindowLongW, GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW,
+    GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, KillTimer,
+    MessageBoxW, PeekMessageW, PostMessageW, RegisterWindowMessageW, SendMessageTimeoutW,
+    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowLongW, SetWindowPlacement,
+    SystemParametersInfoW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
+    EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
+    GW_OWNER, MB_ICONERROR, MB_OK, MSGFLT_ALLOW, OBJID_CURSOR, PM_REMOVE, PW_RENDERFULLCONTENT,
+    SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
+    SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA, SPI_SETDESKWALLPAPER,
+    SPI_SETFOREGROUNDLOCKTIMEOUT, SPI_SETWORKAREA, SW_SHOW, SW_SHOWNORMAL,
+    SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
+    WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_QUERYENDSESSION, WM_SETTINGCHANGE, WM_TIMER,
+    WM_USER, WS_CHILD,
 };
 
 // =========================================================================
@@ -264,7 +272,7 @@ fn log_push(level: u8, msg: &str) {
     // Spawned on the first line that is actually kept, so `log_level = off`
     // costs no thread at all.
     LOG_WORKER.get_or_init(|| {
-        std::thread::spawn(log_worker);
+        spawn_named("log", log_worker);
     });
     LOGCV.notify_one();
 }
@@ -339,6 +347,252 @@ macro_rules! log_debug {
     ($($arg:tt)*) => {
         if log_on(LOG_DEBUG) { log_push(LOG_DEBUG, &format!($($arg)*)) }
     };
+}
+
+// =========================================================================
+// Latency probes and counters
+// =========================================================================
+// "Faster" is a claim until it has a number. These are the numbers: stage
+// timers on the switch / glide / retile / manager paths, a SetWindowPos count,
+// WinEvent intake counters and the LL-hook delivery delay.
+//
+// Rules:
+//   * Stage timers exist only at log_level = debug. `Probe::start` returns an
+//     inert probe otherwise, so a disabled probe costs one relaxed load and a
+//     branch per mark: no clock read, no formatting, no allocation.
+//   * One log line per operation, through the normal async queue, so a probe
+//     never adds disk I/O to the path it measures.
+//   * Never a Probe on `mouse_proc` / `keyboard_proc`. The hooks only do a
+//     relaxed fetch_max on HOOK_DELAY_MAX, and only at debug level.
+
+/// Stage stopwatch for one operation. Each `mark` records microseconds since
+/// `start`; the line is logged when the probe drops, so an early return still
+/// reports how far it got.
+struct Probe(Option<(Instant, String)>);
+
+impl Probe {
+    fn start(name: &str) -> Probe {
+        Probe(log_on(LOG_DEBUG).then(|| (Instant::now(), name.to_string())))
+    }
+
+    fn on(&self) -> bool {
+        self.0.is_some()
+    }
+
+    fn mark(&mut self, stage: &str) {
+        if let Some((t0, line)) = &mut self.0 {
+            use std::fmt::Write;
+            let _ = write!(line, " {stage}=+{}us", t0.elapsed().as_micros());
+        }
+    }
+
+    /// Free-form context (`format_args!` so nothing is formatted when off).
+    fn note(&mut self, text: std::fmt::Arguments) {
+        if let Some((_, line)) = &mut self.0 {
+            use std::fmt::Write;
+            let _ = write!(line, " {text}");
+        }
+    }
+}
+
+impl Drop for Probe {
+    fn drop(&mut self) {
+        if let Some((t0, line)) = self.0.take() {
+            log_push(
+                LOG_DEBUG,
+                &format!("probe {line} total={}us", t0.elapsed().as_micros()),
+            );
+        }
+    }
+}
+
+/// A timestamp only when probes are on (for hand-offs like dispatch -> pickup).
+fn probe_now() -> Option<Instant> {
+    log_on(LOG_DEBUG).then(Instant::now)
+}
+
+/// Upper median and maximum of per-frame timings, for the compositor probes.
+/// Sorts in place; (0, 0) when there were no frames.
+fn p50_max(v: &mut [u32]) -> (u32, u32) {
+    if v.is_empty() {
+        return (0, 0);
+    }
+    v.sort_unstable();
+    (v[v.len() / 2], v[v.len() - 1])
+}
+
+/// Every SetWindowPos Astur issues on a real window (set_pos_raw, commit_rect,
+/// the drag park). Diagnostics, and the per-Cmd probe line reports the delta.
+static SWP_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// WinEvent intake counters, bumped on the main thread by `win_event_proc`
+/// (and the manager, for Add). Relaxed adds; totals since start.
+const EVC_SHOW: usize = 0;
+const EVC_HIDE: usize = 1;
+const EVC_DESTROY: usize = 2;
+const EVC_FOREGROUND: usize = 3;
+const EVC_NAMECHANGE: usize = 4;
+/// Every LOCATIONCHANGE the hook delivers, counted BEFORE the object filter.
+const EVC_LOCATION: usize = 5;
+/// The subset of those that are the cursor (id_object == OBJID_CURSOR, -9).
+const EVC_LOCATION_CURSOR: usize = 6;
+/// Cmd::Add commands the manager processed.
+const EVC_ADD: usize = 7;
+/// SHOWs the style prefilter dropped (child / tool / no-activate windows).
+const EVC_SHOW_STYLE: usize = 8;
+/// NAMECHANGE refreshes folded into one already queued (BAR-10).
+const EVC_BAR_REFRESH_FOLDED: usize = 9;
+const EVC_NAMES: [&str; 10] = [
+    "show",
+    "hide",
+    "destroy",
+    "foreground",
+    "namechange",
+    "location",
+    "location_cursor",
+    "add",
+    "show_style_skipped",
+    "bar_refresh_folded",
+];
+static EV_COUNTS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+
+#[inline]
+fn ev_count(slot: usize) {
+    EV_COUNTS[slot].fetch_add(1, Ordering::Relaxed);
+}
+
+/// Worst LL-hook delivery delay (ms) since the watchdog last read it: the OS
+/// input timestamp against GetTickCount on arrival. Written by the hooks with a
+/// relaxed fetch_max, only at debug level.
+static HOOK_DELAY_MAX: AtomicU32 = AtomicU32::new(0);
+
+/// Hook side of HOOK_DELAY_MAX. Hook-legal: one tick read and one relaxed
+/// atomic, no lock, no allocation.
+#[inline]
+fn hook_delay_note(event_time: u32) {
+    // Signed: an event stamped a tick after our read must not wrap to 49 days.
+    let late = unsafe { GetTickCount() }.wrapping_sub(event_time) as i32;
+    if late > 0 {
+        HOOK_DELAY_MAX.fetch_max(late as u32, Ordering::Relaxed);
+    }
+}
+
+/// One line of counters, for diagnostics and the watchdog's debug tick.
+fn counters_line() -> String {
+    use std::fmt::Write;
+    let mut s = String::new();
+    for (name, n) in EVC_NAMES.iter().zip(EV_COUNTS.iter()) {
+        let _ = write!(s, "{name}={} ", n.load(Ordering::Relaxed));
+    }
+    let gdi = unsafe { GetGuiResources(GetCurrentProcess(), GR_GDIOBJECTS) };
+    // A flag stuck at true is a bar title frozen for good with no error
+    // anywhere (BAR-10), so it is shown next to the queue it gates.
+    let _ = write!(
+        s,
+        "swp={} gdi={gdi} cmdq={} bar_refresh_queued={} focus_refused={} focus_missed={} winevent_failed={:#x} {}",
+        SWP_CALLS.load(Ordering::Relaxed),
+        CMDQ.lock().unwrap().len(),
+        BAR_REFRESH_QUEUED.load(Ordering::Relaxed),
+        FOCUS_REFUSED.load(Ordering::Relaxed),
+        FOCUS_MISSED.load(Ordering::Relaxed),
+        WINEVENT_HOOKS_FAILED.load(Ordering::Relaxed),
+        wp_counters()
+    );
+    s
+}
+
+// =========================================================================
+// Thread scheduling
+// =========================================================================
+// Every Astur window is WS_EX_NOACTIVATE, so the process is never in focus:
+// Windows gives it at best Medium QoS (Low when no bar is visible), and every
+// thread runs at NORMAL. Under load a hook callback, a command wake-up or an
+// animation frame then queues behind the user's own busy threads, and on a
+// hybrid CPU on battery it can land on an efficiency core (EVENTS-12). So the
+// threads a user waits on are raised a little and opted into HighQoS. Not
+// measured here; the expected gain is ~0 on an idle desktop on AC.
+//
+// Hard rules (each one is a way to break the hooks or starve the desktop):
+//   * Nothing below THREAD_PRIORITY_NORMAL. The icon, filesearch, stats,
+//     wallpaper, state, mru, config-watcher, ipc and capture threads all hold
+//     std Mutexes (SRW locks: no priority inheritance) that the main, manager
+//     and launcher threads also take. A starved holder can keep the main
+//     thread blocked past LowLevelHooksTimeout, and Windows then removes the
+//     hooks without a word.
+//   * Manager >= compositors, so a compositor can never outrun the placement
+//     it is covering and reveal it early.
+//   * The main thread (hooks, WinEvents, bars, tray, marker) at most HIGHEST,
+//     never TIME_CRITICAL: bar GDI paints would then preempt the apps.
+//   * No MMCSS: its DisplayPostProcessing class is scheduled above DWM and
+//     audio. Plain SetThreadPriority in the normal class tops out at 15,
+//     below MMCSS's 16+, so it cannot starve either.
+//   * No process-wide IGNORE_TIMER_RESOLUTION and no priority-class change:
+//     std::thread::sleep already uses a high-resolution waitable timer, and
+//     whether process-level power state reaches the apps Astur launches is
+//     undocumented. Thread-level settings sidestep that question.
+//   * None of these threads busy-waits: each blocks on a condvar or a message
+//     loop when idle, so raising them costs nothing at rest.
+
+/// The threads Astur raises: the ones between an input and what it causes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ThreadRole {
+    /// LL hooks, WinEvents, bars, tray and marker (the process main thread).
+    Main,
+    /// Owns all window state and runs every command.
+    Manager,
+    /// glide_worker and transition_worker: the cosmetic overlays.
+    Compositor,
+    /// The Alt+Space picker: keystroke to repaint.
+    Launcher,
+}
+
+fn role_priority(role: ThreadRole) -> THREAD_PRIORITY {
+    match role {
+        ThreadRole::Manager => THREAD_PRIORITY_HIGHEST,
+        ThreadRole::Main | ThreadRole::Compositor | ThreadRole::Launcher => {
+            THREAD_PRIORITY_ABOVE_NORMAL
+        }
+    }
+}
+
+/// Raise the calling thread for `role` and opt it into HighQoS. Called first
+/// thing in each such thread: a new thread starts at NORMAL whatever its
+/// parent runs at. A refusal (HighQoS needs Windows 10 1709+) is logged and
+/// the thread carries on at whatever it got.
+fn raise_current_thread(role: ThreadRole) {
+    unsafe {
+        if let Err(e) = SetThreadPriority(GetCurrentThread(), role_priority(role)) {
+            log_info!("{role:?} thread: priority unchanged ({e})");
+        }
+        // ControlMask EXECUTION_SPEED with StateMask 0 = "never throttle this
+        // thread's execution speed", i.e. explicit HighQoS.
+        let state = THREAD_POWER_THROTTLING_STATE {
+            Version: THREAD_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: THREAD_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        if let Err(e) = SetThreadInformation(
+            GetCurrentThread(),
+            ThreadPowerThrottling,
+            &state as *const _ as *const c_void,
+            core::mem::size_of::<THREAD_POWER_THROTTLING_STATE>() as u32,
+        ) {
+            log_info!("{role:?} thread: HighQoS not set ({e})");
+        }
+    }
+}
+
+/// std::thread::spawn with a name (std sets it through SetThreadDescription,
+/// resolved at run time), so WPA, a debugger and a crash dump can tell the
+/// threads apart. Fails exactly like std::thread::spawn: a panic.
+fn spawn_named<F>(name: &str, f: F)
+where
+    F: FnOnce() + Send + 'static,
+{
+    std::thread::Builder::new()
+        .name(name.to_string())
+        .spawn(f)
+        .expect("failed to spawn thread");
 }
 
 // =========================================================================
@@ -447,6 +701,49 @@ const MARK_TOP_LIFT: i32 = 8;
 // Window class for the transient workspace-slide overlay.
 const SLIDE_CLASS: PCWSTR = w!("astur_slide");
 
+/// Longest configured animation_ms whose slide / glide overlays let input
+/// through (SWITCH-14).
+const CLICK_THROUGH_MAX_MS: i32 = 250;
+
+/// Extended style for the slide and glide overlays. Up to
+/// CLICK_THROUGH_MAX_MS they are layered + transparent, so clicks, the wheel
+/// and Alt+drag go straight to the real windows, which are already at their
+/// final place underneath; before, the overlay ate every work-area click for
+/// the whole animation (140-245 ms at the defaults), and an Alt+drag started
+/// in that window grabbed the overlay itself (WindowFromPoint skips only
+/// layered + transparent windows). The trade-off, accepted: during the
+/// animation a click acts on the final layout while old or in-between frames
+/// still show. At the default 140 ms that is under reaction time, like the
+/// animations-off path; the config allows up to 2000 ms, where a misdirected
+/// click would be noticeable, so longer animations keep blocking input.
+fn overlay_ex_style(animation_ms: i32) -> WINDOW_EX_STYLE {
+    let base = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+    if animation_ms <= CLICK_THROUGH_MAX_MS {
+        base | WS_EX_LAYERED | WS_EX_TRANSPARENT
+    } else {
+        base
+    }
+}
+
+/// A layered overlay shows nothing until it has attributes, so a failed SLWA
+/// would leave the switch running uncovered with frame 0 never on screen.
+/// Makes it opaque (alpha 255; never UpdateLayeredWindow, which fails after
+/// SLWA and would break the GetDC blits). false = drop this overlay: the
+/// caller treats it like a failed CreateWindowExW. Logged once.
+unsafe fn overlay_make_visible(overlay: HWND, ex_style: WINDOW_EX_STYLE) -> bool {
+    static LOGGED: AtomicBool = AtomicBool::new(false);
+    if !ex_style.contains(WS_EX_LAYERED) {
+        return true;
+    }
+    if SetLayeredWindowAttributes(overlay, COLORREF(0), 255, LWA_ALPHA).is_ok() {
+        return true;
+    }
+    if !LOGGED.swap(true, Ordering::Relaxed) {
+        log_error!("overlay SetLayeredWindowAttributes failed; that switch or glide ran uncovered");
+    }
+    false
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Mode {
     None,
@@ -554,7 +851,8 @@ unsafe extern "system" fn outline_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARA
 // The dragged window is mirrored live with a DWM thumbnail (GPU-composited — works
 // even on Chrome, where PrintWindow returns black). The manager parks the real
 // window off-screen for the duration (Cmd::DragPark) so only the mirror is visible,
-// and commits the final rect on release (Cmd::DragMoved/DragResized) — the hook
+// and puts it back on release (Cmd::DragMoved/DragResized: the final rect, or for a
+// tiled resize drop placed instantly an un-park plus its tile) — the hook
 // itself never does a cross-process SetWindowPos. Thumbnails preserve the source
 // aspect ratio, so a resize letterboxes while the aspect changes (accepted for live
 // content); registration failure falls back to the outline (and no park).
@@ -656,11 +954,13 @@ unsafe fn drag_preview_end() {
     }
 }
 
-/// Commit a previewed rect to the real window in one synchronous SetWindowPos.
-/// Runs on the MANAGER thread (DragMoved/DragResized/DragPark handlers), never on a
+/// Commit a previewed rect to the real window in one SetWindowPos (posted, not
+/// waited on, with async placement: see `foreign_swp_flags`). Runs on the
+/// MANAGER thread (DragMoved/DragResized/DragUnmaximize handlers), never on a
 /// hook. Handles floating windows (which keep this dropped rect) and tiled ones
 /// (which retile over it) alike.
 unsafe fn commit_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+    SWP_CALLS.fetch_add(1, Ordering::Relaxed);
     let _ = SetWindowPos(
         hwnd_from(hwnd),
         None,
@@ -668,8 +968,145 @@ unsafe fn commit_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
         y,
         w,
         h,
-        SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+        foreign_swp_flags(
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+            ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+        ),
     );
+}
+
+/// Post, rather than wait for, every SetWindowPos on an app's window (config
+/// `async_window_pos`, default on; TILE-1). A synchronous cross-process
+/// SetWindowPos returns only after that app's thread has handled the move
+/// (WM_NCCALCSIZE, WM_WINDOWPOSCHANGED, its WM_SIZE relayout), so a retile
+/// cost the SUM of every changed app's handling, serially on the manager
+/// thread, and one hung app stalled it without limit. Posted, each app handles
+/// its own request in parallel: the layout is done after the slowest app, and
+/// the manager is free for the next command at once.
+///
+/// This does NOT make the manager hang-proof. These stay synchronous and can
+/// still block on a hung app: switch_plain's ShowWindow hide/show, the
+/// refresh_monitors re-show, Cmd::Add's hide, the scratchpad show/hide,
+/// SW_RESTORE, BringWindowToTop and SetWindowLongW. Only commands that just
+/// place windows stop waiting.
+///
+/// Consequences handled elsewhere, because a SetWindowPos no longer means the
+/// window is there yet: the cursor warp centres on the requested tile, not the
+/// live rect (`center_cursor_on`); a drop waits (bounded) for its own commit
+/// to land before a glide captures the screen (`drop_retile_force_instant`);
+/// the border correction rejects a read that straddles a landing
+/// (`adjust_for_border`). Set by apply_hook_config; a reload that turns it off
+/// while a posted move is still queued can land that older rect after a newer
+/// synchronous one, once, until the next retile.
+static ASYNC_WINDOW_POS: AtomicBool = AtomicBool::new(true);
+
+/// Flags for a SetWindowPos on an app's (foreign) window: `base`, plus
+/// SWP_ASYNCWINDOWPOS when async placement is on. Every such call goes through
+/// here (set_pos_raw, commit_rect, the drag park and un-park) so the requests
+/// one window gets are all posted, FIFO in its queue, or all synchronous:
+/// mixing the two could land an older rect after a newer one. ShowWindow and
+/// SetWindowPlacement stay synchronous; each is followed, in the same call, by
+/// a posted SetWindowPos, so the newest rect still lands last.
+fn foreign_swp_flags(base: SET_WINDOW_POS_FLAGS, async_on: bool) -> SET_WINDOW_POS_FLAGS {
+    if async_on {
+        base | SWP_ASYNCWINDOWPOS
+    } else {
+        base
+    }
+}
+
+/// What an Alt-resize drop does before its retile (INPUT-5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResizeDrop {
+    /// Land the preview rect first, as every drop used to: untiled windows
+    /// keep it, and a glide captures the window there.
+    Commit,
+    /// Tiled, instant, parked: move back to where the park took it from,
+    /// position only, and let the retile size it once.
+    UnparkOrigin,
+    /// Tiled, instant, never parked (the outline preview): the retile's one
+    /// SetWindowPos is all it needs.
+    NoUnpark,
+}
+
+/// `tiled`: the retile will place the window (see `tile_target`), and a
+/// parked one has a recorded origin. `will_glide`: the glide can run now.
+fn resize_drop_plan(tiled: bool, parked: bool, will_glide: bool) -> ResizeDrop {
+    if !tiled || will_glide {
+        ResizeDrop::Commit
+    } else if parked {
+        ResizeDrop::UnparkOrigin
+    } else {
+        ResizeDrop::NoUnpark
+    }
+}
+
+/// Move a parked window back to `origin` without resizing it: a pure move
+/// costs the app no relayout, and it brings the window back on the monitor
+/// (and DPI) it was parked from, so the retile's resize is a same-monitor one.
+unsafe fn unpark_to(h: isize, origin: POINT) {
+    SWP_CALLS.fetch_add(1, Ordering::Relaxed);
+    let _ = SetWindowPos(
+        hwnd_from(h),
+        None,
+        origin.x,
+        origin.y,
+        0,
+        0,
+        foreign_swp_flags(
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+            ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+        ),
+    );
+}
+
+/// A screen rect as WINDOWPLACEMENT's rcNormalPosition. For a top-level window
+/// without WS_EX_TOOLWINDOW that is workspace coordinates: screen coordinates
+/// shifted by where the work area starts inside its monitor (a top or left
+/// taskbar), `work_off` = rcWork origin minus rcMonitor origin. NOT minus the
+/// work area's own screen origin: on a secondary monitor that would restore the
+/// window onto the primary one. Tool windows use screen coordinates as is.
+fn placement_to_workspace(r: RECT, work_off: (i32, i32), toolwindow: bool) -> RECT {
+    if toolwindow {
+        return r;
+    }
+    RECT {
+        left: r.left - work_off.0,
+        top: r.top - work_off.1,
+        right: r.right - work_off.0,
+        bottom: r.bottom - work_off.1,
+    }
+}
+
+/// Un-maximize straight to `r` (screen coordinates) in one synchronous
+/// SetWindowPlacement: one app relayout, to the right size. Only showCmd and
+/// the normal rect change; flags and the min/max positions are the window's
+/// own. SW_SHOWNORMAL activates like the SW_RESTORE it replaces (a floating
+/// drop never gets a focus_window of its own). False when it did not take, or
+/// the window is somehow still maximised: the caller falls back to SW_RESTORE.
+unsafe fn unmaximize_to(hwnd: HWND, r: RECT) -> bool {
+    let mut wp = WINDOWPLACEMENT {
+        length: core::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    if GetWindowPlacement(hwnd, &mut wp).is_err() {
+        return false;
+    }
+    let mut mi = MONITORINFO {
+        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(MonitorFromRect(&r, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+        return false;
+    }
+    let work_off = (
+        mi.rcWork.left - mi.rcMonitor.left,
+        mi.rcWork.top - mi.rcMonitor.top,
+    );
+    let tool = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+    wp.rcNormalPosition = placement_to_workspace(r, work_off, tool);
+    wp.showCmd = SW_SHOWNORMAL.0 as u32;
+    SetWindowPlacement(hwnd, &wp).is_ok() && !IsZoomed(hwnd).as_bool()
 }
 
 // =========================================================================
@@ -717,6 +1154,14 @@ fn ease_out_cubic(t: f64) -> f64 {
     1.0 - u * u * u
 }
 
+/// The incoming image's opacity at fade progress `t`: exactly 0 (the outgoing
+/// frame, what frame 0 shows) for t <= 0, exactly 255 (the incoming snapshot,
+/// pixel-aligned with the real windows underneath) for t >= 1.
+#[inline]
+fn fade_alpha(t: f64) -> u8 {
+    (255.0 * ease_out_cubic(t.clamp(0.0, 1.0))).round() as u8
+}
+
 /// Workspace-switch animation style. Parsed once per switch from the config
 /// string; cheap enough not to cache.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -743,8 +1188,9 @@ impl WsAnim {
 }
 
 /// Move a window with no activation/zorder side effects (instant tile placement
-/// and the workspace-slide reveal).
+/// and the workspace-slide reveal). Posted when async placement is on.
 unsafe fn set_pos_raw(h: isize, r: RECT) {
+    SWP_CALLS.fetch_add(1, Ordering::Relaxed);
     let _ = SetWindowPos(
         hwnd_from(h),
         None,
@@ -752,7 +1198,10 @@ unsafe fn set_pos_raw(h: isize, r: RECT) {
         r.top,
         r.right - r.left,
         r.bottom - r.top,
-        SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+        foreign_swp_flags(
+            SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING,
+            ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+        ),
     );
 }
 
@@ -826,24 +1275,57 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         // Do NOTHING synchronously here. Resolution, monitor add/remove and
         // scale changes all arrive as these two messages, often several in a
         // row, and the rebuild moves windows — which delivers more of them.
-        // See `request_bar_rebuild`.
-        request_bar_rebuild();
+        // See `request_bar_rebuild`. The wallpaper crops are the wrong size
+        // from this moment, not from when the manager gets to RefreshMonitors:
+        // `wp_invalidate` is an atomic bump plus a condvar poke, nothing that
+        // moves a window or sends a message.
+        wp_invalidate();
+        request_bar_rebuild(true);
         return LRESULT(0);
+    } else if msg == WM_SETTINGCHANGE && w.0 == SPI_SETDESKWALLPAPER.0 as usize {
+        // The wallpaper changed (us, Settings, a slideshow app): every cached
+        // crop now shows the old one. Falls through to DefWindowProc.
+        wp_invalidate();
+    } else if msg == WM_SETTINGCHANGE && w.0 == SPI_SETWORKAREA.0 as usize {
+        // A work area moved with no display change of its own: the taskbar
+        // Explorer puts on a newly attached monitor can land after the
+        // WM_DISPLAYCHANGE refresh, and auto-hide or an appbar changes it too.
+        // Work areas are read only by enumerate_monitors, so without this the
+        // tiles sit under that taskbar until the next display change
+        // (TILE-11). Same coalesced request, nothing synchronous here (see
+        // `request_bar_rebuild`), but only the work areas are re-read unless a
+        // display change is folded into it. Falls through to DefWindowProc.
+        request_bar_rebuild(false);
+    } else if msg != 0 && msg == TASKBAR_CREATED_MSG.load(Ordering::Relaxed) {
+        // Explorer (re)started: the wallpaper window is a new one.
+        wp_explorer_restarted();
     } else if msg == WM_REBUILD_BARS {
         // The deferred rebuild, running on a clean stack.
         BARS_REBUILD_PENDING.store(false, Ordering::Relaxed);
+        if !REBUILD_DISPLAY.swap(false, Ordering::Relaxed) {
+            // Work area only (SPI_SETWORKAREA). Bars sit on the monitor rect,
+            // not the work area, so nothing here moves; the manager re-reads
+            // the work areas and does nothing if none changed.
+            push_cmd(Cmd::RefreshWorkAreas);
+            return LRESULT(0);
+        }
         seed_fullscreen_windows();
         // Snapshots and per-DPI fonts were sized for the old scale.
         bar_fonts_clear();
+        bar_icons_retire();
+        bar_icons_sweep();
         ensure_bars();
         push_cmd(Cmd::RefreshMonitors);
         return LRESULT(0);
     } else if msg == WM_RELOAD {
         // Config changed: drop the per-DPI fonts and rebuild bars (must happen
         // on this thread so it can't race a paint; they are rebuilt lazily on
-        // the next paint, one per monitor DPI).
+        // the next paint, one per monitor DPI). Bar icons are NOT cleared (a
+        // reload used to re-extract every one, LAUNCH-13): only a size no bar
+        // uses now is retired, and freed once no snapshot can hold it.
         bar_fonts_clear();
-        bar_icons_clear();
+        bar_icons_retire();
+        bar_icons_sweep();
         if BAR_HEIGHT.load(Ordering::Relaxed) > 0 {
             ensure_bars();
         } else {
@@ -861,7 +1343,12 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         );
         if install_hooks(hinst) {
             let n = HOOK_REARMS.fetch_add(1, Ordering::Relaxed) + 1;
-            log_error!("input hooks re-armed (re-arm #{n})");
+            // First per watchdog episode at ERROR, then debug (see hook_watchdog).
+            if !REARM_LOGGED.swap(true, Ordering::Relaxed) {
+                log_error!("input hooks re-armed (re-arm #{n})");
+            } else {
+                log_debug!("input hooks re-armed (re-arm #{n})");
+            }
         } else {
             log_error!("input hooks re-arm FAILED; Astur is deaf until restart");
         }
@@ -903,6 +1390,9 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
     hook_alive_stamp();
     if code == HC_ACTION as i32 {
         let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+        if log_on(LOG_DEBUG) {
+            hook_delay_note(kb.time);
+        }
         // Let our own synthetic events through — this is how Alt+Tab reaches the
         // system despite the physical Alt being blocked.
         let injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
@@ -1226,6 +1716,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 
     let info = &*(lparam.0 as *const MSLLHOOKSTRUCT);
+    if log_on(LOG_DEBUG) {
+        hook_delay_note(info.time);
+    }
     let pt = info.pt;
     let msg = wparam.0 as u32;
     let suppress = LRESULT(1);
@@ -1291,12 +1784,13 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 && pt.y >= BARHIT_T[i].load(Ordering::Relaxed)
                 && pt.y < BARHIT_B[i].load(Ordering::Relaxed)
             {
-                let delta = ((info.mouseData >> 16) as u16 as i16) as i32;
-                let up = (delta > 0) as usize;
+                // The signed delta itself, not just its sign: the bar turns
+                // partial notches into whole steps. Still one post, no lock.
+                let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
                 let _ = PostMessageW(
                     hwnd_from(hb),
                     WM_BAR_WHEEL,
-                    WPARAM(up),
+                    WPARAM(delta as usize),
                     LPARAM(pt.x as isize),
                 );
                 return suppress;
@@ -1490,7 +1984,11 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 Mode::None => {}
             }
         }
-        WM_LBUTTONUP => {
+        // ANY_DRAG guard: every button-up system-wide lands here, and the hook
+        // may not take STATE without an atomic saying there is a drag to end
+        // (bar-to-hold #2). It is stored on this thread right after every mode
+        // change, so it equals `mode != None` wherever the hook reads it.
+        WM_LBUTTONUP if ANY_DRAG.load(Ordering::Relaxed) => {
             let mut s = STATE.lock().unwrap();
             if s.mode == Mode::Move {
                 let h = s.hwnd;
@@ -1515,7 +2013,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 return suppress;
             }
         }
-        WM_RBUTTONUP => {
+        WM_RBUTTONUP if ANY_DRAG.load(Ordering::Relaxed) => {
             let mut s = STATE.lock().unwrap();
             if s.mode == Mode::Resize {
                 let h = s.hwnd;
@@ -1523,8 +2021,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 s.mode = Mode::None;
                 ANY_DRAG.store(false, Ordering::Relaxed);
                 drop(s);
-                // Push first (manager commits the previewed rect + restores a parked
-                // window), then tear the preview down.
+                // Push first (the manager brings a parked window back: to the
+                // previewed rect, or, for a tiled window placed instantly,
+                // straight to its new tile), then tear the preview down.
                 push_cmd(Cmd::DragResized(
                     h,
                     Some(RECT {
@@ -1570,8 +2069,12 @@ enum Dir {
 
 /// Commands sent from the hooks to the manager thread.
 enum Cmd {
-    Add(isize),
+    /// Adopt (or follow) a window. The u32 is the WinEvent that asked, so a
+    /// rejection can say what triggered it.
+    Add(isize, u32),
     Remove(isize),
+    /// App-driven hide: untrack unless the window is visible again by then.
+    RemoveHidden(isize),
     Focused(isize),
     ActivateWindow(isize),
     FocusDir(i32),
@@ -1583,8 +2086,12 @@ enum Cmd {
     ToggleTiling,
     ToggleFloat,
     CloseFocused,
-    Retile,
+    /// This window was minimized or restored: re-tile its own monitor, if it
+    /// is tiled there (`retile_for_target`, resolved when processed).
+    RetileFor(isize),
     RefreshMonitors,
+    /// A work area may have moved with no display change (SPI_SETWORKAREA).
+    RefreshWorkAreas,
     // Alt-drag lifecycle. The hook never touches the real window (a cross-process
     // SetWindowPos can stall on a busy app) — it previews with an overlay and
     // pushes these; the manager parks/commits the real window.
@@ -1606,12 +2113,60 @@ enum Cmd {
     Extra(usize),                     // compiled extra-hotkey index; strings stay off the hook path
     SetLayout(String),
     ToggleScratchpad,
-    Reload(Box<Config>), // config file changed on disk; apply live
+    /// Config changed; apply live. true = full (an explicit reload redoes
+    /// everything), false = only the groups that differ from mgr.cfg.
+    Reload(Box<Config>, bool),
     /// The focused window renamed itself (browser tab, editor file, download
     /// progress). Nothing to re-tile — the manager loop repaints the bar after
     /// every command, and `update_bar` only repaints monitors whose data
-    /// actually changed, so coalescing is free.
+    /// changed. That diff saves the repaint, not the tick (update_bar's title
+    /// reads plus sync_managed), so at most one is ever queued: see
+    /// `bar_refresh_gate`. Why that matters is an unmeasured assumption: at
+    /// normal title rates the queue never grows; it bounds kHz title spam and
+    /// renames piling up behind a long command (BAR-10).
     BarRefresh,
+}
+
+impl Cmd {
+    /// Variant name for the manager's per-command probe line.
+    fn name(&self) -> &'static str {
+        match self {
+            Cmd::Add(..) => "Add",
+            Cmd::Remove(_) => "Remove",
+            Cmd::RemoveHidden(_) => "RemoveHidden",
+            Cmd::Focused(_) => "Focused",
+            Cmd::ActivateWindow(_) => "ActivateWindow",
+            Cmd::FocusDir(_) => "FocusDir",
+            Cmd::SwapDir(_) => "SwapDir",
+            Cmd::PromoteMaster => "PromoteMaster",
+            Cmd::ResizeMaster(_) => "ResizeMaster",
+            Cmd::Switch(_) => "Switch",
+            Cmd::MoveToWs(_) => "MoveToWs",
+            Cmd::ToggleTiling => "ToggleTiling",
+            Cmd::ToggleFloat => "ToggleFloat",
+            Cmd::CloseFocused => "CloseFocused",
+            Cmd::RetileFor(_) => "RetileFor",
+            Cmd::RefreshMonitors => "RefreshMonitors",
+            Cmd::RefreshWorkAreas => "RefreshWorkAreas",
+            Cmd::DragPark(_) => "DragPark",
+            Cmd::DragUnmaximize(..) => "DragUnmaximize",
+            Cmd::DragMoved(..) => "DragMoved",
+            Cmd::DragResized(..) => "DragResized",
+            Cmd::LaunchTerminal => "LaunchTerminal",
+            Cmd::LaunchBrowser => "LaunchBrowser",
+            Cmd::FocusGeo(_) => "FocusGeo",
+            Cmd::MoveGeo(_) => "MoveGeo",
+            Cmd::FocusMouse(_) => "FocusMouse",
+            Cmd::BarClick(..) => "BarClick",
+            Cmd::BarFocus(_) => "BarFocus",
+            Cmd::BarCycle(..) => "BarCycle",
+            Cmd::Extra(_) => "Extra",
+            Cmd::SetLayout(_) => "SetLayout",
+            Cmd::ToggleScratchpad => "ToggleScratchpad",
+            Cmd::Reload(..) => "Reload",
+            Cmd::BarRefresh => "BarRefresh",
+        }
+    }
 }
 
 static CMDQ: Mutex<VecDeque<Cmd>> = Mutex::new(VecDeque::new());
@@ -1758,6 +2313,18 @@ fn apply_hook_config(cfg: &Config) {
         log_error!("config line not understood (ignored): {key}");
     }
     FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
+    // Logged at startup and on each reload: which placement mode ran is the
+    // first question for a misplaced-window report.
+    ASYNC_WINDOW_POS.store(cfg.async_window_pos, Ordering::Relaxed);
+    log_info!(
+        "window placement: {} (async_window_pos = {})",
+        if cfg.async_window_pos {
+            "posted"
+        } else {
+            "synchronous"
+        },
+        cfg.async_window_pos
+    );
     *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
     *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
     *WINDOW_RULES.lock().unwrap() = cfg.window_rules.clone();
@@ -1878,10 +2445,30 @@ struct BarLayout {
 static BAR_LAYOUTS: Mutex<Option<HashMap<isize, BarLayout>>> = Mutex::new(None);
 static BAR_HOVER_HWND: AtomicIsize = AtomicIsize::new(0);
 static BAR_HOVER_APP: AtomicIsize = AtomicIsize::new(0);
+/// The bar holding a TME_LEAVE request (0 = none). Main thread only (bar_wndproc).
+static BAR_LEAVE_ARMED: AtomicIsize = AtomicIsize::new(0);
+/// Partial wheel delta per bar (keyed by its monitor), towards the next whole
+/// workspace step. Main thread only (bar_wndproc).
+static BAR_WHEEL_ACC: Mutex<Option<HashMap<isize, i32>>> = Mutex::new(None);
+
+/// Whole workspace steps in one wheel event, carrying partial notches in
+/// `acc` (> 0 = up). The remainder resets when the direction flips, so a
+/// half-notch the other way never counts towards this one.
+fn wheel_steps(acc: &mut i32, delta: i32) -> i32 {
+    const WHEEL_DELTA: i32 = 120;
+    if *acc != 0 && (*acc > 0) != (delta > 0) {
+        *acc = 0;
+    }
+    *acc += delta;
+    let steps = *acc / WHEEL_DELTA;
+    *acc -= steps * WHEEL_DELTA;
+    steps
+}
 
 /// Auto-hide runtime state per bar window (bar/main thread only). `y_cur` eases
 /// toward shown/hidden each AH_TIMER tick, so the bar slides rather than pops.
 /// `strip` is the reveal band on the bar's docked screen edge.
+#[derive(Clone, Copy)]
 struct AhBar {
     x: i32,
     w: i32,
@@ -1903,7 +2490,7 @@ const AH_TIMER_ID: usize = 4;
 /// zones the pills' origin is only known at paint time). Keyed by HMONITOR,
 /// driven by a fast WM_TIMER on the bar window.
 struct PillAnim {
-    from_i: i32,
+    from: f64, // pill units; fractional when a slide was retargeted mid-way
     to_i: i32,
     start: Instant,
 }
@@ -1911,18 +2498,36 @@ static PILL_ANIM: Mutex<Option<HashMap<isize, PillAnim>>> = Mutex::new(None);
 const PILL_ANIM_MS: f64 = 160.0;
 
 fn pill_anim_set(hmon: isize, from_i: i32, to_i: i32) {
-    PILL_ANIM
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(
-            hmon,
-            PillAnim {
-                from_i,
-                to_i,
-                start: Instant::now(),
-            },
-        );
+    let mut guard = PILL_ANIM.lock().unwrap();
+    let map = guard.get_or_insert_with(HashMap::new);
+    // Read the in-flight position under the same lock as the insert, so no
+    // paint can see a position between the two.
+    let next = pill_retarget(map.get(&hmon), from_i, to_i, Instant::now());
+    map.insert(hmon, next);
+}
+
+/// A new slide to `to_i`. Mid-slide it starts from where the highlight IS:
+/// seeding from `from_i` (update_bar's previous target) made a second switch
+/// jump back to that target first. Easing, duration and start are unchanged.
+fn pill_retarget(cur: Option<&PillAnim>, from_i: i32, to_i: i32, now: Instant) -> PillAnim {
+    let from = match cur.map(|a| pill_pos(a, now)) {
+        Some((pos, false)) => pos,
+        _ => from_i as f64,
+    };
+    PillAnim {
+        from,
+        to_i,
+        start: now,
+    }
+}
+
+/// Where `a` puts the highlight at `now` (pill units), and whether it arrived.
+fn pill_pos(a: &PillAnim, now: Instant) -> (f64, bool) {
+    let t = (now.saturating_duration_since(a.start).as_secs_f64() * 1000.0 / PILL_ANIM_MS).min(1.0);
+    (
+        a.from + (a.to_i as f64 - a.from) * ease_in_out_cubic(t),
+        t >= 1.0,
+    )
 }
 
 fn pill_anim_clear(hmon: isize) {
@@ -1936,9 +2541,7 @@ fn pill_anim_clear(hmon: isize) {
 fn pill_anim_pos(hmon: isize) -> Option<(f64, bool)> {
     let g = PILL_ANIM.lock().unwrap();
     let a = g.as_ref()?.get(&hmon)?;
-    let t = (a.start.elapsed().as_secs_f64() * 1000.0 / PILL_ANIM_MS).min(1.0);
-    let pos = a.from_i as f64 + (a.to_i - a.from_i) as f64 * ease_in_out_cubic(t);
-    Some((pos, t >= 1.0))
+    Some(pill_pos(a, Instant::now()))
 }
 
 /// Per-monitor paint data. One entry per drawn pill: `slots[i]` is the local
@@ -2017,7 +2620,12 @@ fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
 /// colours (black on black), and all-or-nothing froze the bar dark forever the
 /// moment ANY colour had ever been touched.
 fn themed_bar_colors(cfg: &Config) -> (u32, u32, u32, u32) {
-    let preset = if THEME_LIGHT.load(Ordering::Relaxed) {
+    bar_colors(cfg, THEME_LIGHT.load(Ordering::Relaxed))
+}
+
+/// `themed_bar_colors` for an explicit theme.
+fn bar_colors(cfg: &Config, light: bool) -> (u32, u32, u32, u32) {
+    let preset = if light {
         config::BAR_LIGHT
     } else {
         config::BAR_DARK
@@ -2144,9 +2752,17 @@ static KBD_HOOK_H: AtomicIsize = AtomicIsize::new(0);
 static HOOK_REARMS: AtomicU32 = AtomicU32::new(0);
 
 /// Input seen this recently counts as "the user is using the machine".
-const WATCHDOG_INPUT_WINDOW_MS: u32 = 2_000;
+const WATCHDOG_INPUT_WINDOW_MS: u32 = 1_000;
 /// No hook callback for this long, while input is happening, means unhooked.
-const WATCHDOG_SILENCE_MS: u64 = 5_000;
+/// With the 1 s base poll a dead hook is caught 2-3 s after it dies (it was
+/// 5-10 s: 5 s poll and silence). The cost: a main thread stalled past 2 s
+/// now logs "not pumping" sooner.
+const WATCHDOG_SILENCE_MS: u64 = 2_000;
+/// Watchdog poll while healthy; doubles per failed re-arm, up to a minute.
+const WATCHDOG_POLL_MS: u64 = 1_000;
+/// The main thread's "re-armed" line was logged at ERROR this episode; later
+/// re-arms log at debug. Cleared by the watchdog when hooks are healthy again.
+static REARM_LOGGED: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn hook_alive_stamp() {
@@ -2186,7 +2802,80 @@ unsafe fn install_hooks(hinst: HINSTANCE) -> bool {
     }
 }
 
-/// Watchdog loop. Cheap: one GetLastInputInfo every 5 s, no locks.
+/// Whether hook silence means the hooks are gone. Input they could never see
+/// is not evidence: UIPI keeps a non-elevated process's LL hooks from input
+/// to an elevated foreground window, and hooks see only their own desktop
+/// (never the secure one: UAC prompt, Ctrl+Alt+Del, lock screen). With the
+/// shorter thresholds, typing into an elevated window would otherwise re-arm
+/// every 2 s, two ERROR lines each, and rotate the 1 MiB log in hours.
+fn hooks_look_dead(
+    silence_ms: u64,
+    idle_ms: u32,
+    fg_elevated: bool,
+    self_elevated: bool,
+    other_desktop: bool,
+) -> bool {
+    idle_ms <= WATCHDOG_INPUT_WINDOW_MS
+        && silence_ms >= WATCHDOG_SILENCE_MS
+        && !other_desktop
+        && !(fg_elevated && !self_elevated)
+}
+
+/// Is the foreground window's process elevated? A process we cannot open or
+/// whose token we cannot read counts as elevated: that is what denies us, and
+/// the cost of a wrong guess is one skipped check. Watchdog thread, called
+/// only when the hooks already look silent, so it is never on a hot path.
+unsafe fn foreground_elevated() -> bool {
+    let fg = GetForegroundWindow();
+    if fg.0.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(fg, Some(&mut pid));
+    if pid == 0 || pid == GetCurrentProcessId() {
+        return false;
+    }
+    let Ok(process) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) else {
+        return true;
+    };
+    let elevated = token_elevated(process).unwrap_or(true);
+    let _ = CloseHandle(process);
+    elevated
+}
+
+/// A desktop's name (UOI_NAME, e.g. "Default"), or None if it can't be read.
+unsafe fn desktop_name(desk: windows::Win32::System::StationsAndDesktops::HDESK) -> Option<String> {
+    use windows::Win32::System::StationsAndDesktops::{GetUserObjectInformationW, UOI_NAME};
+    let mut name = [0u16; 64];
+    GetUserObjectInformationW(
+        HANDLE(desk.0),
+        UOI_NAME,
+        Some(name.as_mut_ptr() as *mut c_void),
+        (name.len() * 2) as u32,
+        None,
+    )
+    .ok()?;
+    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+    Some(String::from_utf16_lossy(&name[..len]))
+}
+
+/// Is input going to a desktop other than `own`, the one the hooks were
+/// installed on? They see input to that desktop only: not the secure desktop
+/// (UAC prompt, Ctrl+Alt+Del, lock screen; OpenInputDesktop is denied there),
+/// a screen saver's, or another program's private desktop.
+unsafe fn input_desktop_foreign(own: &str) -> bool {
+    use windows::Win32::System::StationsAndDesktops::{
+        CloseDesktop, OpenInputDesktop, DESKTOP_CONTROL_FLAGS, DESKTOP_READOBJECTS,
+    };
+    let Ok(desk) = OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) else {
+        return true;
+    };
+    let name = desktop_name(desk);
+    let _ = CloseDesktop(desk);
+    name.is_some_and(|n| !n.eq_ignore_ascii_case(own))
+}
+
+/// Watchdog loop. Cheap: one GetLastInputInfo a second, no locks.
 fn hook_watchdog() {
     // Re-arms are attempted with a backoff. The first version logged and posted
     // every 5 s forever, and stamped HOOK_TICK itself so it "would not re-fire
@@ -2194,14 +2883,65 @@ fn hook_watchdog() {
     // line after the first read exactly 5000 ms and the real, growing outage was
     // invisible. Don't do that: never let a detector write to the thing it
     // detects on.
-    let mut backoff_ms = 5_000u64;
+    let mut backoff_ms = WATCHDOG_POLL_MS;
     let mut attempts = 0u32;
+    // An episode runs from the first silent check to a healthy check with no
+    // re-arm in flight. Not the first healthy check: install_hooks stamps
+    // HOOK_TICK, so the check right after any re-arm always reads healthy,
+    // and an episode ending there would log both ERROR lines every cycle.
+    let mut episode = false;
+    let self_elevated = unsafe { process_elevated() };
+    // This thread's desktop is the process's, the one the main thread
+    // installed the hooks on. The thread's own handle: never closed.
+    let own_desktop = unsafe {
+        windows::Win32::System::StationsAndDesktops::GetThreadDesktop(GetCurrentThreadId())
+            .ok()
+            .and_then(|d| desktop_name(d))
+    }
+    .unwrap_or_else(|| "Default".to_string());
     let mut reported_wedged = false;
     // Re-arm count at the moment we last posted, so "did the main thread act on
     // it?" stays a correct question after the first successful re-arm.
     let mut posted_at: Option<u32> = None;
+    // Time slept towards the next health check. At log_level = debug the thread
+    // also wakes once a second to report the hook delivery delay; otherwise it
+    // sleeps straight through to the check, exactly as before.
+    let mut waited_ms = 0u64;
+    let mut debug_ticks = 0u32;
+    let mut last_counters = String::new();
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(backoff_ms.min(60_000)));
+        let due_ms = backoff_ms.min(60_000);
+        let debug = log_on(LOG_DEBUG);
+        let step_ms = if debug {
+            1_000.min(due_ms - waited_ms)
+        } else {
+            due_ms - waited_ms
+        };
+        std::thread::sleep(std::time::Duration::from_millis(step_ms));
+        waited_ms += step_ms;
+        if debug {
+            // GetTickCount moves in ~15.6 ms steps (timeBeginPeriod does not
+            // change that; measured 15/16 ms steps with it set), so a one-step
+            // reading can be a sub-millisecond delay straddling a tick. Two steps
+            // or more guarantees a real delay of at least one tick.
+            let late = HOOK_DELAY_MAX.swap(0, Ordering::Relaxed);
+            if late > 16 {
+                log_debug!("hook delay: an input event reached the LL hooks {late} ms late");
+            }
+            // Intake counters every 10 s, only when something moved.
+            debug_ticks += 1;
+            if debug_ticks.is_multiple_of(10) {
+                let line = counters_line();
+                if line != last_counters {
+                    log_debug!("counters {line}");
+                    last_counters = line;
+                }
+            }
+        }
+        if waited_ms < due_ms {
+            continue;
+        }
+        waited_ms = 0;
         unsafe {
             let mut lii = LASTINPUTINFO {
                 cbSize: core::mem::size_of::<LASTINPUTINFO>() as u32,
@@ -2212,9 +2952,24 @@ fn hook_watchdog() {
             }
             let idle_ms = GetTickCount().wrapping_sub(lii.dwTime);
             let silence_ms = GetTickCount64().saturating_sub(HOOK_TICK.load(Ordering::Relaxed));
-            if idle_ms > WATCHDOG_INPUT_WINDOW_MS || silence_ms < WATCHDOG_SILENCE_MS {
-                // Healthy: forget any previous trouble.
-                backoff_ms = 5_000;
+            // The two syscall checks run only once the hooks already look
+            // silent, so a healthy poll stays one GetLastInputInfo.
+            let dead = hooks_look_dead(silence_ms, idle_ms, false, self_elevated, false)
+                && hooks_look_dead(
+                    silence_ms,
+                    idle_ms,
+                    foreground_elevated(),
+                    self_elevated,
+                    input_desktop_foreign(&own_desktop),
+                );
+            if !dead {
+                // Healthy, or silent only because the input is out of the
+                // hooks' reach: forget any previous trouble.
+                if posted_at.is_none() && episode {
+                    episode = false;
+                    REARM_LOGGED.store(false, Ordering::Relaxed);
+                }
+                backoff_ms = WATCHDOG_POLL_MS;
                 attempts = 0;
                 posted_at = None;
                 reported_wedged = false;
@@ -2239,7 +2994,16 @@ fn hook_watchdog() {
             }
             attempts += 1;
             posted_at = Some(HOOK_REARMS.load(Ordering::Relaxed));
-            log_error!("hooks silent for {silence_ms} ms with input {idle_ms} ms ago — re-arming");
+            if !episode {
+                episode = true;
+                log_error!(
+                    "hooks silent for {silence_ms} ms with input {idle_ms} ms ago — re-arming"
+                );
+            } else {
+                log_debug!(
+                    "hooks silent for {silence_ms} ms with input {idle_ms} ms ago — re-arming"
+                );
+            }
             let _ = PostMessageW(hwnd_from(marker), WM_REARM_HOOKS, WPARAM(0), LPARAM(0));
             backoff_ms = (backoff_ms * 2).min(60_000);
         }
@@ -2297,6 +3061,17 @@ impl Monitor {
     }
 }
 
+/// One queued switch command, resolved against a burst's virtual state.
+#[derive(Debug, PartialEq)]
+enum SwitchStep {
+    /// Would show (monitor, local workspace).
+    To(usize, usize),
+    /// Changes nothing today: `process` returns before any effect.
+    NoOp,
+    /// Not foldable: another command, or a switch for another monitor.
+    Stop,
+}
+
 struct Manager {
     monitors: Vec<Monitor>,
     focused_mon: usize,
@@ -2306,6 +3081,10 @@ struct Manager {
     // HMONITOR a launched terminal/browser should land on (the cursor's monitor at
     // launch time); consumed by the next Add. 0 = none.
     pending_launch_mon: isize,
+    // Where Cmd::DragPark took a window from (hwnd, top-left before the park),
+    // so a tiled resize drop can move it back position-only, onto its own
+    // monitor and DPI, before the retile sizes it (INPUT-5). Taken by the drop.
+    park_origin: Option<(isize, POINT)>,
 }
 
 impl Manager {
@@ -2318,15 +3097,98 @@ impl Manager {
     /// always on the user's main screen. In per_monitor mode it targets the
     /// currently-focused monitor.
     fn global_to_ml(&self, i: usize) -> (usize, usize) {
+        self.global_to_ml_at(i, self.focused_mon)
+    }
+
+    /// `global_to_ml` with `focus` standing in for the focused monitor, so a
+    /// burst of queued switches can be resolved against where the earlier
+    /// ones in it would have left focus (see `fold_switches`).
+    fn global_to_ml_at(&self, i: usize, focus: usize) -> (usize, usize) {
         if self.cfg.per_monitor {
-            (
-                self.focused_mon.min(self.monitors.len().saturating_sub(1)),
-                i,
-            )
+            (focus.min(self.monitors.len().saturating_sub(1)), i)
         } else {
             let n = self.monitors.len().max(1);
             ((self.primary + (i % n)) % n, i / n)
         }
+    }
+
+    /// Where `cmd` would switch, resolved exactly as `process` resolves a
+    /// Switch / BarCycle, but against a virtual focused monitor `focus` and,
+    /// once a burst is under way, its monitor and virtual active workspace
+    /// `on`. Pure: reads the model only.
+    fn switch_step(&self, cmd: &Cmd, focus: usize, on: Option<(usize, usize)>) -> SwitchStep {
+        let (mi, ws) = match *cmd {
+            Cmd::Switch(i) => {
+                if i >= self.cfg.workspaces || self.monitors.is_empty() {
+                    return SwitchStep::NoOp;
+                }
+                let (mi, local) = self.global_to_ml_at(i, focus);
+                if mi >= self.monitors.len() || local >= self.monitors[mi].workspaces.len() {
+                    return SwitchStep::NoOp;
+                }
+                (mi, local)
+            }
+            Cmd::BarCycle(hmon, d) => {
+                let Some(mi) = self.mon_by_hmon(hmon) else {
+                    return SwitchStep::NoOp;
+                };
+                let count = self.monitors[mi].workspaces.len();
+                if count <= 1 {
+                    return SwitchStep::NoOp;
+                }
+                // A delta applies to wherever the burst has got to, not to the
+                // real active workspace: [Switch(a), BarCycle(+1)] ends on a+1.
+                let cur = match on {
+                    Some((m, a)) if m == mi => a,
+                    _ => self.monitors[mi].active,
+                };
+                (mi, (cur as i32 + d).rem_euclid(count as i32) as usize)
+            }
+            _ => return SwitchStep::Stop,
+        };
+        match on {
+            Some((m, _)) if m != mi => SwitchStep::Stop,
+            _ => SwitchStep::To(mi, ws),
+        }
+    }
+
+    /// Fold `first` (a Switch or BarCycle just popped) and the Switch /
+    /// BarCycle commands queued directly behind it for the same monitor into
+    /// the one workspace the run ends on (SWITCH-17). Commands are applied in
+    /// order against the virtual state, so a later Switch overrides earlier
+    /// deltas and a no-op (bad index, unknown monitor) never becomes the
+    /// target. Pops what it folds from `q`, and stops without popping at any
+    /// other command (Focused, Add, MoveToWs, Extra: never looked inside) and
+    /// at a switch for another monitor, so ordering against everything else
+    /// is kept. Pure: the caller holds CMDQ, which the LL keyboard hook pushes
+    /// through, so no Win32 call and no switch may happen in here.
+    /// Returns (monitor, workspace) or None when all were no-ops, and how many
+    /// commands it popped.
+    fn fold_switches(&self, first: &Cmd, q: &mut VecDeque<Cmd>) -> (Option<(usize, usize)>, usize) {
+        let mut focus = self.focused_mon;
+        let mut on: Option<(usize, usize)> = None;
+        let apply = |cmd: &Cmd, focus: &mut usize, on: &mut Option<(usize, usize)>| {
+            match self.switch_step(cmd, *focus, *on) {
+                SwitchStep::To(mi, ws) => {
+                    // Every effective Switch / BarCycle sets focused_mon.
+                    *focus = mi;
+                    *on = Some((mi, ws));
+                    true
+                }
+                SwitchStep::NoOp => true,
+                SwitchStep::Stop => false,
+            }
+        };
+        apply(first, &mut focus, &mut on);
+        let mut popped = 0;
+        while let Some(next) = q.front() {
+            if !apply(next, &mut focus, &mut on) {
+                break;
+            }
+            q.pop_front();
+            popped += 1;
+        }
+        (on, popped)
     }
 
     /// Inverse of `global_to_ml` for shared mode: the global workspace number a
@@ -2569,28 +3431,44 @@ unsafe fn tracked_window_alive(hwnd: HWND) -> bool {
     !hwnd.0.is_null() && IsWindow(hwnd).as_bool()
 }
 
+/// Can a window with this style never be an app window? Exactly the three
+/// bits `app_surface_reject` refuses on: WS_CHILD, WS_EX_TOOLWINDOW,
+/// WS_EX_NOACTIVATE. Also the EVENT_OBJECT_SHOW prefilter (EVENTS-1): menus,
+/// tooltips and child controls stop costing a fullscreen probe and a Cmd::Add.
+fn show_rejected_by_style(style: u32, exstyle: u32) -> bool {
+    style & WS_CHILD.0 != 0 || exstyle & (WS_EX_TOOLWINDOW.0 | WS_EX_NOACTIVATE.0) != 0
+}
+
 /// Is this a visible top-level app surface (including owned presentation/game
 /// popups with no title)? Used by fullscreen detection, not tiling adoption.
 unsafe fn is_app_surface(hwnd: HWND) -> bool {
+    app_surface_reject(hwnd).is_none()
+}
+
+/// `is_app_surface`, saying why not: None = it is one, else the first failed
+/// check. The reasons feed the Cmd::Add rejection probe; one chain, so the
+/// logged reason can never drift from the real decision.
+unsafe fn app_surface_reject(hwnd: HWND) -> Option<&'static str> {
     if hwnd.0.is_null() || !IsWindowVisible(hwnd).as_bool() {
-        return false;
+        return Some("invisible");
     }
     // Never treat our own windows (console, marker, bars) as app surfaces.
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
     if pid == GetCurrentProcessId() {
-        return false;
+        return Some("own-process");
     }
     // Only true top-level roots. Owned presentation popups remain eligible.
     if GetAncestor(hwnd, GA_ROOT) != hwnd {
-        return false;
+        return Some("not-root");
     }
     let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
     let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
     // Child windows, tool windows, and non-activatable windows (tooltips, OSDs,
     // the lock-screen overlay, IME candidates) are never real app windows.
-    if style & WS_CHILD.0 != 0 || ex & WS_EX_TOOLWINDOW.0 != 0 || ex & WS_EX_NOACTIVATE.0 != 0 {
-        return false;
+    // The same test the SHOW prefilter applies, so the two cannot drift.
+    if show_rejected_by_style(style, ex) {
+        return Some("style");
     }
     // Skip cloaked windows (e.g. UWP ghost windows on other virtual desktops).
     let mut cloaked = 0u32;
@@ -2601,37 +3479,43 @@ unsafe fn is_app_surface(hwnd: HWND) -> bool {
         core::mem::size_of::<u32>() as u32,
     );
     if cloaked != 0 {
-        return false;
+        return Some("cloaked");
     }
     // Reject known shell/desktop classes.
     let class = window_class(hwnd);
     if BLOCK_CLASSES.contains(&class.as_str()) {
-        return false;
+        return Some("class");
     }
-    true
+    None
 }
 
 /// Is this a normal top-level application window (not shell/Astur chrome)?
-/// Ignored/floating rules are deliberately not checked: ignored games still
-/// need their monitor's navbar to auto-hide while fullscreen.
-unsafe fn is_app_window(hwnd: HWND) -> bool {
-    if !is_app_surface(hwnd) {
-        return false;
+/// None = yes, else why not (see `app_surface_reject`). Ignored/floating rules
+/// are deliberately not checked: ignored games still need their monitor's
+/// navbar to auto-hide while fullscreen.
+unsafe fn app_window_reject(hwnd: HWND) -> Option<&'static str> {
+    if let Some(why) = app_surface_reject(hwnd) {
+        return Some(why);
     }
     // Tiling adopts only unowned, titled main windows. Fullscreen detection uses
     // is_app_surface directly so owned/no-title presentation windows still count.
     if let Ok(owner) = GetWindow(hwnd, GW_OWNER) {
         if !owner.0.is_null() {
-            return false;
+            return Some("owned");
         }
     }
-    GetWindowTextLengthW(hwnd) > 0
+    (GetWindowTextLengthW(hwnd) <= 0).then_some("untitled")
 }
 
 /// Is this a normal top-level application window we should tile?
 unsafe fn is_manageable(hwnd: HWND) -> bool {
-    if !is_app_window(hwnd) {
-        return false;
+    manage_reject(hwnd).is_none()
+}
+
+/// `is_manageable` with the reason (see `app_surface_reject`).
+unsafe fn manage_reject(hwnd: HWND) -> Option<&'static str> {
+    if let Some(why) = app_window_reject(hwnd) {
+        return Some(why);
     }
     let class = window_class(hwnd);
     if IGNORE_CLASSES
@@ -2640,9 +3524,11 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
         .iter()
         .any(|c| c.eq_ignore_ascii_case(&class))
     {
-        return false;
+        return Some("ignore_classes");
     }
-    !match_window_rule(hwnd).is_some_and(|r| r.action == RuleAction::Ignore)
+    match_window_rule(hwnd)
+        .is_some_and(|r| r.action == RuleAction::Ignore)
+        .then_some("rule")
 }
 
 const FULLSCREEN_EDGE_TOLERANCE: i32 = 2;
@@ -2763,31 +3649,90 @@ unsafe fn should_float(hwnd: HWND, rule: Option<RulePlacement>) -> bool {
 /// invisible DWM shadow border, so we expand the target by that padding to make
 /// the *visible* edges line up flush, giving even gaps.
 unsafe fn adjust_for_border(hwnd: HWND, target: RECT) -> RECT {
-    let mut wr = RECT::default();
-    if GetWindowRect(hwnd, &mut wr).is_err() {
-        return target;
+    // The insets are the difference of two reads, GetWindowRect and the DWM
+    // frame bounds. With posted placement (TILE-1) this window's own earlier
+    // SetWindowPos can land between them (back-to-back retiles in an Add
+    // burst, a drop's commit then its retile), and the "insets" are then the
+    // move distance: the window would sit that far off its tile until the next
+    // retile. Such a pair is re-read once (the move has landed by then);
+    // still implausible, the target is used uncorrected, a few px off at worst.
+    let max = dpi_px(BORDER_INSET_MAX, border_dpi(hwnd));
+    for _ in 0..2 {
+        let mut wr = RECT::default();
+        if GetWindowRect(hwnd, &mut wr).is_err() {
+            return target;
+        }
+        let mut fr = RECT::default();
+        let ok = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_EXTENDED_FRAME_BOUNDS,
+            &mut fr as *mut _ as *mut c_void,
+            core::mem::size_of::<RECT>() as u32,
+        )
+        .is_ok();
+        if !ok {
+            return target;
+        }
+        if let Some((lp, tp, rp, bp)) = bounded_insets(
+            fr.left - wr.left,
+            fr.top - wr.top,
+            wr.right - fr.right,
+            wr.bottom - fr.bottom,
+            max,
+        ) {
+            return RECT {
+                left: target.left - lp,
+                top: target.top - tp,
+                right: target.right + rp,
+                bottom: target.bottom + bp,
+            };
+        }
     }
-    let mut fr = RECT::default();
-    let ok = DwmGetWindowAttribute(
-        hwnd,
-        DWMWA_EXTENDED_FRAME_BOUNDS,
-        &mut fr as *mut _ as *mut c_void,
-        core::mem::size_of::<RECT>() as u32,
-    )
-    .is_ok();
-    if !ok {
-        return target;
+    if log_on(LOG_DEBUG) {
+        // Once per window: one with a genuinely odd frame would log on every
+        // retile otherwise.
+        let first = {
+            let mut seen = BORDER_REJECTED.lock().unwrap();
+            let seen = seen.get_or_insert_with(Default::default);
+            // Bounded: HWNDs are recycled, and a long debug session would
+            // otherwise grow this forever and mute a reused handle.
+            if seen.len() >= BORDER_REJECTED_CAP {
+                seen.clear();
+            }
+            seen.insert(hwnd.0 as isize)
+        };
+        if first {
+            log_debug!(
+                "border insets of {:#x} out of 0..={max} px; placed uncorrected",
+                hwnd.0 as isize
+            );
+        }
     }
-    let lp = fr.left - wr.left;
-    let tp = fr.top - wr.top;
-    let rp = wr.right - fr.right;
-    let bp = wr.bottom - fr.bottom;
-    RECT {
-        left: target.left - lp,
-        top: target.top - tp,
-        right: target.right + rp,
-        bottom: target.bottom + bp,
-    }
+    target
+}
+
+/// Largest invisible-border inset (logical px) the border correction trusts.
+/// Real frames are about 7-8 px at 100% on Windows 10 and 11.
+const BORDER_INSET_MAX: i32 = 16;
+
+/// Windows `adjust_for_border` already logged as rejected (debug only).
+static BORDER_REJECTED: Mutex<Option<std::collections::HashSet<isize>>> = Mutex::new(None);
+const BORDER_REJECTED_CAP: usize = 1024;
+
+/// DPI to scale BORDER_INSET_MAX by. GetDpiForWindow is 96 for a DPI-unaware
+/// app on any monitor, while its border is drawn scaled to the monitor's DPI in
+/// the physical pixels this process reads, so take the larger of the two.
+unsafe fn border_dpi(hwnd: HWND) -> u32 {
+    let mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    window_dpi(hwnd).max(monitor_dpi(mon.0 as isize))
+}
+
+/// The border insets (left, top, right, bottom) when every one is a plausible
+/// frame width, in 0..=max px; None for a read that cannot be a frame (see
+/// `adjust_for_border`).
+fn bounded_insets(l: i32, t: i32, r: i32, b: i32, max: i32) -> Option<(i32, i32, i32, i32)> {
+    let ok = |v: i32| (0..=max).contains(&v);
+    (ok(l) && ok(t) && ok(r) && ok(b)).then_some((l, t, r, b))
 }
 
 /// Enumerate physical monitors, sorted left-to-right (0 = leftmost), each with
@@ -2968,14 +3913,37 @@ unsafe fn cursor_hmon() -> isize {
 
 /// Launch an external program detached. Routed through `cmd /C start` so PATH
 /// and App Execution Aliases (e.g. wt.exe) resolve like they do from the shell.
+/// Spawned from a short-lived thread: CreateProcess used to block the manager
+/// (an estimated 2-10 ms per launch, not measured) on the thread every command
+/// waits for. The caller still sets `pending_launch_mon` first.
 fn launch(cmd: &str) {
     let cmd = cmd.trim();
     if cmd.is_empty() {
         return;
     }
-    let _ = std::process::Command::new("cmd")
+    let owned = cmd.to_string();
+    let spawned = std::thread::Builder::new()
+        .name("launch".to_string())
+        .spawn(move || launch_now(&owned));
+    if spawned.is_err() {
+        launch_now(cmd);
+    }
+}
+
+/// `launch`'s body. CREATE_NO_WINDOW: Astur has no console in release, so
+/// cmd.exe used to open a console window of its own for the moment `start`
+/// ran, which could flash and be adopted then retiled away. `start` still
+/// gives a console target (cmd, pwsh) its own new console window.
+fn launch_now(cmd: &str) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if let Err(e) = std::process::Command::new("cmd")
         .args(["/C", "start", "", cmd])
-        .spawn();
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+    {
+        log_error!("launch failed ({cmd}): {e}");
+    }
 }
 
 fn queue_wallpaper(path: &str) {
@@ -3021,6 +3989,9 @@ fn wallpaper_worker() {
         };
         if applied {
             *WALLPAPER_LAST.lock().unwrap() = path;
+            // Per-workspace wallpapers land here on nearly every switch; the
+            // cached crops show the previous one from now on.
+            wp_invalidate();
         }
     }
 }
@@ -3188,6 +4159,31 @@ fn mru_worker() {
         let _ = std::fs::write(path, text);
     }
 }
+/// Is this process elevated (admin token)? False if the token can't be read.
+unsafe fn process_elevated() -> bool {
+    token_elevated(GetCurrentProcess()).unwrap_or(false)
+}
+
+/// Whether `process`'s token is elevated. None if the token can't be read.
+unsafe fn token_elevated(process: HANDLE) -> Option<bool> {
+    let mut token = HANDLE::default();
+    if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
+        return None;
+    }
+    let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+    let mut len = 0u32;
+    let ok = GetTokenInformation(
+        token,
+        TokenElevation,
+        Some(&mut elevation as *mut TOKEN_ELEVATION as *mut c_void),
+        core::mem::size_of::<TOKEN_ELEVATION>() as u32,
+        &mut len,
+    )
+    .is_ok();
+    let _ = CloseHandle(token);
+    ok.then_some(elevation.TokenIsElevated != 0)
+}
+
 /// A security descriptor granting full access to the current user's SID and
 /// nobody else, for the IPC pipe. Leaked deliberately: it lives for the process
 /// lifetime and is handed to CreateNamedPipeW on every accept loop iteration.
@@ -3544,6 +4540,14 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
 /// Tile a single monitor's active workspace on that monitor's work area,
 /// animating windows to their targets (glide) when animations are on.
 unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
+    retile_monitor_opts(mgr, mi, false);
+}
+
+/// `retile_monitor`, with the glide ruled out by the caller. A drop decides
+/// glide or instant once, up front (`drop_retile_force_instant`), and passes
+/// that decision here: re-reading GLIDE_BUSY instead could see the worker go
+/// idle in between and glide a window from a rect it is not at.
+unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
     if !mgr.tiling {
         return;
     }
@@ -3551,16 +4555,28 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
     if rects.is_empty() {
         return;
     }
+    let mut probe = Probe::start("retile");
+    probe.note(format_args!("mon={mi} windows={}", rects.len()));
 
     // Glide path: animate windows from their current position to the new tile
     // slot via a cosmetic overlay (the real placement is still instant, done
     // underneath). Only when enabled, idle, and the layout actually changed —
     // a no-op retile (e.g. refocus) must not raise an overlay.
-    let want_glide = mgr.cfg.animations
-        && mgr.cfg.animation_ms > 0
-        && mgr.cfg.window_anim == "glide"
-        && !GLIDE_BUSY.load(Ordering::Relaxed);
-    if want_glide {
+    let want_glide =
+        !force_instant && glide_enabled(&mgr.cfg) && !GLIDE_BUSY.load(Ordering::Relaxed);
+    // The glide composes over the capture thread's wallpaper crop and bails
+    // to instant without a current one. Check that lock-free BEFORE paying the
+    // ~18 ms capture_monitor and the worker round trip for nothing: no Explorer,
+    // a replacement shell, the warm-up not done yet, or a wallpaper that just
+    // changed and is still being re-rendered.
+    let wp_ok = want_glide && wp_ready();
+    if want_glide && !wp_ok {
+        probe.note(format_args!("wp_not_ready=instant"));
+        // A failed render has no pending retry of its own; this is it
+        // (at most once per WP_TTL, never while Explorer is known absent).
+        wp_ttl_hint();
+    }
+    if wp_ok {
         let full = mgr.monitors[mi].work_area;
         let mut items = Vec::with_capacity(rects.len());
         let mut changed = false;
@@ -3568,7 +4584,11 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
         for (h, target) in &rects {
             let hwnd = hwnd_from(*h);
             let mut cur = RECT::default();
-            if GetWindowRect(hwnd, &mut cur).is_err() {
+            // A parked window (a drag's DragPark, or a drop whose posted
+            // commit has not landed yet) is not in the capture: its glide item
+            // would sample off-bitmap and the window would vanish for the
+            // whole glide. Place instantly instead.
+            if GetWindowRect(hwnd, &mut cur).is_err() || rect_parked(&cur) {
                 ok = false;
                 break;
             }
@@ -3587,44 +4607,201 @@ unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
             };
             // Treat a few-px difference as unchanged so DWM shadow/rounding jitter
             // doesn't trigger a glide on an effectively-static window.
-            if (old.left - new.left).abs() > 2
-                || (old.top - new.top).abs() > 2
-                || (old.right - new.right).abs() > 2
-                || (old.bottom - new.bottom).abs() > 2
-            {
+            if !glide_still(&old, &new) {
                 changed = true;
             }
             items.push(GlideItem { old, new });
         }
-        if ok && changed {
-            let out = capture_monitor(full);
+        // Capture and cover only what moves (glide_damage), grown by the DWM
+        // shadow reach at this monitor's scale.
+        let hmon = mgr.monitors[mi].hmon;
+        let damage = if ok && changed {
+            let margin = dpi_px(GLIDE_SHADOW_PX, monitor_dpi(hmon));
+            glide_damage(
+                &items,
+                margin,
+                full.right - full.left,
+                full.bottom - full.top,
+            )
+        } else {
+            None
+        };
+        if let Some(d) = damage {
+            let area = RECT {
+                left: full.left + d.left,
+                top: full.top + d.top,
+                right: full.left + d.right,
+                bottom: full.top + d.bottom,
+            };
+            // Into `area` coordinates, the capture's. An item entirely outside
+            // it is a live window that stays (<= GLIDE_STILL_PX), not drawn;
+            // one crossing its edge is drawn 1:1 from the capture, which
+            // matches the live part outside.
+            items.retain_mut(|it| {
+                if !rects_overlap(&it.old, &d) && !rects_overlap(&it.new, &d) {
+                    return false;
+                }
+                for r in [&mut it.old, &mut it.new] {
+                    r.left -= d.left;
+                    r.right -= d.left;
+                    r.top -= d.top;
+                    r.bottom -= d.top;
+                }
+                true
+            });
+            probe.note(format_args!(
+                "damage={}x{} of {}x{}",
+                d.right - d.left,
+                d.bottom - d.top,
+                full.right - full.left,
+                full.bottom - full.top
+            ));
+            let out = capture_monitor(area);
+            probe.mark("capture");
             if out != 0 {
+                GLIDE_HMON.store(hmon, Ordering::Relaxed);
                 GLIDE_BUSY.store(true, Ordering::Relaxed);
+                // `out` is selected on the glide thread next: flush this
+                // thread's GDI batch before the hand-off.
+                let _ = GdiFlush();
                 dispatch_glide(GlideReq {
                     out_bmp: out,
+                    hmon,
                     rect: full,
+                    area,
                     items,
                     dur_ms: mgr.cfg.animation_ms.max(1) as u64,
+                    queued: probe_now(),
+                    ex_style: overlay_ex_style(mgr.cfg.animation_ms),
                 });
                 // Wait until the overlay covers the monitor, then place the real
                 // windows underneath it (hidden), exactly like the workspace slide.
-                wait_glide_overlay_up();
-                SUPPRESS.store(true, Ordering::Relaxed);
-                for (h, target) in rects {
-                    animate_to(hwnd_from(h), target);
-                }
-                SUPPRESS.store(false, Ordering::Relaxed);
+                let up = wait_glide_overlay_up();
+                probe.mark(if up { "glide_up" } else { "glide_TIMEOUT" });
+                place_tiles(rects, &mut probe);
                 return;
             }
         }
     }
 
     // Instant path (glide off, busy, capture failed, or nothing moved).
+    place_tiles(rects, &mut probe);
+}
+
+/// The placement loop of `retile_monitor`: every window straight to its tile
+/// under SUPPRESS. With probes on it also times each window, because one slow
+/// app's synchronous SetWindowPos is what stretches a whole retile.
+unsafe fn place_tiles(rects: Vec<(isize, RECT)>, probe: &mut Probe) {
+    let timed = probe.on();
+    let mut slowest = (0u128, 0isize);
     SUPPRESS.store(true, Ordering::Relaxed);
     for (h, target) in rects {
+        let t = timed.then(Instant::now);
         animate_to(hwnd_from(h), target);
+        if let Some(t) = t {
+            slowest = slowest.max((t.elapsed().as_micros(), h));
+        }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
+    probe.mark("placed");
+    probe.note(format_args!("slowest={}us@{:#x}", slowest.0, slowest.1));
+}
+
+/// Is the window glide configured on? (Whether one can run right now also
+/// needs the worker idle and a current wallpaper crop.)
+fn glide_enabled(cfg: &Config) -> bool {
+    cfg.animations && cfg.animation_ms > 0 && cfg.window_anim == "glide"
+}
+
+/// Off-screen where Cmd::DragPark puts a window (-32000, which is also where
+/// Windows keeps minimised ones). No monitor sits that far out.
+fn rect_parked(r: &RECT) -> bool {
+    r.left <= -30000
+}
+
+/// Has a drop's own posted commit landed? `before` is the window's rect read
+/// just before the commit was posted, `live` its rect now, `committed` the rect
+/// asked for. Landed = at the committed rect, or moved off `before` to anywhere
+/// but the park (the app may round or constrain the rect; a park posted
+/// earlier and still pending must not count as the commit).
+fn swp_landed(before: RECT, live: RECT, committed: RECT) -> bool {
+    !rect_parked(&live) && (live == committed || live != before)
+}
+
+/// How a tiled drop's retile may run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DropRetile {
+    /// The glide may run: the window is on screen at its dropped rect, so the
+    /// capture and the glide's start rect agree.
+    Glide,
+    /// Place instantly: the glide was off or busy when decided, or the window
+    /// is still parked or not yet landed.
+    Instant,
+}
+
+fn drop_glide_plan(glide_wanted: bool, landed: bool) -> DropRetile {
+    if glide_wanted && landed {
+        DropRetile::Glide
+    } else {
+        DropRetile::Instant
+    }
+}
+
+/// Could a glide start right now? Configured on, the worker idle, and a
+/// current wallpaper crop. Only the manager ever sets GLIDE_BUSY, so a true
+/// here stays true until this thread dispatches something itself.
+fn glide_can_run(cfg: &Config) -> bool {
+    glide_enabled(cfg) && !GLIDE_BUSY.load(Ordering::Relaxed) && wp_ready()
+}
+
+/// Must the retile after a drop of `h` skip the glide (TILE-1 G2)?
+/// `glide_wanted` is `glide_can_run`, sampled once by the caller: re-reading
+/// GLIDE_BUSY later could see the worker go idle and glide a window that is
+/// not where the glide thinks. The drop's commit is posted, so a glide started
+/// straight after it reads h's rect, and captures the screen, while h may still
+/// be parked off-screen: h would vanish for the whole glide and pop back. So
+/// wait for the commit to land (at most DROP_LAND_WAIT_MS, in 1 ms steps: only
+/// a busy or hung app takes that long) and go instant if it did not. With
+/// synchronous placement the commit has landed already.
+unsafe fn drop_retile_force_instant(
+    glide_wanted: bool,
+    h: isize,
+    before: RECT,
+    committed: RECT,
+) -> bool {
+    if !glide_wanted {
+        return true;
+    }
+    if !ASYNC_WINDOW_POS.load(Ordering::Relaxed) {
+        return false;
+    }
+    let t0 = Instant::now();
+    let deadline = std::time::Duration::from_millis(DROP_LAND_WAIT_MS);
+    let landed = loop {
+        if swp_landed(before, window_rect_of(h), committed) {
+            break true;
+        }
+        if t0.elapsed() >= deadline {
+            break false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    };
+    let plan = drop_glide_plan(glide_wanted, landed);
+    log_debug!(
+        "drop {h:#x}: commit landed={landed} after {}us -> {plan:?}",
+        t0.elapsed().as_micros()
+    );
+    plan == DropRetile::Instant
+}
+
+/// Longest a drop waits for its own posted commit before placing instantly.
+const DROP_LAND_WAIT_MS: u64 = 32;
+
+/// GetWindowRect, or an empty rect when the window is gone.
+unsafe fn window_rect_of(h: isize) -> RECT {
+    let mut r = RECT::default();
+    let _ = GetWindowRect(hwnd_from(h), &mut r);
+    r
 }
 
 /// Place the active workspace's windows at their targets INSTANTLY (no glide).
@@ -3635,15 +4812,64 @@ unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
         return;
     }
     let rects = workspace_layout(mgr, mi, mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0));
+    // Debug only: a window that did not land where it was put. Windows are
+    // also laid out while hidden (place_hidden_workspace), and a placement
+    // that silently failed there would otherwise only show as a wrong tile.
+    // Synchronous placement only: a posted one has not landed yet when read
+    // back here, so every window would be reported.
+    let check = log_on(LOG_DEBUG) && !ASYNC_WINDOW_POS.load(Ordering::Relaxed);
     SUPPRESS.store(true, Ordering::Relaxed);
     for (h, target) in rects {
         let hwnd = hwnd_from(h);
         if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-        set_pos_raw(h, adjust_for_border(hwnd, target));
+        let to = adjust_for_border(hwnd, target);
+        set_pos_raw(h, to);
+        let mut got = RECT::default();
+        if check && GetWindowRect(hwnd, &mut got).is_ok() && got != to {
+            log_debug!(
+                "placed {h:#x} at {},{} {}x{}, wanted {},{} {}x{}",
+                got.left,
+                got.top,
+                got.right - got.left,
+                got.bottom - got.top,
+                to.left,
+                to.top,
+                to.right - to.left,
+                to.bottom - to.top
+            );
+        }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
+}
+
+/// Must Cmd::MoveToWs retile the source workspace itself? Only when the
+/// destination is on another monitor: then the source stays on screen. On the
+/// same monitor the follow-switch hides it, and `place_hidden_workspace` lays
+/// it out afterwards, unseen.
+fn move_needs_source_retile(to_mi: usize, from_mi: usize) -> bool {
+    to_mi != from_mi
+}
+
+/// Lay out a HIDDEN workspace's tiled windows at their slots, so its next
+/// reveal (place_active_instant) finds them already there. No glide, no
+/// SUPPRESS: a SetWindowPos without SWP_SHOWWINDOW on a hidden window raises
+/// no show or hide event. The border correction reads DWM frame bounds, which
+/// stay valid while hidden (measured: 12/12 windows, WINQUERY-18). Maximised
+/// windows are skipped, since SW_RESTORE would show them; the reveal fixes
+/// those. Minimised ones are not in the layout at all.
+unsafe fn place_hidden_workspace(mgr: &Manager, mi: usize, wi: usize) {
+    if !mgr.tiling || mgr.monitors.get(mi).is_none_or(|m| m.active == wi) {
+        return;
+    }
+    for (h, target) in workspace_layout(mgr, mi, wi) {
+        let hwnd = hwnd_from(h);
+        if IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            continue;
+        }
+        set_pos_raw(h, adjust_for_border(hwnd, target));
+    }
 }
 
 /// Tile every monitor's active workspace.
@@ -3653,11 +4879,21 @@ unsafe fn retile_all(mgr: &Manager) {
     }
 }
 
+/// Does a layered window's alpha still need setting? `read_ok`, `flags` and
+/// `cur` are what GetLayeredWindowAttributes returned. Only a successful read
+/// of exactly LWA_ALPHA at the target value is a skip: a failed read (never set
+/// through SLWA, or UpdateLayeredWindow), a colour key, or another value is set
+/// as before.
+fn alpha_set_needed(read_ok: bool, flags: u32, cur: u8, target: u8) -> bool {
+    !read_ok || flags != LWA_ALPHA.0 || cur != target
+}
+
 /// Apply opacity + border colour to a single window based on focus state.
 unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
     if cfg.unfocused_opacity < 0.999 {
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
-        if ex & WS_EX_LAYERED.0 == 0 {
+        let was_layered = ex & WS_EX_LAYERED.0 != 0;
+        if !was_layered {
             SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
         }
         let alpha = if focused {
@@ -3665,7 +4901,29 @@ unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
         } else {
             (cfg.unfocused_opacity * 255.0) as u8
         };
-        let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+        // Skip a SetLayeredWindowAttributes that would re-send the alpha the
+        // window already has (SWITCH-18): every switch restyles each incoming
+        // window, and hidden windows keep their alpha, so nearly all of those
+        // are repeats. SLWA measured ~250 us per call (0.7-1.3 ms under load),
+        // on the manager thread before focus lands. The read is the live
+        // value, not a cache, so an app that changed its own opacity, or a
+        // cancelled shutdown that un-styled everything, is still corrected. A
+        // freshly-layered window has no alpha to read and is always set.
+        let needed = !was_layered || {
+            let mut cur = 0u8;
+            let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
+            let ok = GetLayeredWindowAttributes(
+                hwnd,
+                None,
+                Some(&mut cur as *mut u8),
+                Some(&mut flags as *mut _),
+            )
+            .is_ok();
+            alpha_set_needed(ok, flags.0, cur, alpha)
+        };
+        if needed {
+            let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), alpha, LWA_ALPHA);
+        }
     }
     if cfg.border_enabled {
         let color = COLORREF(if focused {
@@ -3706,6 +4964,11 @@ const FOLLOW_SETTLE_GUARD_MS: u64 = 200;
 /// focus change. Cheap; called from the manager thread only.
 fn bump_follow_settle() {
     FOLLOW_SETTLE_MS.store(now_ms() + FOLLOW_SETTLE_GUARD_MS, Ordering::Relaxed);
+}
+
+/// May a Cmd::FocusMouse act now, given the settle deadline?
+fn focus_mouse_allowed(now: u64, settle_deadline: u64) -> bool {
+    now >= settle_deadline
 }
 
 /// Compute the globally-focused window handle (0 if none).
@@ -3764,12 +5027,36 @@ unsafe fn apply_styles(mgr: &Manager) {
     }
 }
 
-/// Warp the mouse cursor to the centre of a window.
-unsafe fn center_cursor_on(h: isize) {
+/// Warp the mouse cursor to the centre of a window. A tiled window is centred
+/// on the tile it was just given, not on its live rect: placement is posted
+/// (TILE-1), so straight after a retile the live rect can still be the old one,
+/// or a neighbour can still sit under the new centre. Floating and untiled
+/// windows use their live rect.
+unsafe fn center_cursor_on(mgr: &Manager, h: isize) {
     let mut r = RECT::default();
-    if GetWindowRect(hwnd_from(h), &mut r).is_ok() {
-        let _ = SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+    let r = match tile_target(mgr, h) {
+        Some(t) => t,
+        None if GetWindowRect(hwnd_from(h), &mut r).is_ok() => r,
+        None => return,
+    };
+    let _ = SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
+}
+
+/// The tile a retile of h's monitor puts h in (raw layout rect), or None when
+/// that retile would not place it: tiling off, untracked, on a hidden
+/// workspace, floating, minimised, dead, or a layout that came up short. The
+/// same `workspace_layout` the retile itself runs.
+unsafe fn tile_target(mgr: &Manager, h: isize) -> Option<RECT> {
+    if !mgr.tiling {
+        return None;
     }
+    let (mi, wi) = mgr
+        .locate(h)
+        .filter(|&(mi, wi)| wi == mgr.monitors[mi].active)?;
+    workspace_layout(mgr, mi, wi)
+        .into_iter()
+        .find(|&(w, _)| w == h)
+        .map(|(_, r)| r)
 }
 
 #[inline]
@@ -3856,23 +5143,73 @@ unsafe fn focus_window(h: isize) {
     // every workspace switch, hotkey and retile behind it (review B-12).
     // Skipping the attach costs at worst a focus that does not take; blocking
     // costs the whole WM.
-    if !fg.0.is_null() && IsHungAppWindow(fg).as_bool() {
+    let took = if !fg.0.is_null() && IsHungAppWindow(fg).as_bool() {
         log_error!(
             "skipped focus attach: foreground window {:#x} is not responding",
             fg.0 as isize
         );
-        let _ = SetForegroundWindow(hwnd);
+        let took = SetForegroundWindow(hwnd);
         let _ = BringWindowToTop(hwnd);
-        return;
-    }
-    if fgt != 0 && fgt != cur {
+        took
+    } else if fgt != 0 && fgt != cur {
         let _ = AttachThreadInput(cur, fgt, BOOL(1));
-        let _ = SetForegroundWindow(hwnd);
+        let took = SetForegroundWindow(hwnd);
         let _ = BringWindowToTop(hwnd);
         let _ = AttachThreadInput(cur, fgt, BOOL(0));
+        took
     } else {
-        let _ = SetForegroundWindow(hwnd);
+        let took = SetForegroundWindow(hwnd);
         let _ = BringWindowToTop(hwnd);
+        took
+    };
+    if !took.as_bool() {
+        let n = FOCUS_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
+        if focus_fail_log_due() {
+            log_error!("SetForegroundWindow refused {h:#x} (refused={n} since start)");
+        }
+    }
+}
+
+/// Focus that did not land. The workspace reveal no longer activates each
+/// window it shows (SW_SHOWNA, SWITCH-4), so focus_window is the only
+/// activation on a switch: if it fails, keystrokes go to a window that is
+/// now hidden, with nothing on screen to say so. Counted always (diagnostics
+/// prints them); logged at most once per FOCUS_FAIL_LOG_GAP_MS, since a
+/// foreground lock can refuse every call.
+static FOCUS_REFUSED: AtomicU64 = AtomicU64::new(0);
+static FOCUS_MISSED: AtomicU64 = AtomicU64::new(0);
+static FOCUS_FAIL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
+const FOCUS_FAIL_LOG_GAP_MS: u64 = 30_000;
+
+fn focus_fail_log_due() -> bool {
+    let now = now_ms().max(1);
+    let last = FOCUS_FAIL_LOGGED_MS.load(Ordering::Relaxed);
+    if last != 0 && now < last + FOCUS_FAIL_LOG_GAP_MS {
+        return false;
+    }
+    FOCUS_FAIL_LOGGED_MS.store(now, Ordering::Relaxed);
+    true
+}
+
+/// After a switch's focus_window(f): count (and rate-limit log) a foreground
+/// that ended up on some other app. Foreground changes land asynchronously on
+/// the target's thread, so "no foreground yet" and "another window of f's own
+/// thread" (its previous active window, before it processes the activation)
+/// are in flight, not failures.
+unsafe fn check_focus_landed(f: isize) {
+    let fg = GetForegroundWindow();
+    if fg.0.is_null() || GetAncestor(fg, GA_ROOTOWNER) == hwnd_from(f) {
+        return;
+    }
+    if GetWindowThreadProcessId(fg, None) == GetWindowThreadProcessId(hwnd_from(f), None) {
+        return;
+    }
+    let n = FOCUS_MISSED.fetch_add(1, Ordering::Relaxed) + 1;
+    if focus_fail_log_due() {
+        log_error!(
+            "switch focus did not land: foreground is {:#x}, not {f:#x} (missed={n} since start)",
+            fg.0 as isize
+        );
     }
 }
 
@@ -3907,88 +5244,748 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
 /// thread. The manager has already performed the real (instant) switch; this is
 /// purely a visual overlay, so losing or dropping it never affects windows.
 struct SlideReq {
-    out_bmp: isize, // HBITMAP: frozen outgoing workspace (worker owns + frees)
-    in_bmp: isize,  // HBITMAP: frozen incoming workspace (worker owns + frees); 0 = first
-    // visit, no snapshot — worker holds the outgoing frame then reveals
+    // Frozen outgoing workspace, handed over uncopied: the worker hands it back
+    // (SNAP_RETURNS) as `old_ws`'s snapshot when done with it.
+    out_bmp: Bmp,
+    // Frozen incoming workspace (worker frees); None = first visit, no
+    // snapshot: the worker holds the outgoing frame, then reveals.
+    in_bmp: Option<Bmp>,
     out_rects: Vec<RECT>, // work-area-local rects of the outgoing windows
     in_rects: Vec<RECT>,  // work-area-local rects of the incoming windows
+    hmon: isize,          // monitor, with `rect` the wallpaper-crop key
+    old_ws: usize,        // workspace `out_bmp` shows: its snapshot key, with hmon
     rect: RECT,           // work-area rect (overlay geometry)
     dir: i32,             // +1 = new ws came from the right, -1 from the left
     dur_ms: u64,
-    mode: WsAnim, // slide / spring / fade (off never reaches the worker)
+    mode: WsAnim,              // slide / spring / fade (off never reaches the worker)
+    queued: Option<Instant>,   // dispatch time, for the pickup probe (debug only)
+    gen: u64,                  // SLIDE_GEN of this request (see the overlay state notes)
+    ex_style: WINDOW_EX_STYLE, // overlay_ex_style of the configured animation_ms
 }
 static SLIDE_REQ: Mutex<Option<SlideReq>> = Mutex::new(None);
 static SLIDE_CV: Condvar = Condvar::new();
-// Handshake: the worker sets this true once the overlay is up and showing the
-// outgoing image, so the manager can do the (now hidden) switch underneath it
-// without the destination workspace flashing first.
-static SLIDE_READY: Mutex<bool> = Mutex::new(false);
+// Handshake: the worker stores (its request's gen, overlay up?) once the
+// overlay covers the monitor showing the outgoing image, or once it knows
+// there will be none, so the manager can do the (now hidden) switch
+// underneath without the destination workspace flashing first. Keyed by gen:
+// a signal meant for another request never releases this one's wait.
+static SLIDE_READY: Mutex<(u64, bool)> = Mutex::new((0, false));
 static SLIDE_READY_CV: Condvar = Condvar::new();
 
-/// Block (bounded) until the transition worker has the overlay up and covering
-/// the monitor, or the timeout elapses (overlay failed — proceed anyway).
-fn wait_slide_overlay_up() {
-    let guard = SLIDE_READY.lock().unwrap();
-    let _ = SLIDE_READY_CV
-        .wait_timeout_while(guard, std::time::Duration::from_millis(250), |up| !*up)
-        .unwrap();
+// ---- slide overlay state (SWITCH-2) ----------------------------------------
+// A switch that landed while the previous slide was still on the glass used to
+// capture the screen (the old overlay's mid-slide frame), wait up to 250 ms for
+// the one transition worker to finish that slide and raise a new overlay, then
+// slide the stale frame again over a switch that had already happened: a jump
+// back in time, with that frame cached as the snapshot of the workspace just
+// left. Now such a switch runs UNDER the overlay already up: it "holds" it (the
+// worker freezes the frame on the glass) and the worker reveals once the
+// manager releases it. The real switch runs on every path; only the cosmetic
+// overlay branches.
+//
+// Every request carries a generation `k` (SLIDE_GEN). The rules:
+//   * The manager waits for k's own signal. On a timeout it marks k aborted
+//     (SLIDE_ABORT) under the handshake lock, so the worker, after signalling,
+//     knows whether anyone was still waiting.
+//   * The worker never shows an overlay for a request that is aborted or no
+//     longer the newest: shown late, it would paint the pre-switch frame over a
+//     switch that already finished. A stale abort cannot touch the next gen.
+//   * GLASS = k << 16 | holds: k's overlay is on the glass. The worker sets it
+//     right after the signal and clears it by CAS on its own gen on every exit
+//     path (GlassGuard), never "after run returns" like GLIDE_BUSY: the worker
+//     picks the next request up at once, and would clear ITS flag. The manager
+//     holds only by CAS from the value it read, so it can never hold an
+//     overlay that is already leaving; the worker leaves only by CAS from the
+//     value it last saw, so it can never leave under a hold it has not seen.
+//   * SLIDE_RELEASED = the GLASS value of the hold the manager is done with,
+//     stored only after switch_plain (and the styling) returned. A release for
+//     another gen or an older hold never matches.
+//   * No lock is held across switch_plain, and the worker caps every hold
+//     (HOLD_CAP_MS): the overlay is topmost, so an unbounded hold would pin a
+//     stale frame over the desktop while the manager is stuck on a hung app
+//     (review B-12).
+static SLIDE_GEN: AtomicU64 = AtomicU64::new(0);
+static SLIDE_ABORT: AtomicU64 = AtomicU64::new(0);
+static GLASS: AtomicU64 = AtomicU64::new(0);
+static GLASS_HMON: AtomicIsize = AtomicIsize::new(0);
+/// now_ms() at which the on-glass overlay's own animation ends.
+static GLASS_END_MS: AtomicU64 = AtomicU64::new(0);
+static SLIDE_RELEASED: AtomicU64 = AtomicU64::new(0);
+const GLASS_HOLDS: u64 = 0xFFFF;
+/// A hold the worker has seen and that is not released within this long is
+/// torn down anyway (the switch underneath then finishes uncovered).
+const HOLD_CAP_MS: u64 = 250;
+/// The manager holds an overlay only until this long past its animation end;
+/// a later switch takes a fresh overlay, so a stream of switches cannot pin
+/// one. The longest legitimate on-glass time is therefore about the animation
+/// + HOLD_LATE_MS + HOLD_CAP_MS + COVER_HOLD_MS (~550 ms past its end) ...
+const HOLD_LATE_MS: u64 = 250;
+/// ... and GLASS still set this long past the end is a bug, not a hold: log
+/// it and reset, or every later switch would skip its slide for good.
+const GLASS_STUCK_MS: u64 = 1_000;
+/// How long a switch waits for this monitor's leaving overlay (a released
+/// hold's COVER_HOLD_MS plus the teardown's DwmFlush, ~65 ms) before it
+/// captures anyway and does not keep the capture.
+const SLIDE_LEAVE_WAIT_MS: u64 = 100;
+
+/// Is request `k` still worth showing? Not once the manager gave up on it
+/// (`aborted` == k) or dispatched a newer one.
+fn slide_gen_live(k: u64, newest: u64, aborted: u64) -> bool {
+    k == newest && k != aborted
 }
 
-/// Worker → manager: overlay is up.
-fn signal_slide_overlay_up() {
-    *SLIDE_READY.lock().unwrap() = true;
+/// The GLASS value a manager hold moves `glass` to. None = nothing on the
+/// glass (or the hold counter is full).
+fn glass_hold(glass: u64) -> Option<u64> {
+    (glass != 0 && glass & GLASS_HOLDS != GLASS_HOLDS).then_some(glass + 1)
+}
+
+/// Has the manager released the hold that `glass` records?
+fn glass_released(glass: u64, released: u64) -> bool {
+    glass & GLASS_HOLDS != 0 && released == glass
+}
+
+/// Manager: run this switch under the slide overlay already on `hmon`'s
+/// glass, if there is one to hold. Some(v) = held; release `v` after the
+/// switch. Lock-free, never waits.
+fn slide_hold(hmon: isize) -> Option<u64> {
+    let g = GLASS.load(Ordering::SeqCst);
+    if g == 0 || GLASS_HMON.load(Ordering::SeqCst) != hmon {
+        return None;
+    }
+    let late = now_ms().saturating_sub(GLASS_END_MS.load(Ordering::SeqCst));
+    if late > GLASS_STUCK_MS {
+        if GLASS
+            .compare_exchange(g, 0, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            log_error!("slide overlay state stuck {late} ms past its end (glass={g:#x}); reset");
+        }
+        return None;
+    }
+    if late > HOLD_LATE_MS {
+        return None;
+    }
+    let v = glass_hold(g)?;
+    GLASS
+        .compare_exchange(g, v, Ordering::SeqCst, Ordering::SeqCst)
+        .ok()
+        .map(|_| v)
+}
+
+/// Worker: request `k`'s overlay is on the glass over `hmon`.
+fn glass_on(k: u64, hmon: isize, end_ms: u64) {
+    GLASS_HMON.store(hmon, Ordering::SeqCst);
+    GLASS_END_MS.store(end_ms, Ordering::SeqCst);
+    GLASS.store(k << 16, Ordering::SeqCst);
+}
+
+/// Worker: take the overlay off the glass, unless a hold newer than `seen`
+/// started meanwhile. true = off.
+fn glass_leave(seen: u64) -> bool {
+    GLASS
+        .compare_exchange(seen, 0, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok()
+}
+
+/// Worker: take `k`'s overlay off the glass whatever holds it (cap hit, or
+/// any exit). Leaves another gen's state alone.
+fn glass_clear(k: u64) {
+    loop {
+        let g = GLASS.load(Ordering::SeqCst);
+        if g >> 16 != k
+            || GLASS
+                .compare_exchange(g, 0, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+        {
+            return;
+        }
+    }
+}
+
+/// Clears GLASS for its gen when dropped: every exit path of run_transition.
+struct GlassGuard(u64);
+impl Drop for GlassGuard {
+    fn drop(&mut self) {
+        glass_clear(self.0);
+    }
+}
+
+/// Hands the outgoing capture back to the manager when dropped: every exit
+/// path of run_transition, early returns included, where it is still a valid
+/// capture of the workspace just left. Every path deselects it first.
+struct SnapHome(Option<SnapReturn>);
+impl SnapHome {
+    fn raw(&self) -> isize {
+        self.0.as_ref().map_or(0, |r| r.snap.bmp.raw())
+    }
+    fn rects(&self) -> &[RECT] {
+        self.0.as_ref().map_or(&[], |r| &r.snap.rects)
+    }
+}
+impl Drop for SnapHome {
+    fn drop(&mut self) {
+        if let Some(r) = self.0.take() {
+            snap_return(r);
+        }
+    }
+}
+
+/// Block (bounded) until the transition worker has request `k`'s overlay up
+/// and covering the monitor, or has said there will be none. Returns true only
+/// for k's own overlay-up; false on a no-overlay signal, and on the timeout,
+/// which also marks k aborted (under the handshake lock, see the notes above)
+/// so a late overlay is never shown.
+fn wait_slide_overlay_up(k: u64) -> bool {
+    let guard = SLIDE_READY.lock().unwrap();
+    let (guard, res) = SLIDE_READY_CV
+        .wait_timeout_while(guard, std::time::Duration::from_millis(250), |s| s.0 != k)
+        .unwrap();
+    if res.timed_out() {
+        SLIDE_ABORT.store(k, Ordering::SeqCst);
+        return false;
+    }
+    guard.1
+}
+
+/// Worker → manager: request `k`'s overlay is up (`up`), or there is none.
+/// Requests run one at a time, so gens only grow; never step backwards.
+fn signal_slide_overlay_up(k: u64, up: bool) {
+    {
+        let mut s = SLIDE_READY.lock().unwrap();
+        if k >= s.0 {
+            *s = (k, up);
+        }
+    }
     SLIDE_READY_CV.notify_one();
+}
+
+/// An owned GDI bitmap (HBITMAP), never 0: exactly one owner at a time, freed
+/// exactly once, when that owner drops it. Deliberately neither Clone nor Copy,
+/// so a second owner of one handle is a compile error rather than a second
+/// DeleteObject: by then the handle value can already name an unrelated live
+/// GDI object (a bar font or brush), which would be deleted silently.
+struct Bmp(isize);
+
+impl Bmp {
+    /// Take ownership of a fresh handle; None for a failed (0) one.
+    fn new(h: isize) -> Option<Bmp> {
+        // Lazy `then`: `then_some(Bmp(h))` would build, and drop (delete), a
+        // Bmp(0) on the failure path.
+        (h != 0).then(|| Bmp(h))
+    }
+
+    /// The raw handle, to select it for a while. Ownership stays here: the
+    /// caller deselects it before this moves on or drops (a selected bitmap
+    /// cannot be deleted, and is never selected on two threads).
+    fn raw(&self) -> isize {
+        self.0
+    }
+}
+
+impl Drop for Bmp {
+    fn drop(&mut self) {
+        bmp_delete(self.0);
+    }
+}
+
+#[cfg(not(test))]
+fn bmp_delete(h: isize) {
+    // SAFETY: called only from Bmp::drop. Bmp is the handle's sole owner and
+    // is going away, so nothing can still select, use or free it.
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(h as *mut c_void));
+    }
+}
+
+// Tests swap the deleter for a recorder, so ownership (freed exactly once) is
+// checked without GDI.
+#[cfg(test)]
+thread_local! {
+    static BMP_FREED: std::cell::RefCell<Vec<isize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+#[cfg(test)]
+fn bmp_delete(h: isize) {
+    BMP_FREED.with(|f| f.borrow_mut().push(h));
 }
 
 /// Per-(monitor, workspace) frozen snapshot of how that workspace last looked
 /// when it was left: the work-area image plus the work-area-local rects of its
 /// tiled windows (so the slide can move only the windows and leave the wallpaper
 /// in the gaps still). Populated for free from the outgoing capture on every
-/// switch. HBITMAPs are GPU-backed DDBs (~no process RAM). Touched only on the
-/// manager thread — the worker gets private copies, so no cross-thread sharing.
+/// switch. HBITMAPs are GPU-backed DDBs (~no process RAM). The map is touched
+/// only on the manager thread, and every bitmap moves by single-owner
+/// hand-off, never shared (`Bmp`): the incoming image leaves the map through
+/// `snap_take` and the SlideReq carries it to the worker, which frees it; the
+/// outgoing capture goes to the worker uncopied (no dup_ddb: a full-frame
+/// copy, ~7 ms at 1080p per the ANIM audit, on the manager's pre-switch path)
+/// and comes back through SNAP_RETURNS, which the manager drains into the map.
+/// Neither SNAP nor SNAP_RETURNS is ever held across a GDI or window call, and
+/// bitmaps are dropped (DeleteObject) only after the lock is released.
 struct Snap {
-    bmp: isize,
+    bmp: Bmp,
     rects: Vec<RECT>,
+    // Size of `bmp`: a take for a different work-area size is rejected, so a
+    // wrong-size image can never reach the worker.
+    w: i32,
+    h: i32,
 }
-static SNAP: Mutex<Option<HashMap<(isize, usize), Snap>>> = Mutex::new(None);
+type SnapMap = HashMap<(isize, usize), Snap>;
 
-/// Store the snapshot for (hmon, ws), freeing any previous one.
-unsafe fn snap_store(hmon: isize, ws: usize, bmp: isize, rects: Vec<RECT>) {
-    if bmp == 0 {
-        return;
-    }
-    let mut g = SNAP.lock().unwrap();
-    let map = g.get_or_insert_with(HashMap::new);
-    if let Some(old) = map.insert((hmon, ws), Snap { bmp, rects }) {
-        let _ = DeleteObject(HGDIOBJ(old.bmp as *mut c_void));
+#[derive(Default)]
+struct SnapCache {
+    map: SnapMap,
+    /// Per (hmon, ws): the SLIDE_GEN of the one outgoing capture of that
+    /// workspace still out with the worker that should become its snapshot.
+    /// Set when the manager leaves the workspace with a keepable capture;
+    /// removed when it leaves without one, or the snapshot is dropped. A
+    /// returning capture is stored only if it matches, so a late or
+    /// superseded one (a newer departure since, an overlay in the capture, a
+    /// reload or display change: snap_clear empties this) can never land as
+    /// a stale snapshot after the fact.
+    newest: HashMap<(isize, usize), u64>,
+}
+static SNAP: Mutex<Option<SnapCache>> = Mutex::new(None);
+
+/// An outgoing capture handed back to the manager: by the worker once its
+/// slide is done with it (every exit path, see SnapHome), or by the manager
+/// itself for a request that never reached the worker.
+struct SnapReturn {
+    key: (isize, usize),
+    gen: u64,
+    snap: Snap,
+}
+/// Worker -> manager hand-back queue. The worker only ever pushes; only the
+/// manager drains it (snap_drain, snap_clear), so the map stays manager-only.
+static SNAP_RETURNS: Mutex<Vec<SnapReturn>> = Mutex::new(Vec::new());
+
+/// Remove `key`'s snapshot from `map` and return it if it is still `w` x `h`.
+/// A wrong-size one is removed too and its bitmap handed to `reject` (the
+/// caller drops it once the lock is released). Either way the entry is gone:
+/// a snapshot is taken at most once.
+fn snap_take_from(
+    map: &mut SnapMap,
+    key: (isize, usize),
+    w: i32,
+    h: i32,
+    reject: impl FnOnce(Bmp),
+) -> Option<Snap> {
+    let s = map.remove(&key)?;
+    if s.w == w && s.h == h {
+        Some(s)
+    } else {
+        reject(s.bmp);
+        None
     }
 }
 
-/// Current snapshot (bmp, window rects) for (hmon, ws), or None if not cached.
-fn snap_get(hmon: isize, ws: usize) -> Option<(isize, Vec<RECT>)> {
-    SNAP.lock()
+/// Take (hmon, ws)'s snapshot (bmp, window rects) for a slide INTO that
+/// workspace: ownership moves to the caller, no copy. Only called for a
+/// workspace about to become active, whose snapshot is re-created from the
+/// outgoing capture when it is next left.
+unsafe fn snap_take(hmon: isize, ws: usize, w: i32, h: i32) -> Option<(Bmp, Vec<RECT>)> {
+    let mut wrong_size = None;
+    let got = SNAP
+        .lock()
         .unwrap()
-        .as_ref()
-        .and_then(|m| m.get(&(hmon, ws)))
-        .map(|s| (s.bmp, s.rects.clone()))
+        .as_mut()
+        .and_then(|c| snap_take_from(&mut c.map, (hmon, ws), w, h, |b| wrong_size = Some(b)));
+    drop(wrong_size); // freed after the lock is released
+    got.map(|s| (s.bmp, s.rects))
 }
 
-/// Drop every cached snapshot (resolution/style no longer valid). Call on display
-/// change and config reload.
-unsafe fn snap_clear() {
-    if let Some(map) = SNAP.lock().unwrap().take() {
-        for (_, s) in map {
-            let _ = DeleteObject(HGDIOBJ(s.bmp as *mut c_void));
+/// Remove `key`'s snapshot from `map`, handing its bitmap to `free` (the caller
+/// drops it once the lock is released). Returns whether there was one.
+fn snap_remove_from(map: &mut SnapMap, key: (isize, usize), free: impl FnOnce(Bmp)) -> bool {
+    match map.remove(&key) {
+        Some(s) => {
+            free(s.bmp);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Drop (hmon, ws)'s snapshot: it no longer shows that workspace (the visit
+/// changed it without a fresh capture, or the capture was of an overlay) and
+/// would slide in a stale image on the next visit, which now gets the
+/// first-visit cover-hold instead. Simply not storing is not enough: an older
+/// entry would survive, and so would a capture of it still out with the
+/// worker, which is disowned here too. Returns whether there was an entry.
+unsafe fn snap_remove(hmon: isize, ws: usize) -> bool {
+    let mut bmp = None;
+    let had = SNAP.lock().unwrap().as_mut().is_some_and(|c| {
+        c.newest.remove(&(hmon, ws));
+        snap_remove_from(&mut c.map, (hmon, ws), |b| bmp = Some(b))
+    });
+    drop(bmp); // freed after the lock is released
+    had
+}
+
+/// The manager is leaving (hmon, ws) with outgoing capture `gen`, handed to
+/// the worker: that capture, once back, is ws's snapshot. Any entry stored
+/// before this departure predates the visit just ending, so it goes now; an
+/// older capture still out with the worker no longer matches `newest`.
+unsafe fn snap_keep(hmon: isize, ws: usize, gen: u64) {
+    let old = {
+        // get_or_insert, not as_mut: the first switch after startup or a
+        // snap_clear finds no cache yet, and must still record its capture.
+        let mut guard = SNAP.lock().unwrap();
+        let c = guard.get_or_insert_with(SnapCache::default);
+        c.newest.insert((hmon, ws), gen);
+        c.map.remove(&(hmon, ws))
+    };
+    drop(old); // freed after the lock is released
+}
+
+/// Store the returned captures that are still wanted (see `newest`), in
+/// order, and move everything else, including any entry a store replaces, to
+/// `dead`, which the caller drops once the lock is released.
+fn snap_apply_returns(cache: &mut SnapCache, rets: Vec<SnapReturn>, dead: &mut Vec<Snap>) {
+    for r in rets {
+        if cache.newest.get(&r.key) == Some(&r.gen) {
+            cache.newest.remove(&r.key);
+            dead.extend(cache.map.insert(r.key, r.snap));
+        } else {
+            dead.push(r.snap);
         }
     }
 }
 
-// One-shot guard so the wallpaper-source diagnostic prints once, not every switch.
+/// Hand an outgoing capture back to the manager. The bitmap must already be
+/// deselected; the flush then makes the GDI batch that drew it visible to the
+/// thread that selects it next (GdiFlush docs, objects shared across threads).
+fn snap_return(ret: SnapReturn) {
+    // SAFETY: GdiFlush takes no arguments and only flushes this thread's batch.
+    unsafe {
+        let _ = GdiFlush();
+    }
+    SNAP_RETURNS.lock().unwrap().push(ret);
+}
+
+/// Manager: move the captures the worker has handed back into the map.
+unsafe fn snap_drain() {
+    let rets = std::mem::take(&mut *SNAP_RETURNS.lock().unwrap());
+    if rets.is_empty() {
+        return;
+    }
+    let mut dead = Vec::new();
+    {
+        let mut guard = SNAP.lock().unwrap();
+        let cache = guard.get_or_insert_with(SnapCache::default);
+        snap_apply_returns(cache, rets, &mut dead);
+    }
+    drop(dead); // freed after the lock is released
+}
+
+/// Drop every cached snapshot (resolution/style no longer valid), and every
+/// capture handed back but not yet drained. Call on display change and config
+/// reload. Captures still out with the worker no longer match `newest` (now
+/// empty), so the drain after their return frees them.
+unsafe fn snap_clear() {
+    // Take each in its own statement so the guard drops before the frees.
+    let cache = SNAP.lock().unwrap().take();
+    let rets = std::mem::take(&mut *SNAP_RETURNS.lock().unwrap());
+    drop(cache);
+    drop(rets);
+}
+
+// =========================================================================
+// Wallpaper cache: one capture thread, a private crop per compositor
+// =========================================================================
+// The slide and the glide fill the gaps that open up as windows move with the
+// still wallpaper, rendered by PrintWindow(PW_RENDERFULLCONTENT) of Explorer's
+// wallpaper window. That render costs 56-110 ms (56 ms median measured in
+// review on the owner's 3-monitor machine, 96-108 ms per the ANIM audit) and
+// used to run on the compositor BEFORE its overlay signal, so on every animated
+// switch and retile the manager sat blocked on it (ANIM-1). It also has no
+// timeout: the call is processed by Explorer's desktop thread.
+//
+// This reverses the old "captured fresh every slide, no cache to go stale"
+// choice, and these rules are why that is safe:
+//   * Only `wallpaper_capture_worker` calls `wallpaper_window` or PrintWindow.
+//     Never a compositor: with its overlay up, a PrintWindow blocked on a busy
+//     Explorer would pin a frozen, click-eating topmost frame over windows that
+//     are already placed underneath it.
+//   * WALLPAPER_GEN says which crops are current. Bump sites only fetch_add
+//     (`wp_invalidate`, no GDI); a crop stamped with an older gen is NEVER
+//     blitted. An older gen means a different wallpaper (per-workspace
+//     wallpapers change on nearly every switch; on a sparse workspace the gaps
+//     are most of the screen) or a different monitor geometry, not a sub-pixel
+//     gap difference. A miss costs a flat slide or an instant glide, nothing
+//     worse, and frame 0 still comes from the exact capture_monitor grab.
+//   * Crops are keyed by hmon AND the exact work-area RECT, so a wrong-size
+//     bitmap can never be blitted after a display or bar change.
+//   * Each compositor gets its own copy through its WP_SLOTS slot (a bitmap is
+//     selectable into one DC at a time, and a slide and a glide can overlap).
+//     One owner at a time, and only the owner DeleteObjects: the capture thread
+//     for untaken slot entries, the compositor for the copies it took.
+//   * Render only at startup, WP_DEBOUNCE after a gen bump (so Explorer's own
+//     wallpaper fade has finished), and after a teardown once the last try is
+//     older than WP_TTL (the backstop for changes nobody announces:
+//     slideshows, or WM_SETTINGCHANGE not reaching an elevated Astur). Never on
+//     a timer, never while an animation runs, and not at all when no
+//     configured animation uses the wallpaper.
+// Memory: one DDB per monitor per compositor (~8 MB at 1080p), by design.
+
+// One-shot guard so the wallpaper-source diagnostic prints once, not every
+// render. Re-armed when Explorer restarts.
 static WP_DIAG: AtomicBool = AtomicBool::new(false);
+
+/// Which wallpaper crops are current. Starts at 1 so it never equals the
+/// "nothing published yet" WP_READY_GEN of 0.
+static WALLPAPER_GEN: AtomicU64 = AtomicU64::new(1);
+/// Gen of the crops last published for the glide (0 = none). The manager's
+/// lock-free "can a glide compose at all?" check (`wp_ready`).
+static WP_READY_GEN: AtomicU64 = AtomicU64::new(0);
+/// Cached wallpaper source (WorkerW or Progman); 0 = discover on next use.
+static WP_SOURCE: AtomicIsize = AtomicIsize::new(0);
+/// Negative cache: the last render found no wallpaper source (no Explorer, a
+/// replacement shell). Stops TTL retries; a gen bump or TaskbarCreated retries.
+static WP_NO_SOURCE: AtomicBool = AtomicBool::new(false);
+/// Does any configured animation read the wallpaper? Set by the manager.
+static WP_WANTED: AtomicBool = AtomicBool::new(false);
+/// What to crop for: (hmon, work area) per monitor, published by the manager.
+static WP_TARGETS: Mutex<Vec<(isize, RECT)>> = Mutex::new(Vec::new());
+/// Registered "TaskbarCreated" message (Explorer broadcasts it on (re)start).
+static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
+
+/// One cropped wallpaper DDB for one monitor's work area.
+struct WpEntry {
+    hmon: isize,
+    rect: RECT,
+    gen: u64,
+    bmp: isize,
+}
+const WP_SLIDE: usize = 0;
+const WP_GLIDE: usize = 1;
+/// Per-compositor hand-off slots: the capture thread puts a fresh set in, the
+/// compositor takes the whole set. Untaken entries still belong to the
+/// capture thread, which frees them when it replaces the set.
+static WP_SLOTS: [Mutex<Vec<WpEntry>>; 2] = [const { Mutex::new(Vec::new()) }; 2];
+
+/// When the capture thread should next render. `ttl_check` = an animation
+/// finished (or a glide was skipped): render if the last try is older than
+/// WP_TTL.
+struct WpSched {
+    due: Option<Instant>,
+    ttl_check: bool,
+}
+static WP_SCHED: Mutex<WpSched> = Mutex::new(WpSched {
+    due: None,
+    ttl_check: false,
+});
+static WP_SCHED_CV: Condvar = Condvar::new();
+const WP_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(1_500);
+const WP_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const WP_BUSY_RETRY: std::time::Duration = std::time::Duration::from_millis(250);
+// True while the transition worker runs a slide (GLIDE_BUSY's twin), so a
+// render never loads DWM mid-animation.
+static SLIDE_BUSY: AtomicBool = AtomicBool::new(false);
+// The monitor that slide is on, stored before SLIDE_BUSY (see `overlay_up_on`).
+static SLIDE_HMON: AtomicIsize = AtomicIsize::new(0);
+
+// Silent-failure counters: a cache that always misses or is always stale
+// would otherwise just quietly turn every slide flat and every glide instant.
+static WP_HIT: AtomicU64 = AtomicU64::new(0);
+static WP_MISS: AtomicU64 = AtomicU64::new(0);
+static WP_STALE: AtomicU64 = AtomicU64::new(0);
+static WP_NOSRC: AtomicU64 = AtomicU64::new(0);
+static WP_RENDERS: AtomicU64 = AtomicU64::new(0);
+static WP_RENDER_MS: AtomicU32 = AtomicU32::new(0);
+
+/// Does any configured animation composite over the wallpaper? Moving slide
+/// and spring frames do, and so does the glide. Fade crossfades two whole
+/// captures and never reads it. `animations` = animations on AND a non-zero
+/// duration.
+fn wallpaper_needed(animations: bool, ws: WsAnim, window_anim: &str) -> bool {
+    animations && (matches!(ws, WsAnim::Slide | WsAnim::Spring) || window_anim == "glide")
+}
+
+/// Does this slide read the wallpaper? Only moving slide/spring frames: a
+/// first visit (no incoming image) holds frame 0, and fade blends captures.
+fn slide_wants_wallpaper(mode: WsAnim, have_incoming: bool) -> bool {
+    have_incoming && matches!(mode, WsAnim::Slide | WsAnim::Spring)
+}
+
+/// May a compositor blit this crop? Only a current-gen crop made for exactly
+/// this monitor and work area.
+fn wp_entry_usable(
+    entry_gen: u64,
+    cur_gen: u64,
+    entry_hmon: isize,
+    entry_rect: RECT,
+    hmon: isize,
+    work_area: RECT,
+) -> bool {
+    entry_gen == cur_gen && entry_hmon == hmon && entry_rect == work_area
+}
+
+/// Can a glide compose right now? Lock-free, for the manager's retile path.
+fn wp_ready() -> bool {
+    WP_READY_GEN.load(Ordering::Acquire) == WALLPAPER_GEN.load(Ordering::Acquire)
+}
+
+/// Ask the capture thread to render `delay` from now. Each request replaces
+/// the due time, so a burst of bumps renders once, after the last. WP_SCHED
+/// is a leaf lock, never held across a render or any call into another
+/// thread, so this is safe even re-entered inside a SetWindowPos (the
+/// WM_DPICHANGED path that deadlocked in e0eea54).
+fn wp_schedule(delay: std::time::Duration) {
+    WP_SCHED.lock().unwrap().due = Some(Instant::now() + delay);
+    WP_SCHED_CV.notify_one();
+}
+
+/// The wallpaper, a monitor or the work areas changed: every crop is stale
+/// from now on. An atomic bump plus a condvar poke (no GDI, no messages), so
+/// it is fine from any thread, the marker wndproc included.
+fn wp_invalidate() {
+    WALLPAPER_GEN.fetch_add(1, Ordering::AcqRel);
+    wp_schedule(WP_DEBOUNCE);
+}
+
+/// An animation finished (or a glide was skipped for want of a crop): let the
+/// capture thread re-render if its last try is older than WP_TTL.
+fn wp_ttl_hint() {
+    WP_SCHED.lock().unwrap().ttl_check = true;
+    WP_SCHED_CV.notify_one();
+}
+
+/// Explorer (re)started: its wallpaper window is a new one. Forget the cached
+/// source and any "no source" verdict, then re-render.
+fn wp_explorer_restarted() {
+    WP_SOURCE.store(0, Ordering::Relaxed);
+    WP_NO_SOURCE.store(false, Ordering::Relaxed);
+    WP_DIAG.store(false, Ordering::Relaxed);
+    wp_invalidate();
+}
+
+/// Manager: publish what to crop for and whether to bother, then mark every
+/// crop stale. Call wherever monitors, work areas or animation settings may
+/// have changed (startup, reload, display change), after `reserve_bar`.
+fn wp_publish(monitors: &[Monitor], cfg: &Config, delay: std::time::Duration) {
+    WP_WANTED.store(
+        wallpaper_needed(
+            cfg.animations && cfg.animation_ms > 0,
+            WsAnim::from_cfg(cfg),
+            &cfg.window_anim,
+        ),
+        Ordering::Relaxed,
+    );
+    *WP_TARGETS.lock().unwrap() = monitors.iter().map(|m| (m.hmon, m.work_area)).collect();
+    WALLPAPER_GEN.fetch_add(1, Ordering::AcqRel);
+    wp_schedule(delay);
+}
+
+/// Free crops this thread owns (untaken slot entries, or a compositor's own).
+unsafe fn wp_free(entries: Vec<WpEntry>) {
+    for e in entries {
+        let _ = DeleteObject(HGDIOBJ(e.bmp as *mut c_void));
+    }
+}
+
+/// Wallpaper cache counters, for the counters line and the render log.
+fn wp_counters() -> String {
+    format!(
+        "wp_hit={} wp_miss={} wp_stale={} wp_nosrc={} wp_renders={} wp_render_ms={}",
+        WP_HIT.load(Ordering::Relaxed),
+        WP_MISS.load(Ordering::Relaxed),
+        WP_STALE.load(Ordering::Relaxed),
+        WP_NOSRC.load(Ordering::Relaxed),
+        WP_RENDERS.load(Ordering::Relaxed),
+        WP_RENDER_MS.load(Ordering::Relaxed),
+    )
+}
+
+/// A compositor's own wallpaper crops, taken from its WP_SLOTS slot. Lives on
+/// that compositor thread, which is their only owner and only deleter.
+struct WpCache {
+    slot: usize,
+    own: Vec<WpEntry>,
+}
+
+impl WpCache {
+    fn new(slot: usize) -> WpCache {
+        WpCache {
+            slot,
+            own: Vec::new(),
+        }
+    }
+
+    /// The current crop for (hmon, exact work area), or 0 on a miss. Never
+    /// renders: a miss means a flat slide or an instant glide, not a wait on
+    /// Explorer while the manager is blocked on our overlay signal. The
+    /// returned bitmap stays owned here; the caller only selects it for the
+    /// duration of one animation.
+    unsafe fn get(&mut self, hmon: isize, work_area: RECT) -> isize {
+        // Take whatever the capture thread published since last time; the
+        // swap is the only work under the lock, DeleteObject runs after it.
+        let fresh = std::mem::take(&mut *WP_SLOTS[self.slot].lock().unwrap());
+        if !fresh.is_empty() {
+            wp_free(std::mem::replace(&mut self.own, fresh));
+        }
+        // The gen only grows, so a stale crop can never become usable again:
+        // free it now rather than carry megabytes of dead bitmap around.
+        let cur = WALLPAPER_GEN.load(Ordering::Acquire);
+        let mut stale = false;
+        self.own.retain(|e| {
+            if e.gen == cur {
+                return true;
+            }
+            stale |= e.hmon == hmon && e.rect == work_area;
+            let _ = DeleteObject(HGDIOBJ(e.bmp as *mut c_void));
+            false
+        });
+        let hit = self
+            .own
+            .iter()
+            .find(|e| wp_entry_usable(e.gen, cur, e.hmon, e.rect, hmon, work_area));
+        match hit {
+            Some(e) => {
+                WP_HIT.fetch_add(1, Ordering::Relaxed);
+                e.bmp
+            }
+            None => {
+                let counter = if stale { &WP_STALE } else { &WP_MISS };
+                counter.fetch_add(1, Ordering::Relaxed);
+                log_debug!(
+                    "wallpaper: {} for {:#x} (slot {}, gen {cur})",
+                    if stale { "stale crop" } else { "no crop" },
+                    hmon,
+                    self.slot
+                );
+                0
+            }
+        }
+    }
+}
+
+/// Class check for the cached wallpaper source: after an Explorer restart the
+/// old HWND value can belong to an unrelated window.
+unsafe fn is_wallpaper_class(h: HWND) -> bool {
+    let mut buf = [0u16; 16];
+    let n = (GetClassNameW(h, &mut buf).max(0) as usize).min(buf.len());
+    let class = String::from_utf16_lossy(&buf[..n]);
+    class == "WorkerW" || class == "Progman"
+}
+
+/// The wallpaper source window, cached. Validated on every use (IsWindow +
+/// WorkerW/Progman class); the 0x052C nudge and the EnumWindows walk run only
+/// on a miss. Capture thread only.
+unsafe fn wp_source() -> HWND {
+    let cached = hwnd_from(WP_SOURCE.load(Ordering::Relaxed));
+    if !cached.0.is_null() && IsWindow(cached).as_bool() && is_wallpaper_class(cached) {
+        return cached;
+    }
+    let src = wallpaper_window();
+    WP_SOURCE.store(src.0 as isize, Ordering::Relaxed);
+    src
+}
 
 /// Find the desktop window that paints the wallpaper. On Win10/11 it's usually a
 /// WorkerW spawned behind the icon host (SHELLDLL_DefView); on some configs the
 /// wallpaper is on Progman itself, which is the fallback. Returns null if neither.
+/// Capture thread only (it sends to Explorer; see the cache notes above).
 unsafe fn wallpaper_window() -> HWND {
     let progman = FindWindowW(w!("Progman"), PCWSTR::null()).unwrap_or(HWND(std::ptr::null_mut()));
     if !progman.0.is_null() {
@@ -4029,120 +6026,240 @@ unsafe extern "system" fn wp_enum(top: HWND, lp: LPARAM) -> BOOL {
     BOOL(1)
 }
 
-/// Capture the wallpaper under `work_area` into a GPU-backed DDB, or 0 on failure
-/// (caller then falls back to a flat slide). Captured fresh every slide (on the
-/// worker thread) so it's always the CURRENT wallpaper — no cache to go stale when
-/// the user changes it.
-unsafe fn capture_wallpaper(work_area: RECT) -> isize {
-    let w = work_area.right - work_area.left;
-    let h = work_area.bottom - work_area.top;
-    if w <= 0 || h <= 0 {
-        return 0;
-    }
-    let src = wallpaper_window();
-    if src.0.is_null() {
-        if !WP_DIAG.swap(true, Ordering::Relaxed) {
-            log_info!("wallpaper: no Progman/WorkerW found -> flat slide");
+enum WpOutcome {
+    Published,
+    Skipped,
+    NoSource,
+    Failed,
+}
+
+/// One render on the capture thread: a single PrintWindow of the wallpaper
+/// window, cropped once per (monitor, work area) per compositor and handed to
+/// the WP_SLOTS.
+unsafe fn wp_render() -> WpOutcome {
+    if !WP_WANTED.load(Ordering::Relaxed) {
+        // No animation reads the wallpaper: no Explorer round trip at all (not
+        // even the 0x052C nudge), and drop anything nobody will take.
+        for slot in &WP_SLOTS {
+            let old = std::mem::take(&mut *slot.lock().unwrap());
+            wp_free(old);
         }
-        return 0;
+        return WpOutcome::Skipped;
+    }
+    // Stamp with the gen read BEFORE rendering: a bump during the render makes
+    // these crops stale at once, and that bump already scheduled a re-render.
+    // Read it before the targets too: `wp_publish` stores new targets and only
+    // then bumps, so a gen read here can never be stamped on the old targets.
+    let gen = WALLPAPER_GEN.load(Ordering::Acquire);
+    let targets = WP_TARGETS.lock().unwrap().clone();
+    if targets.is_empty() {
+        return WpOutcome::Skipped;
+    }
+    let t0 = Instant::now();
+    let src = wp_source();
+    if src.0.is_null() {
+        WP_NOSRC.fetch_add(1, Ordering::Relaxed);
+        if !WP_DIAG.swap(true, Ordering::Relaxed) {
+            log_info!("wallpaper: no Progman/WorkerW found -> flat slide, instant glide");
+        }
+        return WpOutcome::NoSource;
     }
     let mut wr = RECT::default();
     if GetWindowRect(src, &mut wr).is_err() {
-        return 0;
+        WP_SOURCE.store(0, Ordering::Relaxed);
+        return WpOutcome::Failed;
     }
     let (ww, wh) = (wr.right - wr.left, wr.bottom - wr.top);
     if ww <= 0 || wh <= 0 {
-        return 0;
+        return WpOutcome::Failed;
     }
     let screen = GetDC(None);
     if screen.0.is_null() {
-        return 0;
+        return WpOutcome::Failed;
     }
     // Render the WHOLE wallpaper window with PrintWindow + PW_RENDERFULLCONTENT
-    // (BitBlt of a DWM-composited desktop window comes back black), then crop the
-    // work-area region out of it.
+    // (BitBlt of a DWM-composited desktop window comes back black), then crop
+    // every work area out of that one render.
     let fulldc = CreateCompatibleDC(screen);
     let fullbmp = CreateCompatibleBitmap(screen, ww, wh);
-    let resdc = CreateCompatibleDC(screen);
-    let resbmp = CreateCompatibleBitmap(screen, w, h);
     let ofb = SelectObject(fulldc, HGDIOBJ(fullbmp.0));
-    let orb = SelectObject(resdc, HGDIOBJ(resbmp.0));
-    let printed = PrintWindow(src, fulldc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
-    let ok = printed
-        && BitBlt(
-            resdc,
-            0,
-            0,
-            w,
-            h,
-            fulldc,
-            work_area.left - wr.left,
-            work_area.top - wr.top,
-            SRCCOPY,
-        )
-        .is_ok();
+    let printed = !fullbmp.is_invalid()
+        && PrintWindow(src, fulldc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool();
+    let mut fresh: [Vec<WpEntry>; 2] = [Vec::new(), Vec::new()];
+    if printed {
+        let cropdc = CreateCompatibleDC(screen);
+        for &(hmon, rect) in &targets {
+            let (w, h) = (rect.right - rect.left, rect.bottom - rect.top);
+            if w <= 0 || h <= 0 {
+                continue;
+            }
+            for set in fresh.iter_mut() {
+                let bmp = CreateCompatibleBitmap(screen, w, h);
+                if bmp.is_invalid() {
+                    continue;
+                }
+                let ocb = SelectObject(cropdc, HGDIOBJ(bmp.0));
+                let ok = BitBlt(
+                    cropdc,
+                    0,
+                    0,
+                    w,
+                    h,
+                    fulldc,
+                    rect.left - wr.left,
+                    rect.top - wr.top,
+                    SRCCOPY,
+                )
+                .is_ok();
+                SelectObject(cropdc, ocb);
+                if ok {
+                    set.push(WpEntry {
+                        hmon,
+                        rect,
+                        gen,
+                        bmp: bmp.0 as isize,
+                    });
+                } else {
+                    let _ = DeleteObject(HGDIOBJ(bmp.0));
+                }
+            }
+        }
+        let _ = DeleteDC(cropdc);
+    }
     SelectObject(fulldc, ofb);
-    SelectObject(resdc, orb);
     let _ = DeleteObject(HGDIOBJ(fullbmp.0));
     let _ = DeleteDC(fulldc);
-    let _ = DeleteDC(resdc);
     let _ = ReleaseDC(None, screen);
+    // The crops are selected on the compositor threads next: flush this
+    // thread's GDI batch before handing them over (GdiFlush docs, GDI objects
+    // shared between threads).
+    let _ = GdiFlush();
+    let ms = t0.elapsed().as_millis() as u32;
     if !WP_DIAG.swap(true, Ordering::Relaxed) {
         let mut buf = [0u16; 64];
         let n = GetClassNameW(src, &mut buf);
         let class = String::from_utf16_lossy(&buf[..n as usize]);
-        log_info!("wallpaper source class '{class}', PrintWindow={printed}, ok={ok}");
+        log_info!("wallpaper source class '{class}', PrintWindow={printed}, render={ms}ms");
     }
-    if !ok {
-        let _ = DeleteObject(HGDIOBJ(resbmp.0));
-        return 0;
+    if !printed {
+        // A failed print can mean a dead or wrong source: rediscover next time.
+        WP_SOURCE.store(0, Ordering::Relaxed);
+        return WpOutcome::Failed;
     }
-    resbmp.0 as isize
+    let glide_ready = !fresh[WP_GLIDE].is_empty();
+    for (slot, set) in WP_SLOTS.iter().zip(fresh) {
+        let old = std::mem::replace(&mut *slot.lock().unwrap(), set);
+        wp_free(old); // never taken, so still this thread's to free
+    }
+    if glide_ready {
+        WP_READY_GEN.store(gen, Ordering::Release);
+    }
+    WP_RENDERS.fetch_add(1, Ordering::Relaxed);
+    WP_RENDER_MS.store(ms, Ordering::Relaxed);
+    log_debug!(
+        "wallpaper: rendered gen {gen} for {} monitor(s) in {ms} ms ({})",
+        targets.len(),
+        wp_counters()
+    );
+    WpOutcome::Published
 }
 
-/// Duplicate a DDB into a fresh GPU-backed bitmap the caller owns. Used to hand
-/// the transition worker its own copies so the cache is never touched off-thread.
-unsafe fn dup_ddb(src: isize, w: i32, h: i32) -> isize {
-    if src == 0 || w <= 0 || h <= 0 {
-        return 0;
-    }
-    let screen = GetDC(None);
-    if screen.0.is_null() {
-        return 0;
-    }
-    let dst = CreateCompatibleBitmap(screen, w, h);
-    if dst.0.is_null() {
-        let _ = ReleaseDC(None, screen);
-        return 0;
-    }
-    let sdc = CreateCompatibleDC(screen);
-    let ddc = CreateCompatibleDC(screen);
-    let so = SelectObject(sdc, HGDIOBJ(src as *mut c_void));
-    let do_ = SelectObject(ddc, HGDIOBJ(dst.0));
-    let _ = BitBlt(ddc, 0, 0, w, h, sdc, 0, 0, SRCCOPY);
-    SelectObject(sdc, so);
-    SelectObject(ddc, do_);
-    let _ = DeleteDC(sdc);
-    let _ = DeleteDC(ddc);
-    let _ = ReleaseDC(None, screen);
-    dst.0 as isize
-}
-
-/// Hand a slide to the transition thread, replacing (and freeing) any request it
-/// hasn't picked up yet so a burst of switches can't leak frozen bitmaps.
-fn dispatch_slide(req: SlideReq) {
-    *SLIDE_READY.lock().unwrap() = false;
-    {
-        let mut slot = SLIDE_REQ.lock().unwrap();
-        if let Some(old) = slot.take() {
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(old.out_bmp as *mut c_void));
-                let _ = DeleteObject(HGDIOBJ(old.in_bmp as *mut c_void));
+/// The wallpaper capture thread: the only caller of `wallpaper_window` and
+/// PrintWindow. Normal priority; sleeps on WP_SCHED_CV between renders.
+fn wallpaper_capture_worker() {
+    // Last render attempt, successful or not, for the TTL backstop: a failing
+    // render retries at most once per WP_TTL rather than after every animation.
+    let mut last_try: Option<Instant> = None;
+    loop {
+        {
+            let mut s = WP_SCHED.lock().unwrap();
+            loop {
+                if std::mem::take(&mut s.ttl_check)
+                    && s.due.is_none()
+                    && !WP_NO_SOURCE.load(Ordering::Relaxed)
+                    && last_try.is_none_or(|t| t.elapsed() >= WP_TTL)
+                {
+                    s.due = Some(Instant::now() + WP_DEBOUNCE);
+                }
+                match s.due {
+                    Some(due) => {
+                        let now = Instant::now();
+                        if now >= due {
+                            s.due = None;
+                            break;
+                        }
+                        s = WP_SCHED_CV.wait_timeout(s, due - now).unwrap().0;
+                    }
+                    None => s = WP_SCHED_CV.wait(s).unwrap(),
+                }
             }
         }
-        *slot = Some(req);
+        // Never load Explorer and DWM with a render mid-animation. Retry soon,
+        // but never earlier than a bump that arrived meanwhile asked for (that
+        // one is still waiting out Explorer's wallpaper fade).
+        if GLIDE_BUSY.load(Ordering::Relaxed) || SLIDE_BUSY.load(Ordering::Relaxed) {
+            let retry = Instant::now() + WP_BUSY_RETRY;
+            let mut s = WP_SCHED.lock().unwrap();
+            s.due = Some(s.due.map_or(retry, |d| d.max(retry)));
+            continue;
+        }
+        let outcome = unsafe { wp_render() };
+        if !matches!(outcome, WpOutcome::Skipped) {
+            last_try = Some(Instant::now());
+        }
+        WP_NO_SOURCE.store(matches!(outcome, WpOutcome::NoSource), Ordering::Relaxed);
     }
+}
+
+/// A request that will never play: its outgoing capture still goes back to the
+/// manager, which keeps it as that workspace's snapshot if nothing newer
+/// replaced it (freeing it instead would leave a burst's visits with the
+/// cover-hold and no slide). Its incoming snapshot is dropped: that workspace
+/// became active with the switch, and its snapshot is re-created from the
+/// outgoing capture when it is next left. Manager thread, no GDI on the
+/// bitmaps here, so nothing to flush.
+fn slide_rehome(req: SlideReq) {
+    let w = req.rect.right - req.rect.left;
+    let h = req.rect.bottom - req.rect.top;
+    SNAP_RETURNS.lock().unwrap().push(SnapReturn {
+        key: (req.hmon, req.old_ws),
+        gen: req.gen,
+        snap: Snap {
+            bmp: req.out_bmp,
+            rects: req.out_rects,
+            w,
+            h,
+        },
+    });
+    // req.in_bmp drops here, after the lock.
+}
+
+/// Hand a slide to the transition thread, replacing any request it hasn't
+/// picked up yet (`slide_rehome`), so a burst of switches can't leak frozen
+/// bitmaps or lose snapshots.
+fn dispatch_slide(req: SlideReq) {
+    // No handshake reset: the wait is keyed by req.gen, so an earlier
+    // request's signal can never release it.
+    let old = SLIDE_REQ.lock().unwrap().replace(req);
     SLIDE_CV.notify_one();
+    if let Some(old) = old {
+        slide_rehome(old); // outside SLIDE_REQ: no nested locks
+    }
+}
+
+/// Take back a slide the worker has not picked up yet (left behind by a
+/// handshake timeout). A switch that raises no overlay of its own calls this,
+/// or that older slide would play later over the finished switch. Returns
+/// whether there was one.
+fn slide_cancel_pending() -> bool {
+    let old = SLIDE_REQ.lock().unwrap().take();
+    match old {
+        Some(old) => {
+            slide_rehome(old);
+            true
+        }
+        None => false,
+    }
 }
 
 // =========================================================================
@@ -4155,7 +6272,8 @@ fn dispatch_slide(req: SlideReq) {
 // places the REAL windows at their targets instantly UNDER the overlay; the
 // worker glides each window's frozen image from its old rect to its new rect
 // over a wallpaper backdrop, then tears the overlay down to reveal the already
-// correct windows. A black/failed wallpaper capture degrades to instant.
+// correct windows. No current wallpaper crop (see the wallpaper cache) degrades
+// to instant.
 // =========================================================================
 
 /// One window's travel for a glide, in work-area-local coordinates.
@@ -4164,13 +6282,112 @@ struct GlideItem {
     new: RECT,
 }
 
+/// Edge jitter (px) under which a window counts as not moving: DWM shadow and
+/// rounding noise. Shared by the "did the layout change?" test and the 1:1 draw.
+const GLIDE_STILL_PX: i32 = 2;
+
+/// Is every edge of `new` within GLIDE_STILL_PX of `old`?
+fn glide_still(old: &RECT, new: &RECT) -> bool {
+    (old.left - new.left).abs() <= GLIDE_STILL_PX
+        && (old.top - new.top).abs() <= GLIDE_STILL_PX
+        && (old.right - new.right).abs() <= GLIDE_STILL_PX
+        && (old.bottom - new.bottom).abs() <= GLIDE_STILL_PX
+}
+
+/// DWM shadow reach (logical px) past a window's rect. The glide's damage box
+/// grows by this much: cut tighter, the moved windows' live shadows would show
+/// at the overlay's edge from frame 0, and the old positions' shadows would
+/// vanish outside it.
+const GLIDE_SHADOW_PX: i32 = 32;
+
+/// Damage covering at least this share (percent) of the work area glides the
+/// whole work area, as before: a near-full capture saves nothing, and the
+/// full path has fewer edge cases.
+const GLIDE_DAMAGE_FULL_PCT: i64 = 90;
+
+/// The work-area-local rect a glide has to cover (ANIM-10): the union of the
+/// old and new rects of every item that actually moves (not glide_still),
+/// grown by `margin` and clamped to the `w` x `h` work area; the whole work
+/// area when that is GLIDE_DAMAGE_FULL_PCT or more of it. None = nothing
+/// visibly moves. Everything outside it is a live window that stays put (or
+/// moves <= GLIDE_STILL_PX and is placed live), so the capture, the overlay
+/// and every frame shrink to it: capture cost is ~5 ms fixed plus area
+/// (re-measured in review: 960x540 10.1 ms, 1920x1080 25.0 ms), and it runs on
+/// the manager before placement.
+fn glide_damage(items: &[GlideItem], margin: i32, w: i32, h: i32) -> Option<RECT> {
+    let mut u: Option<RECT> = None;
+    for it in items.iter().filter(|it| !glide_still(&it.old, &it.new)) {
+        for r in [it.old, it.new] {
+            u = Some(match u {
+                None => r,
+                Some(a) => RECT {
+                    left: a.left.min(r.left),
+                    top: a.top.min(r.top),
+                    right: a.right.max(r.right),
+                    bottom: a.bottom.max(r.bottom),
+                },
+            });
+        }
+    }
+    let u = u?;
+    let d = RECT {
+        left: (u.left - margin).clamp(0, w),
+        top: (u.top - margin).clamp(0, h),
+        right: (u.right + margin).clamp(0, w),
+        bottom: (u.bottom + margin).clamp(0, h),
+    };
+    if d.right <= d.left || d.bottom <= d.top {
+        return None; // every move lies outside the work area: nothing to show
+    }
+    let area = (d.right - d.left) as i64 * (d.bottom - d.top) as i64;
+    if area * 100 >= w as i64 * h as i64 * GLIDE_DAMAGE_FULL_PCT {
+        return Some(RECT {
+            left: 0,
+            top: 0,
+            right: w,
+            bottom: h,
+        });
+    }
+    Some(d)
+}
+
+/// Do `a` and `b` overlap (non-empty intersection)?
+fn rects_overlap(a: &RECT, b: &RECT) -> bool {
+    a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
+}
+
+/// How one glide item is drawn this frame.
+#[derive(Debug, PartialEq, Eq)]
+enum GlideBlit {
+    /// Same size as the source: a plain BitBlt, no scaling path at all.
+    Blit,
+    /// Scaled: StretchBlt (COLORONCOLOR).
+    Stretch,
+    /// Degenerate source or destination: draw nothing.
+    Skip,
+}
+
+fn glide_blit_kind(dw: i32, dh: i32, sw: i32, sh: i32) -> GlideBlit {
+    if dw <= 0 || dh <= 0 || sw <= 0 || sh <= 0 {
+        GlideBlit::Skip
+    } else if dw == sw && dh == sh {
+        GlideBlit::Blit
+    } else {
+        GlideBlit::Stretch
+    }
+}
+
 /// A cosmetic window-glide request handed from the manager to the glide worker.
 /// The worker owns and frees `out_bmp`.
 struct GlideReq {
-    out_bmp: isize,        // HBITMAP: frozen work area before placement (worker frees)
-    rect: RECT,            // work area (overlay geometry)
-    items: Vec<GlideItem>, // per-window old->new travel, work-area-local
+    out_bmp: isize,        // HBITMAP: frozen `area` before placement (worker frees)
+    hmon: isize,           // monitor, with `rect` the wallpaper-crop key
+    rect: RECT,            // work area (the wallpaper crop's extent)
+    area: RECT,            // screen rect glided (glide_damage): capture + overlay geometry
+    items: Vec<GlideItem>, // per-window old->new travel, `area`-local
     dur_ms: u64,
+    queued: Option<Instant>, // dispatch time, for the pickup probe (debug only)
+    ex_style: WINDOW_EX_STYLE, // overlay_ex_style of the configured animation_ms
 }
 static GLIDE_REQ: Mutex<Option<GlideReq>> = Mutex::new(None);
 static GLIDE_CV: Condvar = Condvar::new();
@@ -4179,12 +6396,27 @@ static GLIDE_READY_CV: Condvar = Condvar::new();
 // True from dispatch until the overlay tears down. Lets the manager skip
 // stacking a second glide over a running one (it places instantly instead).
 static GLIDE_BUSY: AtomicBool = AtomicBool::new(false);
+// The monitor that glide is on, stored with GLIDE_BUSY: a glide on one monitor
+// must not count as an overlay over another (see `overlay_up_on`).
+static GLIDE_HMON: AtomicIsize = AtomicIsize::new(0);
 
-fn wait_glide_overlay_up() {
+/// Could a capture of `hmon` right now include one of Astur's own overlays (a
+/// slide or glide running, or tearing down, on that monitor)? Sampled BEFORE
+/// the capture: overlays are only ever started by the manager, so none can
+/// appear during it. Such a capture is fine as a slide's frame 0 (it is what
+/// is on screen) but is never cached as a workspace snapshot.
+fn overlay_up_on(hmon: isize) -> bool {
+    (SLIDE_BUSY.load(Ordering::SeqCst) && SLIDE_HMON.load(Ordering::SeqCst) == hmon)
+        || (GLIDE_BUSY.load(Ordering::SeqCst) && GLIDE_HMON.load(Ordering::SeqCst) == hmon)
+}
+
+/// Glide twin of `wait_slide_overlay_up`; false on timeout.
+fn wait_glide_overlay_up() -> bool {
     let guard = GLIDE_READY.lock().unwrap();
-    let _ = GLIDE_READY_CV
+    let (_guard, res) = GLIDE_READY_CV
         .wait_timeout_while(guard, std::time::Duration::from_millis(250), |up| !*up)
         .unwrap();
+    !res.timed_out()
 }
 
 fn signal_glide_overlay_up() {
@@ -4209,6 +6441,8 @@ fn dispatch_glide(req: GlideReq) {
 
 /// Glide thread: owns its own overlay + message pump, idles on the condvar.
 fn glide_worker() {
+    raise_current_thread(ThreadRole::Compositor);
+    let mut wp = WpCache::new(WP_GLIDE);
     loop {
         let req = {
             let mut slot = GLIDE_REQ.lock().unwrap();
@@ -4219,18 +6453,32 @@ fn glide_worker() {
                 slot = GLIDE_CV.wait(slot).unwrap();
             }
         };
-        unsafe { run_window_glide(req) };
+        unsafe { run_window_glide(req, &mut wp) };
         GLIDE_BUSY.store(false, Ordering::Relaxed);
+        wp_ttl_hint();
     }
 }
 
 /// Composite a window glide: wallpaper backdrop + each window's frozen image
 /// blitted from its old rect to an eased-interpolated rect (StretchBlt covers
-/// resizes). Worker owns and frees `out_bmp`.
-unsafe fn run_window_glide(req: GlideReq) {
-    let full = req.rect;
+/// resizes). Worker owns and frees `out_bmp`; the wallpaper crop stays in `wpc`.
+unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
+    let mut probe = Probe::start("glide");
+    probe.note(format_args!("items={}", req.items.len()));
+    if let Some(q) = req.queued {
+        probe.note(format_args!("pickup={}us", q.elapsed().as_micros()));
+    }
+    // The overlay covers only the glided area (glide_damage); the wallpaper
+    // crop is the whole work area's, read from the matching sub-rect.
+    let full = req.area;
     let w = full.right - full.left;
     let h = full.bottom - full.top;
+    let (wp_x, wp_y) = (full.left - req.rect.left, full.top - req.rect.top);
+    probe.note(format_args!(
+        "area={w}x{h}@{wp_x},{wp_y} of {}x{}",
+        req.rect.right - req.rect.left,
+        req.rect.bottom - req.rect.top
+    ));
     let free_out = || {
         let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
     };
@@ -4239,18 +6487,23 @@ unsafe fn run_window_glide(req: GlideReq) {
         signal_glide_overlay_up();
         return;
     }
-    // Need the still wallpaper to fill vacated areas. If we can't get it, degrade
-    // to an instant switch (no overlay): signal and bail, the manager places the
+    // Need the still wallpaper to fill vacated areas. It comes ready-made from
+    // the capture thread (never rendered here: see the wallpaper cache notes).
+    // With no current crop for this exact monitor + work area, degrade to an
+    // instant switch (no overlay): signal and bail, the manager places the
     // real windows with no animation.
-    let wp = capture_wallpaper(full);
+    let wp = wpc.get(req.hmon, req.rect);
+    probe.mark("wallpaper");
     if wp == 0 {
         free_out();
         signal_glide_overlay_up();
+        probe.note(format_args!("no-wallpaper=instant"));
         return;
     }
     let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+    // Click-through for short animations (see overlay_ex_style).
     let overlay = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        req.ex_style,
         SLIDE_CLASS,
         w!(""),
         WS_POPUP,
@@ -4263,80 +6516,143 @@ unsafe fn run_window_glide(req: GlideReq) {
         hinst,
         None,
     );
+    probe.mark("window");
     let Ok(overlay) = overlay else {
-        let _ = DeleteObject(HGDIOBJ(wp as *mut c_void));
         free_out();
         signal_glide_overlay_up();
         return;
     };
+    if !overlay_make_visible(overlay, req.ex_style) {
+        let _ = DestroyWindow(overlay);
+        free_out();
+        signal_glide_overlay_up();
+        return;
+    }
 
     let odc = GetDC(overlay);
+    let srcdc = CreateCompatibleDC(odc); // frozen before-frame
+    let os = SelectObject(srcdc, HGDIOBJ(req.out_bmp as *mut c_void));
+
+    // Frame 0 must be pixel-identical to the live screen: the exact capture,
+    // presented straight from srcdc (not the wallpaper-composited compose(0.0),
+    // and no back-buffer hop, which was a second full-frame blit before the
+    // signal). CRITICAL ORDER: show the overlay FIRST, THEN present — a blit to a
+    // still-hidden window's DC is clipped away and lost, leaving the overlay
+    // empty so the wallpaper flashes through (see the full note in
+    // run_transition). Show, present, settle, flush, then signal.
+    let _ = ShowWindow(overlay, SW_SHOWNA);
+    let _ = BitBlt(odc, 0, 0, w, h, srcdc, 0, 0, SRCCOPY);
+    let _ = UpdateWindow(overlay);
+    let _ = DwmFlush();
+    signal_glide_overlay_up();
+    probe.mark("signal");
+
+    // Back buffer and wallpaper DC only now: nothing before the signal reads
+    // them, and allocating a fresh w x h bitmap there was manager wait time.
+    // Every compose starts with a full wallpaper blit, so the buffer's initial
+    // contents are never shown. (A retarget mid-glide would have to seed it
+    // from srcdc here first.)
     let backdc = CreateCompatibleDC(odc);
     let back = CreateCompatibleBitmap(odc, w, h);
-    let srcdc = CreateCompatibleDC(odc); // frozen before-frame
     let wpdc = CreateCompatibleDC(odc); // wallpaper backdrop
     let ob = SelectObject(backdc, HGDIOBJ(back.0));
-    let os = SelectObject(srcdc, HGDIOBJ(req.out_bmp as *mut c_void));
     let owp = SelectObject(wpdc, HGDIOBJ(wp as *mut c_void));
-    // Smooth scaling for the resize case (HALFTONE), harmless for pure moves.
-    SetStretchBltMode(backdc, HALFTONE);
+    // Nearest-neighbour, explicitly. HALFTONE was the frame budget (ANIM-7,
+    // measured in review at 950x1060, DDB, GdiFlush-synced): 6.4 ms per
+    // equal-size item and 15 ms scaled, against 0.83 / 1.5 ms for COLORONCOLOR.
+    // From those parts a 3-window frame ran an estimated 16-35 ms against an
+    // 8.3 ms budget, so the teardown landed late. Not the default BLACKONWHITE:
+    // it ANDs pixels together when shrinking. Accepted cost: slight aliasing on
+    // scaled mid-glide frames only; frame 0 is the exact capture and the
+    // reveal is the real window.
+    SetStretchBltMode(backdc, COLORONCOLOR);
 
     // Compose one frame at eased progress `e` (0..=1). At e=0 every window sits
     // at its old rect over the still wallpaper == current screen (no flash). At
     // e=1 every window is at its new rect, pixel-aligned with the real windows
     // placed underneath, so the reveal is seamless.
     let compose = |e: f64| {
-        let _ = BitBlt(backdc, 0, 0, w, h, wpdc, 0, 0, SRCCOPY);
+        let _ = BitBlt(backdc, 0, 0, w, h, wpdc, wp_x, wp_y, SRCCOPY);
         for it in &req.items {
             let lerp = |a: i32, b: i32| (a as f64 + (b - a) as f64 * e).round() as i32;
             let dl = lerp(it.old.left, it.new.left);
             let dt = lerp(it.old.top, it.new.top);
-            let dw = lerp(it.old.right, it.new.right) - dl;
-            let dh = lerp(it.old.bottom, it.new.bottom) - dt;
             let (sw, sh) = (it.old.right - it.old.left, it.old.bottom - it.old.top);
-            if dw > 0 && dh > 0 && sw > 0 && sh > 0 {
-                let _ = StretchBlt(
-                    backdc,
-                    dl,
-                    dt,
-                    dw,
-                    dh,
-                    srcdc,
-                    it.old.left,
-                    it.old.top,
-                    sw,
-                    sh,
-                    SRCCOPY,
-                );
+            // A window that barely changes (within the jitter the manager
+            // already ignores) is drawn 1:1 at its gliding origin: stretching
+            // it by a pixel or two nearest-neighbour would shimmer its text for
+            // the whole glide.
+            let (dw, dh) = if glide_still(&it.old, &it.new) {
+                (sw, sh)
+            } else {
+                (
+                    lerp(it.old.right, it.new.right) - dl,
+                    lerp(it.old.bottom, it.new.bottom) - dt,
+                )
+            };
+            match glide_blit_kind(dw, dh, sw, sh) {
+                // Pure moves keep their exact size every frame (the lerped
+                // edges move together), so this is the common case.
+                GlideBlit::Blit => {
+                    let _ = BitBlt(
+                        backdc,
+                        dl,
+                        dt,
+                        dw,
+                        dh,
+                        srcdc,
+                        it.old.left,
+                        it.old.top,
+                        SRCCOPY,
+                    );
+                }
+                GlideBlit::Stretch => {
+                    let _ = StretchBlt(
+                        backdc,
+                        dl,
+                        dt,
+                        dw,
+                        dh,
+                        srcdc,
+                        it.old.left,
+                        it.old.top,
+                        sw,
+                        sh,
+                        SRCCOPY,
+                    );
+                }
+                GlideBlit::Skip => {}
             }
         }
     };
-
-    // Frame 0 must be pixel-identical to the live screen (exact capture via srcdc,
-    // not the wallpaper-composited compose(0.0)). CRITICAL ORDER: show the overlay
-    // FIRST, THEN present — a blit to a still-hidden window's DC is clipped away and
-    // lost, leaving the overlay empty so the wallpaper flashes through (see the full
-    // note in run_transition). Show, present, settle, flush, then signal.
-    let _ = BitBlt(backdc, 0, 0, w, h, srcdc, 0, 0, SRCCOPY);
-    let _ = ShowWindow(overlay, SW_SHOWNA);
-    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
-    let _ = UpdateWindow(overlay);
-    let _ = DwmFlush();
-    signal_glide_overlay_up();
 
     let dur = req.dur_ms.max(1) as f64;
     let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz
     let start = Instant::now();
     let mut next = start;
     let mut msg = MSG::default();
+    // compose+present time per frame (us), probes only.
+    let mut frame_us: Vec<u32> = Vec::new();
     loop {
         while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if back.is_invalid() {
+            // No back buffer (GDI quota): presenting it would show garbage.
+            // Frame 0 is on screen, the windows are placed under it; reveal.
+            break;
+        }
         let el = start.elapsed().as_secs_f64() * 1000.0;
+        let tf = probe.on().then(Instant::now);
         compose(ease_out_cubic((el / dur).min(1.0)));
         let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+        if let Some(tf) = tf {
+            if frame_us.is_empty() {
+                probe.mark("first_frame");
+            }
+            frame_us.push(tf.elapsed().as_micros() as u32);
+        }
         if el >= dur {
             break;
         }
@@ -4351,9 +6667,8 @@ unsafe fn run_window_glide(req: GlideReq) {
 
     SelectObject(backdc, ob);
     SelectObject(srcdc, os);
-    SelectObject(wpdc, owp);
+    SelectObject(wpdc, owp); // deselected: the crop goes back to `wpc` for reuse
     let _ = DeleteObject(HGDIOBJ(back.0));
-    let _ = DeleteObject(HGDIOBJ(wp as *mut c_void));
     let _ = DeleteDC(backdc);
     let _ = DeleteDC(srcdc);
     let _ = DeleteDC(wpdc);
@@ -4363,12 +6678,20 @@ unsafe fn run_window_glide(req: GlideReq) {
     // are composited before the overlay disappears — no flash on the reveal.
     let _ = DwmFlush();
     let _ = DestroyWindow(overlay);
+    probe.mark("teardown");
+    let (p50, max) = p50_max(&mut frame_us);
+    probe.note(format_args!(
+        "frames={} frame_p50={p50}us frame_max={max}us",
+        frame_us.len()
+    ));
 }
 
 /// Transition thread: owns the slide overlay and pumps its own message loop, so
 /// the overlay is a well-behaved window (never the "not responding" ghost a
 /// pump-less window becomes). Blocks on the condvar when idle.
 fn transition_worker() {
+    raise_current_thread(ThreadRole::Compositor);
+    let mut wp = WpCache::new(WP_SLIDE);
     loop {
         let req = {
             let mut slot = SLIDE_REQ.lock().unwrap();
@@ -4379,7 +6702,13 @@ fn transition_worker() {
                 slot = SLIDE_CV.wait(slot).unwrap();
             }
         };
-        unsafe { run_transition(req) };
+        // Release: the manager reads BUSY then HMON on another thread, so a
+        // BUSY=true it sees must carry this HMON (Relaxed gave no such order).
+        SLIDE_HMON.store(req.hmon, Ordering::Relaxed);
+        SLIDE_BUSY.store(true, Ordering::Release);
+        unsafe { run_transition(req, &mut wp) };
+        SLIDE_BUSY.store(false, Ordering::Release);
+        wp_ttl_hint();
     }
 }
 
@@ -4397,20 +6726,48 @@ const COVER_HOLD_MS: u64 = 48;
 /// onto an adjacent monitor; everything is GDI blits the eye sees as one motion.
 /// Both snapshots are screen BitBlts (gaps/dimming baked in) so the reveal at the
 /// end is pixel-identical to the real windows already placed underneath. The
-/// worker owns and frees both request bitmaps. When `in_bmp == 0` (first visit to
-/// the destination, no cached snapshot) the overlay instead HOLDS the outgoing
-/// frame for `COVER_HOLD_MS` to cover the switch + first paint, then reveals.
-unsafe fn run_transition(req: SlideReq) {
+/// worker frees the incoming bitmap and hands the outgoing one back to the
+/// manager (SnapHome). When `in_bmp` is None (first visit to the destination,
+/// no cached snapshot) the overlay instead HOLDS the outgoing frame for
+/// `COVER_HOLD_MS` to cover the switch + first paint, then reveals. The
+/// wallpaper crop, when one is used, stays owned by `wpc`.
+unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
+    let mut probe = Probe::start("slide");
+    probe.note(format_args!("first_visit={}", req.in_bmp.is_none()));
+    if let Some(q) = req.queued {
+        probe.note(format_args!("pickup={}us", q.elapsed().as_micros()));
+    }
     let full = req.rect;
     let w = full.right - full.left;
     let h = full.bottom - full.top;
-    let free_in = || {
-        let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
-        let _ = DeleteObject(HGDIOBJ(req.in_bmp as *mut c_void));
-    };
-    if w <= 0 || h <= 0 || req.out_bmp == 0 {
-        free_in();
-        signal_slide_overlay_up(); // unblock the manager (no overlay this time)
+    let k = req.gen;
+    // From here on, every return hands `out` back; `req.in_bmp` drops with
+    // `req`. Both are deselected on every path before that.
+    let home = SnapHome(Some(SnapReturn {
+        key: (req.hmon, req.old_ws),
+        gen: k,
+        snap: Snap {
+            bmp: req.out_bmp,
+            rects: req.out_rects,
+            w,
+            h,
+        },
+    }));
+    let out_raw = home.raw();
+    let out_rects = home.rects();
+    let in_raw = req.in_bmp.as_ref().map_or(0, Bmp::raw);
+    if w <= 0 || h <= 0 {
+        signal_slide_overlay_up(k, false); // unblock the manager (no overlay this time)
+        return;
+    }
+    // Picked up after the manager gave up on it (handshake timeout): that
+    // switch is long done, uncovered. Nothing to show.
+    if !slide_gen_live(
+        k,
+        SLIDE_GEN.load(Ordering::SeqCst),
+        SLIDE_ABORT.load(Ordering::SeqCst),
+    ) {
+        probe.note(format_args!("stale=dropped"));
         return;
     }
     // No incoming image == first visit to the destination workspace (no cached
@@ -4418,13 +6775,23 @@ unsafe fn run_transition(req: SlideReq) {
     // switch + the destination's first paint happen underneath it, hidden, then
     // reveal — killing the "background flashes through the windows" pop a
     // freshly-shown (surface-discarded) window makes before it repaints.
-    let have_incoming = req.in_bmp != 0;
-    // Capture the CURRENT wallpaper here on the worker (not cached), so it's always
-    // up to date and the manager isn't blocked by the PrintWindow. 0 = flat slide.
-    let wp = capture_wallpaper(full);
+    let have_incoming = in_raw != 0;
+    // The still wallpaper backdrop, only when a frame will read it: moving
+    // slide/spring frames. A first visit holds frame 0 and fade blends whole
+    // captures, so neither touches it. It comes ready-made from the capture
+    // thread, never rendered here: this used to be a PrintWindow right here,
+    // squarely on the manager's critical path, since the manager waits for our
+    // signal before it switches. Stale or missing = the flat filmstrip (wp == 0).
+    let wants_wp = slide_wants_wallpaper(req.mode, have_incoming);
+    let wp = if wants_wp { wpc.get(req.hmon, full) } else { 0 };
+    probe.mark("wallpaper");
+    if wants_wp && wp == 0 {
+        probe.note(format_args!("no-wallpaper=flat"));
+    }
     let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+    // Click-through for short animations (see overlay_ex_style).
     let overlay = CreateWindowExW(
-        WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+        req.ex_style,
         SLIDE_CLASS,
         w!(""),
         WS_POPUP,
@@ -4437,27 +6804,122 @@ unsafe fn run_transition(req: SlideReq) {
         hinst,
         None,
     );
+    probe.mark("window");
     let Ok(overlay) = overlay else {
-        free_in();
-        signal_slide_overlay_up();
+        signal_slide_overlay_up(k, false);
         return;
     };
+    if !overlay_make_visible(overlay, req.ex_style) {
+        let _ = DestroyWindow(overlay);
+        signal_slide_overlay_up(k, false);
+        return;
+    }
 
-    // One reused back buffer + source DCs; compose into the back buffer then
-    // present in a single blit per frame (no flicker, no per-frame allocation).
+    // Before the signal, only what frame 0 needs: the window DC and the
+    // outgoing capture (plus the incoming one, selected here so no GDI setup is
+    // left between the signal and the first moving frame's inputs).
     let odc = GetDC(overlay);
+    let outdc = CreateCompatibleDC(odc);
+    let oo = SelectObject(outdc, HGDIOBJ(out_raw as *mut c_void));
+    let (indc, oi) = if have_incoming {
+        let dc = CreateCompatibleDC(odc);
+        (dc, SelectObject(dc, HGDIOBJ(in_raw as *mut c_void)))
+    } else {
+        (HDC::default(), HGDIOBJ::default())
+    };
+
+    // Frame 0. CRITICAL: it must be pixel-identical to what's already on
+    // screen, or the instant the overlay is raised it pops (the "flash before
+    // the slide"). `compose(0)` rebuilds the frame from the PrintWindow
+    // wallpaper capture + window rects; if that wallpaper differs even slightly
+    // from the live DWM-composited desktop (acrylic/transparency, sub-pixel
+    // crop), the gaps flash on raise. So frame 0 is the EXACT live screen
+    // capture (`out_bmp`, grabbed by `capture_monitor` a moment ago), presented
+    // straight from outdc to the window: a guaranteed match, and one full-frame
+    // blit before the signal instead of two (there is no back-buffer hop; the
+    // back buffer does not exist yet). The wallpaper-composited path only
+    // kicks in once the windows actually start moving (off != 0), where a
+    // sub-pixel gap diff is invisible under motion.
+    //
+    // CRITICAL ORDER — show the overlay FIRST, then present frame 0 to its DC.
+    // Blitting to the window DC while the overlay is still HIDDEN is clipped to its
+    // (empty) visible region and silently lost; the overlay then comes up empty and
+    // DWM shows the wallpaper underneath until the animation loop's first frame
+    // lands a few ms later. That is exactly the "windows flash hidden (wallpaper),
+    // then reappear and slide" the user reported. Showing first makes the present
+    // land on the now-visible window; `UpdateWindow` settles any pending paint onto
+    // our pixels (erase is suppressed in `slide_wndproc`); `DwmFlush` blocks until
+    // frame 0 is genuinely on the glass. Only THEN signal the manager to do the
+    // real switch underneath the (now actually covering) overlay.
+    //
+    // Last check before anything reaches the screen: if the manager gave up
+    // on this request meanwhile, or a newer one exists, the switch it was for
+    // already happened uncovered, and showing frame 0 now would paint the
+    // pre-switch screen over it. Never shown, so no DwmFlush is needed.
+    if !slide_gen_live(
+        k,
+        SLIDE_GEN.load(Ordering::SeqCst),
+        SLIDE_ABORT.load(Ordering::SeqCst),
+    ) {
+        SelectObject(outdc, oo);
+        let _ = DeleteDC(outdc);
+        if have_incoming {
+            SelectObject(indc, oi);
+            let _ = DeleteDC(indc);
+        }
+        ReleaseDC(overlay, odc);
+        let _ = DestroyWindow(overlay);
+        signal_slide_overlay_up(k, false);
+        probe.note(format_args!("stale=never-shown"));
+        return;
+    }
+    let _ = ShowWindow(overlay, SW_SHOWNA);
+    let _ = BitBlt(odc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
+    let _ = UpdateWindow(overlay);
+    let _ = DwmFlush();
+    signal_slide_overlay_up(k, true);
+    probe.mark("signal");
+    // The handshake lock orders this read after a timeout's abort mark: true
+    // means the manager stopped waiting before our signal and switched
+    // uncovered, so frame 0 is already stale. Take it straight down.
+    let aborted = SLIDE_ABORT.load(Ordering::SeqCst) == k;
+    let _glass = GlassGuard(k);
+    if aborted {
+        probe.note(format_args!("late=torn-down"));
+    } else {
+        let anim_ms = if have_incoming {
+            req.dur_ms
+        } else {
+            COVER_HOLD_MS
+        };
+        glass_on(k, req.hmon, now_ms() + anim_ms);
+    }
+    // The animation clock starts at the signal, before the fade's top overlay
+    // is set up: that setup ends in a DwmFlush (~1 frame, measured 17 ms on
+    // the bench desktop) and would otherwise be added to every fade's end.
+    let start = Instant::now();
+    // Fade: the incoming image on a second, layered overlay above this one,
+    // and DWM does the blend (ANIM-9). None = the GDI AlphaBlend loop below.
+    let fade_top = if req.mode == WsAnim::Fade && have_incoming && !aborted {
+        fade_overlay_up(full, req.ex_style, hinst, indc)
+    } else {
+        None
+    };
+    if fade_top.is_some() {
+        probe.mark("fade_top");
+    }
+
+    // One reused back buffer + wallpaper DC, created only now: nothing before
+    // the signal reads them, and allocating (and first-touching) a fresh w x h
+    // bitmap there was manager wait time. Its initial contents are never shown:
+    // every compose fills it completely (the wallpaper path starts with a full
+    // blit, the flat filmstrip's two blits cover [0, w) for any off in
+    // [target, 0], fade starts with a full blit), and the first-visit hold never
+    // reads it. If a retarget mid-slide is ever added, seed it from outdc here.
     let backdc = CreateCompatibleDC(odc);
     let back = CreateCompatibleBitmap(odc, w, h);
-    let outdc = CreateCompatibleDC(odc);
-    let indc = CreateCompatibleDC(odc);
     let wpdc = CreateCompatibleDC(odc);
     let ob = SelectObject(backdc, HGDIOBJ(back.0));
-    let oo = SelectObject(outdc, HGDIOBJ(req.out_bmp as *mut c_void));
-    let oi = if req.in_bmp != 0 {
-        SelectObject(indc, HGDIOBJ(req.in_bmp as *mut c_void))
-    } else {
-        HGDIOBJ::default()
-    };
     let owp = if wp != 0 {
         Some(SelectObject(wpdc, HGDIOBJ(wp as *mut c_void)))
     } else {
@@ -4471,7 +6933,7 @@ unsafe fn run_transition(req: SlideReq) {
     let compose = |off: i32| {
         if wp != 0 {
             let _ = BitBlt(backdc, 0, 0, w, h, wpdc, 0, 0, SRCCOPY);
-            for r in &req.out_rects {
+            for r in out_rects {
                 let (rw, rh) = (r.right - r.left, r.bottom - r.top);
                 let _ = BitBlt(
                     backdc,
@@ -4505,34 +6967,6 @@ unsafe fn run_transition(req: SlideReq) {
         }
     };
 
-    // Paint frame 0 BEFORE showing the overlay so raising it causes no flash.
-    // CRITICAL: frame 0 must be pixel-identical to what's already on screen, or
-    // the instant the overlay is raised it pops (the "flash before the slide").
-    // `compose(0)` rebuilds the frame from the PrintWindow wallpaper capture +
-    // window rects; if that wallpaper differs even slightly from the live
-    // DWM-composited desktop (acrylic/transparency, sub-pixel crop), the gaps
-    // flash on raise. So for frame 0 we blit the EXACT live screen capture
-    // (`out_bmp`, grabbed by `capture_monitor` a moment ago) straight through —
-    // a guaranteed match. The wallpaper-composited path only kicks in once the
-    // windows actually start moving (off != 0), where a sub-pixel gap diff is
-    // invisible under motion.
-    let _ = BitBlt(backdc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
-    // CRITICAL ORDER — show the overlay FIRST, then present frame 0 to its DC.
-    // Blitting to the window DC while the overlay is still HIDDEN is clipped to its
-    // (empty) visible region and silently lost; the overlay then comes up empty and
-    // DWM shows the wallpaper underneath until the animation loop's first frame
-    // lands a few ms later. That is exactly the "windows flash hidden (wallpaper),
-    // then reappear and slide" the user reported. Showing first makes the present
-    // land on the now-visible window; `UpdateWindow` settles any pending paint onto
-    // our pixels (erase is suppressed in `slide_wndproc`); `DwmFlush` blocks until
-    // frame 0 is genuinely on the glass. Only THEN signal the manager to do the
-    // real switch underneath the (now actually covering) overlay.
-    let _ = ShowWindow(overlay, SW_SHOWNA);
-    let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
-    let _ = UpdateWindow(overlay);
-    let _ = DwmFlush();
-    signal_slide_overlay_up();
-
     // The new ws came from the `dir` side, so the outgoing leaves the opposite
     // way; the incoming sits in the adjacent filmstrip slot (off + dir*w) and is
     // contiguous with it (no seam).
@@ -4540,7 +6974,6 @@ unsafe fn run_transition(req: SlideReq) {
     let dur = req.dur_ms.max(1) as f64;
     let has_wp = wp != 0;
     let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz back-buffer
-    let start = Instant::now();
     let mut next = start;
     let mut msg = MSG::default();
     // Whole-frame constant-alpha blend descriptor, reused for the fade mode.
@@ -4552,57 +6985,135 @@ unsafe fn run_transition(req: SlideReq) {
         SourceConstantAlpha: 0,
         AlphaFormat: 0,
     };
+    // compose+present time per moving frame (us), probes only.
+    let mut frame_us: Vec<u32> = Vec::new();
+    let cover = std::time::Duration::from_millis(COVER_HOLD_MS);
+    let hold_cap = std::time::Duration::from_millis(HOLD_CAP_MS);
+    // The manager hold being honoured (its GLASS value), when this thread first
+    // saw it, and when the manager released it.
+    let mut hold_seen = 0u64;
+    let mut hold_at = start;
+    let mut released_at: Option<Instant> = None;
+    let mut holds = 0u32;
     loop {
         while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if !have_incoming {
-            // First visit: hold frame 0 (already on screen) for the cover window,
-            // then break to the synced reveal. Deliberately NO recompose — blitting
-            // the (window-less) incoming would slide the outgoing off to bare
-            // wallpaper. We just wait while the switch + first paint land beneath.
-            if start.elapsed() >= std::time::Duration::from_millis(COVER_HOLD_MS) {
-                break;
-            }
-            next += frame_dur;
-            let now = Instant::now();
-            if next > now {
-                std::thread::sleep(next - now);
-            } else {
-                next = now;
-            }
-            continue;
-        }
-        let el = start.elapsed().as_secs_f64() * 1000.0;
-        let t = (el / dur).min(1.0);
-        match req.mode {
-            WsAnim::Fade => {
-                // Crossfade whole frames: outgoing underneath, incoming alpha
-                // ramped on top. Both DDBs already bake in wallpaper + gaps, so
-                // the still regions stay rock-steady and only the windows fade.
-                let _ = BitBlt(backdc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
-                blend.SourceConstantAlpha =
-                    (255.0 * ease_out_cubic(t)).round().clamp(0.0, 255.0) as u8;
-                let _ = AlphaBlend(backdc, 0, 0, w, h, indc, 0, 0, w, h, blend);
-            }
-            WsAnim::Spring if has_wp => {
-                // Overshoot past the target then settle. Needs a wallpaper
-                // backdrop: at peak overshoot a thin band past the edge is
-                // exposed and must show the still wallpaper, not black.
-                let off = (target as f64 * ease_out_back(t)).round() as i32;
-                compose(off);
-            }
-            _ => {
-                // Slide (and spring with no wallpaper backdrop — fall back to the
-                // symmetric ease so the overshoot can't expose a black sliver).
-                let off = (target as f64 * ease_in_out_cubic(t)).round() as i32;
-                compose(off);
-            }
-        }
-        let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
-        if el >= dur {
+        let g = if aborted {
+            0
+        } else {
+            GLASS.load(Ordering::SeqCst)
+        };
+        if g >> 16 != k {
+            // Never on the glass (late), or reset as stuck: reveal now.
             break;
+        }
+        if g & GLASS_HOLDS != 0 {
+            // A switch is running under this overlay. Stop advancing (the frame
+            // on the glass stays), keep pumping, and reveal COVER_HOLD_MS after
+            // the manager releases it, which covers the incoming windows' first
+            // paint exactly like a first visit. A newer hold restarts the wait.
+            if g != hold_seen {
+                hold_seen = g;
+                hold_at = Instant::now();
+                released_at = None;
+                holds += 1;
+            }
+            if released_at.is_none() && glass_released(g, SLIDE_RELEASED.load(Ordering::SeqCst)) {
+                released_at = Some(Instant::now());
+            }
+            match released_at {
+                Some(t) if t.elapsed() >= cover => {
+                    if glass_leave(g) {
+                        break;
+                    }
+                    continue; // held again meanwhile
+                }
+                None if hold_at.elapsed() >= hold_cap => {
+                    log_info!("slide hold not released within {HOLD_CAP_MS} ms; revealing");
+                    break;
+                }
+                _ => {}
+            }
+        } else {
+            let done = if !have_incoming {
+                // First visit: hold frame 0 (already on screen) for the cover
+                // window, then the synced reveal. Deliberately NO recompose —
+                // blitting the (window-less) incoming would slide the outgoing
+                // off to bare wallpaper. We just wait while the switch + first
+                // paint land beneath.
+                start.elapsed() >= cover
+            } else if let Some(top) = fade_top {
+                // The whole frame is one attribute call: DWM blends the two
+                // overlays. The GDI crossfade below (now only the fallback) is
+                // a full-frame BitBlt + AlphaBlend + present per frame (~15 ms
+                // at 1080p, re-measured in review), so a 140 ms fade showed
+                // 7-9 frames and ended late. A hold simply stops calling this:
+                // the alpha freezes.
+                let el = start.elapsed().as_secs_f64() * 1000.0;
+                let tf = probe.on().then(Instant::now);
+                let _ =
+                    SetLayeredWindowAttributes(top, COLORREF(0), fade_alpha(el / dur), LWA_ALPHA);
+                if let Some(tf) = tf {
+                    if frame_us.is_empty() {
+                        probe.mark("first_frame");
+                    }
+                    frame_us.push(tf.elapsed().as_micros() as u32);
+                }
+                el >= dur
+            } else if back.is_invalid() {
+                // No back buffer (GDI quota): presenting it would show garbage.
+                // Frame 0 is on screen and the switch is done under it; reveal.
+                true
+            } else {
+                let el = start.elapsed().as_secs_f64() * 1000.0;
+                let t = (el / dur).min(1.0);
+                let tf = probe.on().then(Instant::now);
+                match req.mode {
+                    WsAnim::Fade => {
+                        // Fallback crossfade (no layered top overlay): whole
+                        // frames, outgoing underneath, incoming alpha ramped on
+                        // top. Both DDBs already bake in wallpaper + gaps, so
+                        // the still regions stay rock-steady and only the
+                        // windows fade.
+                        let _ = BitBlt(backdc, 0, 0, w, h, outdc, 0, 0, SRCCOPY);
+                        blend.SourceConstantAlpha = fade_alpha(t);
+                        let _ = AlphaBlend(backdc, 0, 0, w, h, indc, 0, 0, w, h, blend);
+                    }
+                    WsAnim::Spring if has_wp => {
+                        // Overshoot past the target then settle. Needs a
+                        // wallpaper backdrop: at peak overshoot a thin band past
+                        // the edge is exposed and must show the still
+                        // wallpaper, not black.
+                        let off = (target as f64 * ease_out_back(t)).round() as i32;
+                        compose(off);
+                    }
+                    _ => {
+                        // Slide (and spring with no wallpaper backdrop — fall
+                        // back to the symmetric ease so the overshoot can't
+                        // expose a black sliver).
+                        let off = (target as f64 * ease_in_out_cubic(t)).round() as i32;
+                        compose(off);
+                    }
+                }
+                let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+                if let Some(tf) = tf {
+                    if frame_us.is_empty() {
+                        probe.mark("first_frame");
+                    }
+                    frame_us.push(tf.elapsed().as_micros() as u32);
+                }
+                el >= dur
+            };
+            if done {
+                // Off the glass BEFORE the teardown, so a switch arriving now
+                // takes a fresh overlay instead of holding one that is leaving.
+                if glass_leave(g) {
+                    break;
+                }
+                continue; // a hold landed first: honour it
+            }
         }
         next += frame_dur;
         let now = Instant::now();
@@ -4612,29 +7123,116 @@ unsafe fn run_transition(req: SlideReq) {
             next = now;
         }
     }
+    glass_clear(k); // cap hit or reset: off the glass before the teardown too
+    if holds > 0 {
+        probe.note(format_args!("holds={holds}"));
+    }
 
     SelectObject(backdc, ob);
     SelectObject(outdc, oo);
-    SelectObject(indc, oi);
+    if have_incoming {
+        SelectObject(indc, oi);
+        let _ = DeleteDC(indc);
+    }
     if let Some(owp) = owp {
-        SelectObject(wpdc, owp);
+        SelectObject(wpdc, owp); // deselected: the crop goes back to `wpc` for reuse
     }
     let _ = DeleteObject(HGDIOBJ(back.0));
-    let _ = DeleteObject(HGDIOBJ(wp as *mut c_void));
     let _ = DeleteDC(backdc);
     let _ = DeleteDC(outdc);
-    let _ = DeleteDC(indc);
     let _ = DeleteDC(wpdc);
     ReleaseDC(overlay, odc);
-    free_in();
+    // Both deselected: `out` back to the manager now rather than after the
+    // DwmFlush, `in` freed (it was the destination's snapshot, re-created
+    // from the outgoing capture when that workspace is next left).
+    drop(home);
+    drop(req.in_bmp);
     // Sync the reveal to a DWM composition pass. The real windows were placed
     // (and styled) under the overlay long ago, but tearing the overlay down
     // off-vblank can expose a frame before DWM has recomposited them — the
     // "flash" where the snapshot vanishes a beat before the live window paints.
     // Block until the next composed frame so the overlay's last (target-aligned)
     // pixels and the live windows hand off on the same vblank: a clean reveal.
+    match fade_top {
+        // Fade: the bottom overlay (outgoing) goes first, under the top one,
+        // which is opaque at the end, so nothing changes on screen; then the
+        // same synced reveal of the top one. The other order would flash the
+        // old workspace for a frame. (After a capped or frozen hold the top
+        // one may be partly transparent: the live windows then show through
+        // it for that one frame, which sits between the frozen frame and
+        // the reveal.)
+        Some(top) => {
+            let _ = DestroyWindow(overlay);
+            let _ = DwmFlush();
+            let _ = DestroyWindow(top);
+        }
+        None => {
+            let _ = DwmFlush();
+            let _ = DestroyWindow(overlay);
+        }
+    }
+    probe.mark("teardown");
+    let (p50, max) = p50_max(&mut frame_us);
+    probe.note(format_args!(
+        "frames={} frame_p50={p50}us frame_max={max}us",
+        frame_us.len()
+    ));
+}
+
+/// Fade's top overlay (ANIM-9): the incoming snapshot on a second, layered
+/// popup at `full`, above the outgoing overlay, shown at alpha 0 (so the screen
+/// is still exactly the outgoing frame) and then painted. The fade then only
+/// sets its alpha each frame. Run after the signal, so the manager's wait does
+/// not grow. None on any failure, with nothing of it ever visible: the caller
+/// falls back to the GDI crossfade.
+unsafe fn fade_overlay_up(
+    full: RECT,
+    ex_style: WINDOW_EX_STYLE,
+    hinst: HINSTANCE,
+    indc: HDC,
+) -> Option<HWND> {
+    let (w, h) = (full.right - full.left, full.bottom - full.top);
+    // Layered whatever the click-through setting (the alpha is SLWA), and
+    // transparent to input exactly when the outgoing overlay is. Created
+    // last, so it sits above that one: the system puts a new window at the
+    // top of the z-order of its kind (both are topmost).
+    let top = CreateWindowExW(
+        ex_style | WS_EX_LAYERED,
+        SLIDE_CLASS,
+        w!(""),
+        WS_POPUP,
+        full.left,
+        full.top,
+        w,
+        h,
+        None,
+        None,
+        hinst,
+        None,
+    )
+    .ok()?;
+    // Alpha 0 BEFORE the first show: a layered window without attributes is
+    // not drawn at all, and any alpha above 0 would show an unpainted surface.
+    if SetLayeredWindowAttributes(top, COLORREF(0), 0, LWA_ALPHA).is_err() {
+        let _ = DestroyWindow(top);
+        return None;
+    }
+    let _ = ShowWindow(top, SW_SHOWNA);
+    // Paint only now that it is shown: a blit to a hidden window's DC is lost
+    // (the frame-0 trap in run_transition). Alpha 0 is still shown.
+    let dc = GetDC(top);
+    let painted = !dc.0.is_null() && BitBlt(dc, 0, 0, w, h, indc, 0, 0, SRCCOPY).is_ok();
+    if !dc.0.is_null() {
+        ReleaseDC(top, dc);
+    }
+    if !painted {
+        let _ = DestroyWindow(top);
+        return None;
+    }
+    let _ = UpdateWindow(top);
+    // Its pixels composed before any alpha above 0 can reveal them.
     let _ = DwmFlush();
-    let _ = DestroyWindow(overlay);
+    Some(top)
 }
 
 /// WndProc for the slide overlay: swallow background erase (the GDI blits own
@@ -4647,6 +7245,24 @@ unsafe extern "system" fn slide_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM)
     DefWindowProcW(h, msg, w, l)
 }
 
+/// The outgoing hide order: list order, except that the real OS foreground,
+/// when it is one of them, goes last. SW_HIDE on the foreground makes Windows
+/// activate a replacement, and in list order that could be another outgoing
+/// window, hidden next, and so on: a chain of cross-process activations and
+/// FOREGROUND events, each of which could bounce the switch back through
+/// Cmd::Focused. Last, every other outgoing window is already hidden, so none
+/// of them can be picked. Keyed on GetForegroundWindow, never ws.focused: the
+/// foreground may be on another monitor or be an owned dialog, and then list
+/// order is kept. No allocation.
+fn hide_order(outgoing: &[isize], fg: isize) -> impl Iterator<Item = isize> + '_ {
+    let last = (fg != 0 && outgoing.contains(&fg)).then_some(fg);
+    outgoing
+        .iter()
+        .copied()
+        .filter(move |&h| Some(h) != last)
+        .chain(last)
+}
+
 /// Instant workspace switch: hide the old set, reveal + tile the new. Used when
 /// the slide compositor is disabled or not applicable.
 unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
@@ -4657,7 +7273,8 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     // EVENT_OBJECT_HIDE can never race the marker (see the static's comment).
     {
         let ws = &mgr.monitors[mi].workspaces[old].windows;
-        for &h in ws.iter() {
+        let fg = GetForegroundWindow().0 as isize;
+        for h in hide_order(ws, fg) {
             mark_hidden_by_us(h);
             let _ = ShowWindow(hwnd_from(h), SW_HIDE);
         }
@@ -4673,7 +7290,14 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
                 continue;
             }
             unmark_hidden_by_us(h);
-            let _ = ShowWindow(hwnd_from(h), SW_SHOW);
+            // SHOWNA: reveal without activating. SW_SHOW activated every
+            // window it showed (one cross-process activate/deactivate chain
+            // and FOREGROUND event each), only for focus_window(f) to pick the
+            // real target right after (SWITCH-4). Not SetWindowPos with
+            // SWP_SHOWWINDOW: the hide above is ShowWindow, which sends
+            // WM_SHOWWINDOW(FALSE), and only ShowWindow sends the matching
+            // TRUE that frameworks tracking visibility through it wait for.
+            let _ = ShowWindow(hwnd_from(h), SW_SHOWNA);
         }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
@@ -4684,7 +7308,8 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
 
 /// Capture a monitor's current pixels into a GPU-backed off-screen bitmap (DDB,
 /// not a DIB — so ~no process RAM). Returns the HBITMAP as an isize, or 0 on
-/// failure. The caller hands it to the transition thread, which frees it.
+/// failure. The caller hands it to a compositor thread: the glide worker frees
+/// it; the transition worker hands it back as the left workspace's snapshot.
 unsafe fn capture_monitor(full: RECT) -> isize {
     let w = full.right - full.left;
     let h = full.bottom - full.top;
@@ -4751,9 +7376,17 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     if n == old || n >= mgr.monitors[mi].workspaces.len() {
         return;
     }
+    let mut probe = Probe::start("switch");
+    probe.note(format_args!("mon={mi} ws={old}->{n}"));
+    // Settle focus-follows-mouse from the START too, not only at the end: with
+    // a click-through overlay the hover poll can see a window of the new
+    // workspace while this switch is still running, and its FocusMouse,
+    // processed after, would override the focus chosen below (the 2026-06-26
+    // "FFM fought keyboard switches" fix). Cmd::FocusMouse re-checks it.
+    bump_follow_settle();
     // Not gated on tiling: the transition is cosmetic and works in float mode too.
     let mode = WsAnim::from_cfg(&mgr.cfg);
-    let want_slide = mgr.cfg.animations && mgr.cfg.animation_ms > 0 && mode != WsAnim::Off;
+    let mut want_slide = mgr.cfg.animations && mgr.cfg.animation_ms > 0 && mode != WsAnim::Off;
     let dir = if n > old { 1 } else { -1 };
     let hmon = mgr.monitors[mi].hmon;
     // Slide region = the tiling work area, NOT the full monitor. This excludes the
@@ -4761,37 +7394,112 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     let full = mgr.monitors[mi].work_area;
     let (w, h) = (full.right - full.left, full.bottom - full.top);
 
+    // Empty to empty: nothing but wallpaper would move, so no capture, no
+    // overlay handshake and no 200 ms of click-eating overlay (SWITCH-17).
+    // "Empty" is `windows`, so floating, minimised and scratchpad windows all
+    // count as content. The old workspace's snapshot is from when it last had
+    // windows and would ghost them into its next slide: drop it. A slide left
+    // pending by a handshake timeout would otherwise play later over this
+    // switch.
+    if want_slide
+        && mgr.monitors[mi].workspaces[old].windows.is_empty()
+        && mgr.monitors[mi].workspaces[n].windows.is_empty()
+    {
+        want_slide = false;
+        let dropped = snap_remove(hmon, old);
+        let cancelled = slide_cancel_pending();
+        probe.note(format_args!(
+            "empty=skip snap_removed={dropped} pending_cancelled={cancelled}"
+        ));
+    }
+    // A slide already on this monitor's glass: run this switch under it (see
+    // the overlay state notes). No capture of that half-slid frame, no wait
+    // for the one worker to finish it, no second overlay replaying it.
+    let held = if want_slide { slide_hold(hmon) } else { None };
+    if let Some(v) = held {
+        probe.note(format_args!("held={v:#x}"));
+    }
+    // Not holdable but still up on this monitor: it is on its way out (its
+    // animation done, or its hold released) or past its hold window. Let its
+    // teardown finish before capturing. A capture of it is the frozen frame,
+    // not the windows now under it: the next slide's frame 0 would replay it
+    // after the reveal (a jump back), and it could not be kept as a snapshot.
+    // The one worker has to finish that teardown before it can pick up our
+    // request anyway, so this costs at most the capture time.
+    let slide_here =
+        || SLIDE_BUSY.load(Ordering::SeqCst) && SLIDE_HMON.load(Ordering::SeqCst) == hmon;
+    if want_slide && held.is_none() && slide_here() {
+        let t = Instant::now();
+        while slide_here() && t.elapsed() < std::time::Duration::from_millis(SLIDE_LEAVE_WAIT_MS) {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        probe.mark("leave_wait");
+    }
+    // Store the captures the worker has handed back since the last switch.
+    // Here, after the leave wait, so the return of a slide that wait just saw
+    // finish is included: its capture may be `n`'s snapshot.
+    snap_drain();
+    // Sampled before the capture: whether it can include an overlay of ours.
+    let busy = want_slide && held.is_none() && overlay_up_on(hmon);
+
     // Freeze the outgoing workspace BEFORE the switch, while it's still on screen,
     // along with the work-area-local rects of its tiled windows (so only the
     // windows slide and the wallpaper in the gaps stays put).
-    let out = if want_slide { capture_monitor(full) } else { 0 };
-    let out_rects: Vec<RECT> = if out != 0 {
-        ws_window_rects(mgr, mi, old, full)
+    let out = if want_slide && held.is_none() {
+        Bmp::new(capture_monitor(full))
     } else {
-        Vec::new()
+        None
     };
+    probe.mark("capture");
 
     // Push: the worker raises an overlay showing the outgoing image (frame 0 ==
     // current screen, so no visible change) and signals back once it covers the
     // monitor. We then do the real switch UNDERNEATH it — that's what stops the
-    // destination workspace flashing before the animation. Incoming image is the
-    // snapshot from the last time we left `n`; the worker gets private copies.
-    // Always raise the overlay when we have an outgoing capture — even on the FIRST
-    // visit to `n`, where there's no cached snapshot to slide in. With an incoming
-    // image the worker animates (slide/spring/fade); without one it briefly holds
-    // the outgoing frame to cover the switch + first paint, then reveals. Either
-    // way the destination never flashes its background before it repaints.
-    if out != 0 {
-        let (in_bmp, in_rects) = match snap_get(hmon, n) {
-            Some((b, r)) => (dup_ddb(b, w, h), r),
-            None => (0, Vec::new()), // first visit: cover-and-reveal, no slide image
+    // destination workspace flashing before the animation. Both images move by
+    // single-owner hand-off, never shared: the incoming one is the snapshot
+    // from the last time we left `n`, taken out of the cache; the outgoing one
+    // goes over uncopied and comes back through SNAP_RETURNS as `old`'s
+    // snapshot. Always raise the overlay when we have an outgoing capture
+    // — even on the FIRST visit to `n`, where there's no cached snapshot to slide
+    // in. With an incoming image the worker animates (slide/spring/fade); without
+    // one it briefly holds the outgoing frame to cover the switch + first paint,
+    // then reveals. Either way the destination never flashes its background
+    // before it repaints.
+    if let Some(out) = out {
+        let out_rects = ws_window_rects(mgr, mi, old, full);
+        // TAKE, not copy (and `out` goes over uncopied too): each full-frame
+        // dup_ddb (7 ms at 1080p per the ANIM audit) came off the manager's
+        // pre-switch path. `n` becomes active now
+        // and its snapshot is re-created from the outgoing capture when it is
+        // next left, so removing it loses nothing. The same holds if
+        // dispatch_slide supersedes this request and frees it unplayed.
+        let (in_bmp, in_rects) = match snap_take(hmon, n, w, h) {
+            Some((b, r)) => (Some(b), r),
+            None => (None, Vec::new()), // first visit: cover-and-reveal, no slide image
         };
-        // Worker captures the still wallpaper backdrop itself (always current).
+        // Both bitmaps are selected on the worker thread next: flush this
+        // thread's GDI batch first (GdiFlush docs, objects shared across threads).
+        let _ = GdiFlush();
+        // The worker takes its still wallpaper backdrop from the capture
+        // thread's cache (flat filmstrip when none is current).
+        let k = SLIDE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        // Decide `old`'s snapshot before the capture can come back. Never an
+        // image that may hold one of our overlays (a mid-slide or mid-glide
+        // frame): it would slide in as `old` next time, so that drops the
+        // previous one instead of keeping this.
+        if busy {
+            let dropped = snap_remove(hmon, old);
+            probe.note(format_args!("nostore=overlay_busy snap_removed={dropped}"));
+        } else {
+            snap_keep(hmon, old, k);
+        }
         dispatch_slide(SlideReq {
-            out_bmp: dup_ddb(out, w, h),
+            out_bmp: out,
             in_bmp,
-            out_rects: out_rects.clone(),
+            out_rects,
             in_rects,
+            hmon,
+            old_ws: old,
             rect: full,
             dir,
             // Floor the duration so a full-monitor push is never too steppy. Fade
@@ -4802,21 +7510,36 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
                 mgr.cfg.animation_ms.max(200) as u64
             },
             mode,
+            queued: probe_now(),
+            gen: k,
+            ex_style: overlay_ex_style(mgr.cfg.animation_ms),
         });
-        wait_slide_overlay_up();
+        probe.mark("dispatch");
+        let up = wait_slide_overlay_up(k);
+        probe.mark(if up {
+            "overlay_up"
+        } else if SLIDE_ABORT.load(Ordering::SeqCst) == k {
+            "overlay_TIMEOUT"
+        } else {
+            "overlay_none"
+        });
     }
 
     // The real, correct switch — instant placement, on this thread. Cannot fail.
     // Now hidden under the overlay (if sliding).
     switch_plain(mgr, mi, old, n);
+    probe.mark("plain");
     queue_workspace_wallpaper(mgr, mi, n);
     queue_manager_state(mgr);
 
-    // Cache the fresh outgoing as `old`'s snapshot for next time (takes ownership
-    // of `out`, freeing any previous snapshot of that ws). First visit to a ws
-    // has no snapshot, so its first entry is an instant switch.
-    if out != 0 {
-        snap_store(hmon, old, out, out_rects);
+    // A captured switch settled `old`'s snapshot before its dispatch (the
+    // capture comes back from the worker and is kept then). First visit to a
+    // ws has no snapshot, so its first entry is a cover-hold, not a slide. A
+    // held switch captured nothing, so `old`'s previous snapshot predates this
+    // visit, which may have changed it: drop it.
+    if held.is_some() {
+        let dropped = snap_remove(hmon, old);
+        probe.note(format_args!("nostore=held snap_removed={dropped}"));
     }
 
     // Resolve the new workspace's focus, then style every window to its resting
@@ -4833,12 +7556,32 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
         f
     };
     style_active(mgr, mi);
-    STYLED_FOCUS.store(f, Ordering::Relaxed);
+    // Swap, not store: a switch on this monitor while focus was on ANOTHER
+    // monitor used to overwrite STYLED_FOCUS without un-focusing that window,
+    // and apply_styles then saw no change, so two windows looked focused. A
+    // hidden previous focus is left alone: style_active restyles its whole
+    // workspace when it is next shown.
+    let prev = STYLED_FOCUS.swap(f, Ordering::Relaxed);
+    if prev != 0
+        && prev != f
+        && IsWindow(hwnd_from(prev)).as_bool()
+        && IsWindowVisible(hwnd_from(prev)).as_bool()
+    {
+        style_window(hwnd_from(prev), false, &mgr.cfg);
+    }
+    probe.mark("style");
+    // Only now, with the switch done and styled underneath: the worker then
+    // holds COVER_HOLD_MS more for the first paint and reveals.
+    if let Some(v) = held {
+        SLIDE_RELEASED.store(v, Ordering::SeqCst);
+    }
 
     if f != 0 {
         focus_window(f);
+        probe.mark("focus");
+        check_focus_landed(f);
         if mgr.cfg.cursor_follows_focus {
-            center_cursor_on(f);
+            center_cursor_on(mgr, f);
         }
     } else if mgr.cfg.cursor_follows_focus {
         // Empty workspace: park the cursor on that monitor so focus is there.
@@ -4905,6 +7648,8 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
     reserve_bar(&mut fresh, &mgr.cfg);
     mgr.monitors = fresh;
     mgr.primary = primary;
+    // New monitors / work areas: new crop targets, every old crop stale.
+    wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
     // Re-resolve focus to the same physical monitor (its index may have moved);
     // fall back to primary if that screen is gone. Must run before any
     // global_to_ml below — it reads focused_mon in per_monitor mode.
@@ -4955,6 +7700,15 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         for (wi, ws) in mon.workspaces.iter().enumerate() {
             let show = wi == active;
             for &h in &ws.windows {
+                // A scratchpad toggled away stays away, as on a switch: shown
+                // here it popped back while SCRATCHPAD_HIDDEN stayed true, so
+                // the next toggle press only re-hid it.
+                if h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
+                    && SCRATCHPAD_HIDDEN.load(Ordering::Relaxed)
+                {
+                    mark_hidden_by_us(h);
+                    continue;
+                }
                 if show {
                     unmark_hidden_by_us(h);
                 } else {
@@ -4965,6 +7719,40 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
+    retile_all(mgr);
+}
+
+/// SPI_SETWORKAREA with no display change folded in: re-read the work areas
+/// only. Appbars (YASB, docks), taskbar auto-hide and Explorer broadcast it,
+/// often for a change that moves nothing, and `refresh_monitors` rebuilds
+/// every workspace from scratch. A different monitor set means a display
+/// change is under way: take the full path then.
+unsafe fn refresh_work_areas(mgr: &mut Manager) {
+    let fresh = enumerate_monitors();
+    if fresh.len() != mgr.monitors.len()
+        || fresh
+            .iter()
+            .zip(&mgr.monitors)
+            .any(|(f, m)| f.hmon != m.hmon)
+    {
+        refresh_monitors(mgr);
+        return;
+    }
+    let mut changed = false;
+    for (f, m) in fresh.iter().zip(mgr.monitors.iter_mut()) {
+        if f.base_work != m.base_work {
+            m.base_work = f.base_work;
+            changed = true;
+        }
+    }
+    if !changed {
+        log_debug!("work-area change broadcast: no monitor's work area moved");
+        return;
+    }
+    // Cached snapshots show the old layout.
+    snap_clear();
+    reserve_bar(&mut mgr.monitors, &mgr.cfg);
+    wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
     retile_all(mgr);
 }
 
@@ -5129,9 +7917,60 @@ unsafe fn process_extra(mgr: &mut Manager, index: usize) {
     }
 }
 
+/// Show local workspace `ws` on monitor `mi` and focus it: the tail of
+/// Cmd::Switch and Cmd::BarCycle, and of a folded burst of them. Already
+/// showing = move focus (and the cursor) to that monitor, which is also what a
+/// burst that ends where it started does: focused_mon never changes without
+/// focus moving with it.
+unsafe fn show_workspace(mgr: &mut Manager, mi: usize, ws: usize) {
+    mgr.focused_mon = mi;
+    if ws != mgr.monitors[mi].active {
+        // Shows the workspace, retiles, focuses + warps the cursor.
+        switch_monitor_workspace(mgr, mi, ws);
+    } else {
+        let f = mgr.monitors[mi].workspaces[ws].focused;
+        if f != 0 {
+            focus_window(f);
+            if mgr.cfg.cursor_follows_focus {
+                center_cursor_on(mgr, f);
+            }
+        } else if mgr.cfg.cursor_follows_focus {
+            let wa = mgr.monitors[mi].work_area;
+            let _ = SetCursorPos((wa.left + wa.right) / 2, (wa.top + wa.bottom) / 2);
+        }
+    }
+}
+
+/// Drop `h` from whatever workspace holds it and re-tile if that workspace is
+/// on screen. A no-op for an untracked handle.
+unsafe fn untrack_window(mgr: &mut Manager, h: isize) {
+    if SCRATCHPAD_HWND.load(Ordering::Relaxed) == h {
+        SCRATCHPAD_HWND.store(0, Ordering::Relaxed);
+        SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
+    }
+    unmark_hidden_by_us(h); // untracked -> marker would only go stale
+    if let Some((mi, wi)) = mgr.locate(h) {
+        // Out of MANAGED now, not at the sync after this command: the retile
+        // below raises SUPPRESS, and an app re-showing `h` meanwhile would
+        // pass for our own echo (SUPPRESS && is_managed) and be dropped,
+        // leaving a visible window unmanaged with nothing logged.
+        MANAGED.lock().unwrap().retain(|&x| x != h);
+        let ws = &mut mgr.monitors[mi].workspaces[wi];
+        ws.windows.retain(|&x| x != h);
+        ws.floating.retain(|&x| x != h);
+        if ws.focused == h {
+            ws.focused = ws.windows.first().copied().unwrap_or(0);
+        }
+        if wi == mgr.monitors[mi].active {
+            retile_monitor(mgr, mi);
+        }
+    }
+}
+
 unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
     match cmd {
-        Cmd::Add(h) => {
+        Cmd::Add(h, event) => {
+            ev_count(EVC_ADD);
             match mgr.locate(h) {
                 Some((mi, wi)) => {
                     // Already tracked. If an app just surfaced it on a HIDDEN
@@ -5207,29 +8046,67 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         SUPPRESS.store(false, Ordering::Relaxed);
                     }
                 }
-                None => {}
+                None => {
+                    // Rejection probe: which check refused the window and which
+                    // event asked, so the Add rate can be attributed. Re-walks
+                    // the checks (debug only); the window may have changed since
+                    // the guard ran, hence "now-passes".
+                    if log_on(LOG_DEBUG) {
+                        let hwnd = hwnd_from(h);
+                        let trigger = match event {
+                            EVENT_OBJECT_SHOW => "show",
+                            EVENT_SYSTEM_FOREGROUND => "foreground",
+                            _ => "other",
+                        };
+                        log_debug!(
+                            "add rejected {h:#x} reason={} class='{}' event={trigger}",
+                            manage_reject(hwnd).unwrap_or("now-passes"),
+                            window_class(hwnd)
+                        );
+                    }
+                }
             }
         }
-        Cmd::Remove(h) => {
-            if SCRATCHPAD_HWND.load(Ordering::Relaxed) == h {
-                SCRATCHPAD_HWND.store(0, Ordering::Relaxed);
-                SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
-            }
-            unmark_hidden_by_us(h); // untracked -> marker would only go stale
-            if let Some((mi, wi)) = mgr.locate(h) {
-                let ws = &mut mgr.monitors[mi].workspaces[wi];
-                ws.windows.retain(|&x| x != h);
-                ws.floating.retain(|&x| x != h);
-                if ws.focused == h {
-                    ws.focused = ws.windows.first().copied().unwrap_or(0);
-                }
-                if wi == mgr.monitors[mi].active {
-                    retile_monitor(mgr, mi);
-                }
+        Cmd::Remove(h) => untrack_window(mgr, h),
+        Cmd::RemoveHidden(h) => {
+            // An app-driven hide (close-to-tray etc.), queued at event time. The
+            // app may have shown the window again before this runs, and that
+            // SHOW's Add is skipped as our own echo when SUPPRESS is set and
+            // MANAGED still lists the window (it is only synced after the
+            // batch). Untracking it then left a VISIBLE window unmanaged for
+            // good (bench: 7 of 8 managed, once). Visible now = keep its slot.
+            // The other order, a re-show landing during this untrack's own
+            // retile, is covered in untrack_window.
+            if !IsWindowVisible(hwnd_from(h)).as_bool() {
+                untrack_window(mgr, h);
             }
         }
         Cmd::Focused(h) => {
             if let Some((mi, wi)) = mgr.locate(h) {
+                // Act only if `h` still owns the foreground now, at processing
+                // time. A queued FOREGROUND event can be stale by the time it
+                // is processed: an echo of a switch's own focus_window that
+                // queued behind the next Switch, or a click on an outgoing
+                // window mid-switch. Following one of those bounced the user
+                // back to a workspace they had just left, and two could keep a
+                // monitor flipping. The whole command is a no-op then (no MRU
+                // touch, no focused_mon), or a stale event would still point
+                // focused_mon at the wrong monitor for MoveToWs / FocusDir.
+                //
+                // This NARROWS the 2026-07-13 decision (5477d14) to leave this
+                // follow unguarded; it does not reverse it. The check is
+                // deliberately neither IsWindowVisible nor was_hidden_by_us:
+                // a Notepad++ second instance calls SetForegroundWindow on its
+                // still-hidden window without showing it, and must still pull
+                // the user to its workspace, which only this branch does
+                // (Cmd::Add's follow needs a visible window). Root owner, so a
+                // dialog the app raised right after still counts. Residual:
+                // after a switch to an empty workspace, or a focus_window that
+                // failed, a stale event for the old foreground still passes.
+                let fg_root = GetAncestor(GetForegroundWindow(), GA_ROOTOWNER).0 as isize;
+                if !focused_follow_allowed(fg_root, h) {
+                    return;
+                }
                 touch_window_mru(h);
                 mgr.focused_mon = mi;
                 if wi == mgr.monitors[mi].active {
@@ -5255,6 +8132,12 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
         }
         Cmd::FocusMouse(h) => {
+            // Queued before a programmatic focus change (a switch, keyboard
+            // focus) but processed after it: the poll's own settle check ran
+            // too early to see it. Drop it rather than yank focus back.
+            if !focus_mouse_allowed(now_ms(), FOLLOW_SETTLE_MS.load(Ordering::Relaxed)) {
+                return;
+            }
             // Focus-follows-mouse: only act on a tracked window on a visible
             // workspace that isn't already the focused one.
             if let Some((mi, wi)) = mgr.locate(h) {
@@ -5306,39 +8189,68 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 if count > 1 {
                     let cur = mgr.monitors[mi].active as i32;
                     let next = (cur + dir).rem_euclid(count as i32) as usize;
-                    mgr.focused_mon = mi;
-                    switch_monitor_workspace(mgr, mi, next);
+                    show_workspace(mgr, mi, next);
                 }
             }
         }
-        Cmd::Reload(cfg) => {
+        Cmd::Reload(cfg, full) => {
+            // Redo only what the new values change: a colour-only save used to
+            // unstyle, re-tile and restyle every window (a visible flash and a
+            // full layout pass). Diffed here against mgr.cfg, not
+            // in the watcher: apply_theme has already replaced UI_CFG, and
+            // mgr.cfg also holds runtime changes the file resets (Alt+H/L
+            // master_ratio, layout switches), which must still re-tile.
+            let g = if full {
+                config::ReloadGroups::full()
+            } else {
+                config::reload_groups(&mgr.cfg, &cfg)
+            };
             mgr.cfg = *cfg;
-            // Gaps/opacity may have changed — cached snapshots are now stale.
-            snap_clear();
-            // Apply new workspace counts / mode, then recompute work areas for
-            // the (possibly changed) bar height. Bars themselves are recreated
-            // on the main thread (WM_RELOAD -> ensure_bars).
-            distribute_workspaces(
-                &mut mgr.monitors,
-                mgr.primary,
-                mgr.cfg.workspaces,
-                mgr.cfg.per_monitor,
-            );
-            reserve_bar(&mut mgr.monitors, &mgr.cfg);
-            // Reset every window's styling so disabling opacity/borders takes
-            // effect, then re-apply from scratch.
-            SUPPRESS.store(true, Ordering::Relaxed);
-            for m in &mgr.monitors {
-                for ws in &m.workspaces {
-                    for &h in &ws.windows {
-                        unstyle_window(hwnd_from(h));
+            if g.wm || g.style || g.anim {
+                // Gaps/opacity may have changed — cached snapshots are now stale.
+                // Animations too: a switch with the slide off neither captures
+                // nor drops the workspace it leaves, so a snapshot from before
+                // an animations-off spell would slide in its old layout.
+                snap_clear();
+            }
+            if g.wm {
+                // Apply new workspace counts / mode, then recompute work areas
+                // for the (possibly changed) bar height. Bars themselves are
+                // recreated on the main thread (WM_RELOAD -> ensure_bars).
+                distribute_workspaces(
+                    &mut mgr.monitors,
+                    mgr.primary,
+                    mgr.cfg.workspaces,
+                    mgr.cfg.per_monitor,
+                );
+                reserve_bar(&mut mgr.monitors, &mgr.cfg);
+            }
+            if g.wm || g.anim {
+                // Bar height and the animation settings may have changed: new
+                // crop targets (and whether to render at all), every old crop
+                // stale.
+                wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
+            }
+            if g.style {
+                // Reset every window's styling so disabling opacity/borders
+                // takes effect, then re-apply from scratch.
+                SUPPRESS.store(true, Ordering::Relaxed);
+                for m in &mgr.monitors {
+                    for ws in &m.workspaces {
+                        for &h in &ws.windows {
+                            unstyle_window(hwnd_from(h));
+                        }
                     }
                 }
+                SUPPRESS.store(false, Ordering::Relaxed);
+                STYLED_FOCUS.store(0, Ordering::Relaxed);
             }
-            SUPPRESS.store(false, Ordering::Relaxed);
-            STYLED_FOCUS.store(0, Ordering::Relaxed);
-            retile_all(mgr);
-            style_all(mgr);
+            if g.wm {
+                retile_all(mgr);
+            }
+            if g.wm || g.style {
+                style_all(mgr);
+            }
         }
         Cmd::FocusDir(d) => {
             if !mgr.tiling {
@@ -5434,23 +8346,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             if mi >= mgr.monitors.len() || local >= mgr.monitors[mi].workspaces.len() {
                 return;
             }
-            mgr.focused_mon = mi;
-            if local != mgr.monitors[mi].active {
-                // Shows the workspace, retiles, focuses + warps the cursor.
-                switch_monitor_workspace(mgr, mi, local);
-            } else {
-                // Already showing it: move focus (and cursor) to that monitor.
-                let f = mgr.monitors[mi].workspaces[local].focused;
-                if f != 0 {
-                    focus_window(f);
-                    if mgr.cfg.cursor_follows_focus {
-                        center_cursor_on(f);
-                    }
-                } else if mgr.cfg.cursor_follows_focus {
-                    let wa = mgr.monitors[mi].work_area;
-                    let _ = SetCursorPos((wa.left + wa.right) / 2, (wa.top + wa.bottom) / 2);
-                }
-            }
+            show_workspace(mgr, mi, local);
         }
         Cmd::MoveToWs(i) => {
             if i >= mgr.cfg.workspaces || !mgr.tiling || mgr.monitors.is_empty() {
@@ -5474,17 +8370,37 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             if !mgr.move_window(h, to_mi, to_local, None) {
                 return;
             }
-            retile_monitor(mgr, from_mi);
+            // On the same monitor the source workspace is about to be hidden by
+            // the switch below (the early return above rules out staying).
+            // Reflowing it first only ran a glide handshake (capture, overlay,
+            // DwmFlush, up to 250 ms) that the slide then covered and cut back
+            // from, before the switch could even start (SWITCH-3). Its windows
+            // are placed while hidden instead, after the switch. Another monitor
+            // keeps the source workspace on screen, so it retiles as before.
+            let reflow_now = move_needs_source_retile(to_mi, from_mi);
+            if reflow_now {
+                retile_monitor(mgr, from_mi);
+            }
             // Follow the window: show its destination workspace, focus it, warp.
             mgr.focused_mon = to_mi;
             if to_local != mgr.monitors[to_mi].active {
                 switch_monitor_workspace(mgr, to_mi, to_local);
+                if !reflow_now {
+                    // The capture the switch just took of from_a (its snapshot
+                    // once the worker hands it back) still shows h in its old
+                    // slot: never slide that in. Then lay out what is left.
+                    snap_remove(mgr.monitors[from_mi].hmon, from_a);
+                    place_hidden_workspace(mgr, from_mi, from_a);
+                }
             } else {
                 retile_monitor(mgr, to_mi);
                 focus_window(h);
                 if mgr.cfg.cursor_follows_focus {
-                    center_cursor_on(h);
+                    center_cursor_on(mgr, h);
                 }
+                // The retile is posted: for a moment the cursor can sit over
+                // the tile's old occupant, and the hover poll would focus it.
+                bump_follow_settle();
             }
         }
         Cmd::ToggleTiling => {
@@ -5523,17 +8439,43 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 let _ = PostMessageW(hwnd_from(h), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
-        Cmd::BarRefresh => {} // the loop's update_bar does the work
-        Cmd::Retile => retile_all(mgr),
+        // The loop's update_bar does the work (and clears the flag again at
+        // its top). Cleared here too, before any title is read, so a rename
+        // from now on queues exactly one more refresh.
+        Cmd::BarRefresh => bar_refresh_clear(&BAR_REFRESH_QUEUED),
+        Cmd::RetileFor(h) => {
+            // Resolved now, not when the event fired: commands queued ahead
+            // of this one (MoveToWs, Remove, a switch) can move h.
+            let target = retile_for_target(
+                mgr.locate(h),
+                |mi| mgr.monitors[mi].active,
+                |mi, wi| mgr.monitors[mi].workspaces[wi].floating.contains(&h),
+            );
+            if let Some(mi) = target {
+                retile_monitor(mgr, mi);
+            }
+        }
         Cmd::RefreshMonitors => refresh_monitors(mgr),
+        Cmd::RefreshWorkAreas => refresh_work_areas(mgr),
         Cmd::DragUnmaximize(h, r) => {
             // The hook predicted this rect; do the parts that can block here.
             let hwnd = hwnd_from(h);
             if IsWindow(hwnd).as_bool() {
-                let _ = ShowWindow(hwnd, SW_RESTORE);
+                // Straight to the predicted rect in one restore (INPUT-9): an
+                // SW_RESTORE went to the old normal rect first, a full app
+                // relayout, and commit_rect then resized it again. Should the
+                // placement not take, SW_RESTORE as before: commit_rect on a
+                // window still WS_MAXIMIZE would corrupt its restore state.
+                let direct = unmaximize_to(hwnd, r);
+                if !direct {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
+                }
+                // Exact-position fixup, and the whole move when the placement
+                // fell back. After a direct restore the size already matches,
+                // so this is at most a move.
                 commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
                 log_debug!(
-                    "DragUnmaximize {h:#x} -> {},{} {}x{}",
+                    "DragUnmaximize {h:#x} -> {},{} {}x{} direct={direct}",
                     r.left,
                     r.top,
                     r.right - r.left,
@@ -5545,8 +8487,30 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // Thumbnail drag began: park the real window far off-screen (size kept)
             // so the user sees only the live DWM mirror. Off-screen, NOT SW_HIDE — a
             // hidden window blanks its thumbnail. The drop (DragMoved/DragResized)
-            // commits the final rect, which restores it on-screen.
+            // brings it back on-screen: the committed rect, or an un-park and
+            // its tile (a tiled resize drop placed instantly).
             if IsWindow(hwnd_from(h)).as_bool() {
+                // Where it came from, for a tiled resize drop's un-park. Read
+                // before the park is posted; an already-parked window keeps
+                // the origin it has.
+                let from = window_rect_of(h);
+                if !rect_parked(&from) {
+                    mgr.park_origin = Some((
+                        h,
+                        POINT {
+                            x: from.left,
+                            y: from.top,
+                        },
+                    ));
+                }
+                // Mixed-DPI check (INPUT-5 C2): compare with the dpi the drop logs.
+                log_debug!(
+                    "DragPark {h:#x} from {},{} dpi={}",
+                    from.left,
+                    from.top,
+                    window_dpi(hwnd_from(h))
+                );
+                SWP_CALLS.fetch_add(1, Ordering::Relaxed);
                 let _ = SetWindowPos(
                     hwnd_from(h),
                     None,
@@ -5554,7 +8518,12 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     -32000,
                     0,
                     0,
-                    SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+                    // Same posting mode as the drop's commit, so the park can
+                    // never land after it (FIFO in the app's queue).
+                    foreign_swp_flags(
+                        SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+                        ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+                    ),
                 );
             }
         }
@@ -5563,6 +8532,8 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // drag (the thumbnail path even parked it off-screen), so this single
             // SetWindowPos is the actual move. It must precede every early-out:
             // floating, unmanaged, and tiling-off windows keep exactly this rect.
+            // `before`: to tell when the (posted) commit has landed.
+            let before = window_rect_of(h);
             commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
             if !mgr.tiling {
                 return;
@@ -5578,6 +8549,14 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 .floating
                 .contains(&h)
             {
+                // Grabbed while its workspace was being switched away (the
+                // overlay lets input through, so the drag can start in the gap
+                // before the hide) and now SW_HIDE'd there. Re-homing it would
+                // put a hidden window into a visible workspace, where nothing
+                // shows it again: tracked but invisible, lost to the user.
+                if from_wi != mgr.monitors[from_mi].active {
+                    return;
+                }
                 let to_mi = monitor_index_for_point(mgr, POINT { x, y });
                 if to_mi != from_mi {
                     let to_a = mgr.monitors[to_mi].active;
@@ -5606,7 +8585,8 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     }
                 }
                 mgr.monitors[from_mi].workspaces[from_a].focused = h;
-                retile_monitor(mgr, from_mi);
+                let force = drop_retile_force_instant(glide_can_run(&mgr.cfg), h, before, r);
+                retile_monitor_opts(mgr, from_mi, force);
             } else {
                 // Move the window to the monitor it was dropped on, landing it
                 // where it was dropped in the tiled order.
@@ -5622,16 +8602,54 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
                 mgr.focused_mon = to_mi;
                 retile_monitor(mgr, from_mi);
-                retile_monitor(mgr, to_mi);
+                // Decided after the source retile: a glide started there makes
+                // this one instant anyway, with no landing wait.
+                let force = drop_retile_force_instant(glide_can_run(&mgr.cfg), h, before, r);
+                retile_monitor_opts(mgr, to_mi, force);
             }
             focus_window(h);
         }
         Cmd::DragResized(h, rect) => {
-            // Alt-resize carries the previewed rect (commit before any early-out so
-            // floating/unmanaged windows land too); the native MOVESIZEEND path
+            // Alt-resize carries the previewed rect; the native MOVESIZEEND path
             // passes None and the window already sits at its final rect.
-            if let Some(r) = rect {
-                commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            //
+            // A tiled resize drop that will be placed instantly skips the commit
+            // of the preview rect (INPUT-5): the retile's one SetWindowPos sizes
+            // it into its slot, so the app relayouts once instead of twice
+            // (preview, then slot). A parked window first moves back, position
+            // only (no relayout), to where it was parked from, so it returns on
+            // its own monitor and DPI. This is the one exception to "commit
+            // before every early-out": every other drop still commits first
+            // (floating, unmanaged and tiling-off windows keep that rect, and a
+            // glide needs the window on screen at it for its capture).
+            let before = window_rect_of(h);
+            let origin = mgr
+                .park_origin
+                .take()
+                .filter(|&(w, _)| w == h)
+                .map(|(_, p)| p);
+            // Glide or instant is decided here, once, and handed to the retile.
+            let glide_wanted = glide_can_run(&mgr.cfg);
+            let plan = rect.map(|_| {
+                let parked = rect_parked(&before);
+                // Parked with no recorded origin: commit, as before.
+                let tiled = tile_target(mgr, h).is_some() && (!parked || origin.is_some());
+                resize_drop_plan(tiled, parked, glide_wanted)
+            });
+            match (rect, plan, origin) {
+                (Some(r), Some(ResizeDrop::Commit), _) => {
+                    commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
+                }
+                (_, Some(ResizeDrop::UnparkOrigin), Some(o)) => {
+                    log_debug!(
+                        "DragResized {h:#x} un-park to {},{} dpi={}",
+                        o.x,
+                        o.y,
+                        window_dpi(hwnd_from(h))
+                    );
+                    unpark_to(h, o);
+                }
+                _ => {}
             }
             if !mgr.tiling {
                 return;
@@ -5687,7 +8705,27 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     r,
                 );
             }
-            retile_monitor(mgr, mi);
+            let force = match plan {
+                Some(ResizeDrop::Commit) => drop_retile_force_instant(glide_wanted, h, before, r),
+                // Skipped commit: the glide was ruled out when the plan was made.
+                Some(_) => true,
+                // MOVESIZEEND: nothing committed, nothing in flight.
+                None => false,
+            };
+            retile_monitor_opts(mgr, mi, force);
+            // A skipped commit must never leave the window parked. The plan
+            // only skips it for a window this retile's layout contains (see
+            // tile_target), so it has been sent its slot. With synchronous
+            // placement that has also landed and is checked here; a posted one
+            // cannot be read back yet, and re-committing the preview after it
+            // would land the preview rect last, off the tile.
+            if matches!(plan, Some(ResizeDrop::UnparkOrigin | ResizeDrop::NoUnpark))
+                && !ASYNC_WINDOW_POS.load(Ordering::Relaxed)
+                && rect_parked(&window_rect_of(h))
+            {
+                log_error!("resize drop left {h:#x} off-screen; committing the preview rect");
+                commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
+            }
         }
         Cmd::LaunchTerminal => {
             // Land the new window on the workspace the cursor is on, not wherever
@@ -5723,7 +8761,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.monitors[mi].workspaces[a].focused = target;
                 focus_window(target);
                 if mgr.cfg.cursor_follows_focus {
-                    center_cursor_on(target);
+                    center_cursor_on(mgr, target);
                 }
             } else if let Some(to_mi) = adjacent_monitor(mgr, mi, dir) {
                 // No neighbour this way: jump focus to the adjacent monitor.
@@ -5743,7 +8781,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     mgr.monitors[to_mi].workspaces[ta].focused = f;
                     focus_window(f);
                     if mgr.cfg.cursor_follows_focus {
-                        center_cursor_on(f);
+                        center_cursor_on(mgr, f);
                     }
                 }
             }
@@ -5775,8 +8813,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
                 retile_monitor(mgr, mi);
                 if mgr.cfg.cursor_follows_focus {
-                    center_cursor_on(h);
+                    center_cursor_on(mgr, h);
                 }
+                // Posted retile: the neighbour may still be under the cursor.
+                bump_follow_settle();
             } else if let Some(to_mi) = adjacent_monitor(mgr, mi, dir) {
                 // Move the window to the adjacent monitor's active workspace.
                 let ta = mgr.monitors[to_mi].active;
@@ -5788,8 +8828,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 retile_monitor(mgr, to_mi);
                 focus_window(h);
                 if mgr.cfg.cursor_follows_focus {
-                    center_cursor_on(h);
+                    center_cursor_on(mgr, h);
                 }
+                bump_follow_settle();
             }
         }
     }
@@ -5922,15 +8963,7 @@ unsafe fn bar_autohide_tick(h: HWND) {
     let Some(ab) = g.as_mut().and_then(|m| m.get_mut(&key)) else {
         return;
     };
-    let yc = ab.y_cur as i32;
-    // Grab tolerance above/below the bar, in physical px for that monitor.
-    let tol = ab.tol;
-    let over_bar = pt.x >= ab.x && pt.x < ab.x + ab.w && pt.y >= yc - tol && pt.y < yc + ab.h + tol;
-    let in_strip = pt.x >= ab.strip.left
-        && pt.x < ab.strip.right
-        && pt.y >= ab.strip.top
-        && pt.y < ab.strip.bottom;
-    let want = over_bar || in_strip;
+    let want = bar_cursor_over(pt, ab.x, ab.w, ab.y_cur as i32, ab.h, ab.tol, ab.strip);
     if want != ab.shown {
         ab.shown = want;
         // Wheel routing only while the bar is on screen.
@@ -5961,6 +8994,53 @@ unsafe fn bar_autohide_tick(h: HWND) {
     }
 }
 
+/// Is `pt` on the bar at (x, y, w, h), with `tol` grab slack (physical px on
+/// its monitor) above and below, or in its reveal `strip`? The auto-hide
+/// timer's test, shared with ensure_bars' snap decision.
+fn bar_cursor_over(pt: POINT, x: i32, w: i32, y: i32, h: i32, tol: i32, strip: RECT) -> bool {
+    let over_bar = pt.x >= x && pt.x < x + w && pt.y >= y - tol && pt.y < y + h + tol;
+    let in_strip =
+        pt.x >= strip.left && pt.x < strip.right && pt.y >= strip.top && pt.y < strip.bottom;
+    over_bar || in_strip
+}
+
+/// May a bar that is going auto-hide jump straight to hidden (BAR-19)? Only
+/// when a fullscreen app is the cause: it used to slide off over the app's
+/// content for ~180-210 ms. Configured auto-hide keeps its slide, and a bar
+/// the pointer is on (or reaching for, in the strip) is left to the timer.
+fn bar_snap_hide(fullscreen: bool, autohide_cfg: bool, cursor_over: bool) -> bool {
+    fullscreen && !autohide_cfg && !cursor_over
+}
+
+/// Fit bar `key`'s auto-hide state to new geometry `geo`, creating it (shown)
+/// if new, and return (the y the bar sits at now, whether it is shown).
+/// `snap` = straight to hidden. Otherwise slide progress is preserved, so
+/// another monitor changing mode or a config/display rebuild never makes a
+/// hidden or mid-slide bar jump.
+fn ah_bar_update(key: isize, geo: &AhBar, snap: bool) -> (i32, bool) {
+    let mut guard = AH_BARS.lock().unwrap();
+    let state = guard
+        .get_or_insert_with(HashMap::new)
+        .entry(key)
+        .or_insert(*geo);
+    if snap {
+        state.shown = false;
+        state.y_cur = state.y_hidden as f64; // progress 1 below
+    }
+    let old_span = state.y_hidden - state.y_shown;
+    let progress = if old_span == 0 {
+        0.0
+    } else {
+        ((state.y_cur - state.y_shown as f64) / old_span as f64).clamp(0.0, 1.0)
+    };
+    *state = AhBar {
+        y_cur: geo.y_shown as f64 + progress * (geo.y_hidden - geo.y_shown) as f64,
+        shown: state.shown,
+        ..*geo
+    };
+    (state.y_cur.round() as i32, state.shown)
+}
+
 /// True while `ensure_bars` is running; set again if something asks for another
 /// pass while one is in flight. Plain atomics rather than a Mutex on purpose:
 /// this guards RE-ENTRANCY on one thread, not access from several. Every caller
@@ -5982,7 +9062,17 @@ static ENSURE_BARS_AGAIN: AtomicBool = AtomicBool::new(false);
 ///
 /// So: coalesce into one posted message and let the pump deliver it after the
 /// DPI change has finished unwinding.
-unsafe fn request_bar_rebuild() {
+///
+/// `display`: a display or DPI change (full bar rebuild + RefreshMonitors).
+/// false = SPI_SETWORKAREA alone, which appbars and taskbar auto-hide
+/// broadcast often, usually moving nothing: RefreshWorkAreas re-reads only the
+/// work areas, where RefreshMonitors rebuilds every workspace (dwindle splits,
+/// focus, snapshots, a ShowWindow per managed window). Either kind folded into
+/// a pending request upgrades it to a display one if either asked.
+unsafe fn request_bar_rebuild(display: bool) {
+    if display {
+        REBUILD_DISPLAY.store(true, Ordering::Relaxed);
+    }
     if BARS_REBUILD_PENDING.swap(true, Ordering::Relaxed) {
         return; // one is already queued; N windows x N monitors collapse to one
     }
@@ -5993,9 +9083,16 @@ unsafe fn request_bar_rebuild() {
     }
     if PostMessageW(hwnd_from(marker), WM_REBUILD_BARS, WPARAM(0), LPARAM(0)).is_err() {
         BARS_REBUILD_PENDING.store(false, Ordering::Relaxed);
+        // This post is the only way a display change reaches the manager (the
+        // bars no longer queue RefreshMonitors themselves, TILE-11), so a
+        // lost one would leave every tile on the old geometry, silently.
+        log_error!("display change dropped: could not post the bar rebuild / monitor refresh");
     }
 }
 static BARS_REBUILD_PENDING: AtomicBool = AtomicBool::new(false);
+/// The pending rebuild includes a display/DPI change. Main thread only, like
+/// BARS_REBUILD_PENDING (every requester and WM_REBUILD_BARS run there).
+static REBUILD_DISPLAY: AtomicBool = AtomicBool::new(false);
 
 /// Re-entrancy-safe wrapper. Never called recursively: an inner request is
 /// folded into one more pass by the outer call instead.
@@ -6060,7 +9157,9 @@ unsafe fn ensure_bars_inner() {
     let mut bars = BARS.lock().unwrap();
     for &(hmon, rcm) in &raw {
         // Configured auto-hide stays global. Fullscreen override is per monitor.
-        let autohide = BAR_AUTOHIDE.load(Ordering::Relaxed) || monitor_has_fullscreen(hmon);
+        let autohide_cfg = BAR_AUTOHIDE.load(Ordering::Relaxed);
+        let fullscreen = monitor_has_fullscreen(hmon);
+        let autohide = autohide_cfg || fullscreen;
         // Physical px for THIS monitor. reserve_bar computes the same number
         // from the same inputs; if these two ever diverge, every tile on a
         // scaled screen is offset by the difference.
@@ -6076,13 +9175,71 @@ unsafe fn ensure_bars_inner() {
         } else {
             rcm.top + margin
         };
-        let hb = if let Some(b) = bars.iter().find(|b| b.hmon == hmon) {
-            let hb = hwnd_from(b.hwnd);
+        // Auto-hide geometry: the reveal band on the docked screen edge, and
+        // where the bar parks while hidden.
+        let strip = if bottom {
+            RECT {
+                left: rcm.left,
+                top: rcm.bottom - edge,
+                right: rcm.right,
+                bottom: rcm.bottom,
+            }
+        } else {
+            RECT {
+                left: rcm.left,
+                top: rcm.top,
+                right: rcm.right,
+                bottom: rcm.top + edge,
+            }
+        };
+        let y_hidden = if bottom {
+            rcm.bottom + edge
+        } else {
+            rcm.top - height - edge
+        };
+        let tol = dpi_px(8, dpi);
+        let snap = autohide && {
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            bar_snap_hide(
+                fullscreen,
+                autohide_cfg,
+                bar_cursor_over(pt, x, w, y, height, tol, strip),
+            )
+        };
+        let geo = AhBar {
+            x,
+            w,
+            h: height,
+            y_shown: y,
+            y_hidden,
+            y_cur: y as f64,
+            shown: true,
+            strip,
+            tol,
+        };
+        // Auto-hide state BEFORE the first placement, so the bar lands at its
+        // final y in one move. It used to be placed shown (SWP_SHOWWINDOW) and
+        // then moved to its hidden/mid-slide y: one frame of bar over a
+        // fullscreen app, and over content on any rebuild while hidden.
+        let existing = bars.iter().find(|b| b.hmon == hmon).map(|b| b.hwnd);
+        let mut ah = match existing {
+            Some(key) if autohide => Some(ah_bar_update(key, &geo, snap)),
+            _ => None,
+        };
+        let y_now = match ah {
+            Some((y_cur, _)) => y_cur,
+            // A new bar has no state yet: it starts shown unless it snaps.
+            None if snap => y_hidden,
+            None => y,
+        };
+        let hb = if let Some(key) = existing {
+            let hb = hwnd_from(key);
             let _ = SetWindowPos(
                 hb,
                 HWND_TOPMOST,
                 x,
-                y,
+                y_now,
                 w,
                 height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
@@ -6095,7 +9252,7 @@ unsafe fn ensure_bars_inner() {
                 w!(""),
                 WS_POPUP,
                 x,
-                y,
+                y_now,
                 w,
                 height,
                 None,
@@ -6113,6 +9270,10 @@ unsafe fn ensure_bars_inner() {
             });
             hb
         };
+        if autohide && ah.is_none() {
+            // The same answer as y_now: a new key starts from `geo`.
+            ah = Some(ah_bar_update(hb.0 as isize, &geo, snap));
+        }
         // Floating bars get rounded corners via a window region (works on
         // Windows 10 and 11 alike). Classic bars clear any leftover region.
         if floating && radius > 0 {
@@ -6121,95 +9282,19 @@ unsafe fn ensure_bars_inner() {
         } else {
             let _ = SetWindowRgn(hb, None, true);
         }
-        // Publish the wheel hit rect for the LL mouse hook.
+        // Publish the wheel hit rect for the LL mouse hook, only while the bar
+        // is on screen (the auto-hide timer republishes as it shows / hides).
+        let shown = ah.is_none_or(|(_, shown)| shown);
         barhit_publish(
             hb.0 as isize,
-            Some(RECT {
+            shown.then_some(RECT {
                 left: x,
                 top: y,
                 right: x + w,
                 bottom: y + height,
             }),
         );
-        // Auto-hide state: reveal band on the docked screen edge.
         if autohide {
-            let strip = if bottom {
-                RECT {
-                    left: rcm.left,
-                    top: rcm.bottom - edge,
-                    right: rcm.right,
-                    bottom: rcm.bottom,
-                }
-            } else {
-                RECT {
-                    left: rcm.left,
-                    top: rcm.top,
-                    right: rcm.right,
-                    bottom: rcm.top + edge,
-                }
-            };
-            let y_hidden = if bottom {
-                rcm.bottom + edge
-            } else {
-                rcm.top - height - edge
-            };
-            let key = hb.0 as isize;
-            let (y_cur, shown) = {
-                let mut guard = AH_BARS.lock().unwrap();
-                let states = guard.get_or_insert_with(HashMap::new);
-                let state = states.entry(key).or_insert(AhBar {
-                    x,
-                    w,
-                    h: height,
-                    y_shown: y,
-                    y_hidden,
-                    y_cur: y as f64,
-                    shown: true,
-                    strip,
-                    tol: dpi_px(8, dpi),
-                });
-                // Preserve slide progress when another monitor changes mode or
-                // config/display geometry rebuilds bars.
-                let old_span = state.y_hidden - state.y_shown;
-                let progress = if old_span == 0 {
-                    0.0
-                } else {
-                    ((state.y_cur - state.y_shown as f64) / old_span as f64).clamp(0.0, 1.0)
-                };
-                state.x = x;
-                state.w = w;
-                state.h = height;
-                state.y_shown = y;
-                state.y_hidden = y_hidden;
-                state.y_cur = y as f64 + progress * (y_hidden - y) as f64;
-                state.strip = strip;
-                state.tol = dpi_px(8, dpi);
-                (state.y_cur.round() as i32, state.shown)
-            };
-            // ensure_bars first places existing windows at shown geometry; restore
-            // preserved hidden/mid-slide position before returning to message pump.
-            let _ = SetWindowPos(
-                hb,
-                HWND_TOPMOST,
-                x,
-                y_cur,
-                w,
-                height,
-                SWP_NOACTIVATE | SWP_SHOWWINDOW,
-            );
-            if shown {
-                barhit_publish(
-                    key,
-                    Some(RECT {
-                        left: x,
-                        top: y,
-                        right: x + w,
-                        bottom: y + height,
-                    }),
-                );
-            } else {
-                barhit_publish(key, None);
-            }
             SetTimer(hb, AH_TIMER_ID, 30, None);
         } else {
             if let Some(m) = AH_BARS.lock().unwrap().as_mut() {
@@ -6288,21 +9373,59 @@ fn format_date(fmt: &str, st: &SYSTEMTIME) -> String {
 const DEFAULT_BAR_ICON_PX: i32 = 20;
 static BAR_ICON_PX_CFG: AtomicI32 = AtomicI32::new(DEFAULT_BAR_ICON_PX);
 static BAR_WIDGET_GAP_CFG: AtomicI32 = AtomicI32::new(16);
-/// Keyed on (exe path, pixel size). Keying on the path alone meant a size
-/// change in the settings GUI kept the old icons until restart, and — once
-/// per-monitor DPI arrived — that a 100% and a 150% monitor would share one
-/// bitmap (see review B-09).
-static BAR_ICONS: Mutex<Option<HashMap<(String, i32), isize>>> = Mutex::new(None);
+// Bar icons live in BAR_ICON_CACHE, keyed on (exe path, pixel size). Keying on
+// the path alone meant a size change in the settings GUI kept the old icons
+// until restart, and — once per-monitor DPI arrived — that a 100% and a 150%
+// monitor would share one bitmap (see review B-09). A size change resolves new
+// keys; the old size is retired and freed only after the manager has published
+// a snapshot without it (bar_icons_retire / bar_icons_sweep), so no paint can
+// draw a destroyed handle and no size tried in the settings GUI stays behind.
 
-/// Drop every cached bar icon and release its HICON. Main thread only.
-unsafe fn bar_icons_clear() {
-    if let Some(map) = BAR_ICONS.lock().unwrap().take() {
-        for (_, icon) in map {
-            if icon > 0 {
-                release_launcher_icon(icon);
-            }
-        }
+/// Bumped by `update_bar` before it looks up any bar icon; BAR_SHOWN_GEN is
+/// the value the snapshot now in BAR was built under. A handle retired at gen
+/// g is in no snapshot once BAR_SHOWN_GEN > g: that build started after it
+/// left the cache, so its lookups could not return it.
+static BAR_ICON_GEN: AtomicU64 = AtomicU64::new(0);
+static BAR_SHOWN_GEN: AtomicU64 = AtomicU64::new(0);
+/// Bar icons dropped from BAR_ICON_CACHE, with the BAR_ICON_GEN they were
+/// dropped at. Main thread only.
+static BAR_ICON_RETIRED: Mutex<Vec<(u64, isize)>> = Mutex::new(Vec::new());
+
+/// Retire every bar icon at a size no connected monitor's bar uses now
+/// (bar_icon_size changed, a monitor left or changed scale). Main thread.
+unsafe fn bar_icons_retire() {
+    let sizes = icon_sizes(BAR_ICON_PX_CFG.load(Ordering::Relaxed));
+    if sizes.is_empty() {
+        return; // no monitor enumerated: keep everything rather than guess
     }
+    let mut out = Vec::new();
+    {
+        let mut cache = BAR_ICON_CACHE.lock().unwrap();
+        // Read under the cache lock, after the drops: see BAR_ICON_GEN.
+        let gen = BAR_ICON_GEN.load(Ordering::SeqCst);
+        cache.retain_live(
+            |_, px, _| sizes.contains(&px),
+            |icon| {
+                if icon > 1 {
+                    out.push((gen, icon));
+                }
+            },
+        );
+    }
+    BAR_ICON_RETIRED.lock().unwrap().extend(out);
+}
+
+/// Free the retired bar icons no snapshot can hold any more. Main thread,
+/// never inside a paint: `paint_bar` draws a clone of BAR, and only this
+/// thread paints bars, so between paints no clone is in use.
+unsafe fn bar_icons_sweep() {
+    let shown = BAR_SHOWN_GEN.load(Ordering::SeqCst);
+    BAR_ICON_RETIRED.lock().unwrap().retain(|&(gen, icon)| {
+        if gen < shown {
+            release_launcher_icon(icon);
+        }
+        gen >= shown
+    });
 }
 
 /// Icon box for the bar currently being painted, in physical px.
@@ -6341,18 +9464,19 @@ unsafe fn window_exe(hwnd: HWND) -> Option<String> {
 /// `px` is the physical size the caller will draw at — icons are resolved at
 /// exactly that size and never rescaled in DrawIconEx (see
 /// plan/known-issues.md 2026-07-10), so it is part of the cache key.
+/// Stamp 0: this runs per window on every bar update, too hot for a metadata
+/// read, so an app updated mid-session keeps its old bar icon until restart.
 unsafe fn bar_app_icon(hwnd: HWND, px: i32) -> isize {
     let Some(path) = window_exe(hwnd) else {
         return -1;
     };
-    let key = (path.clone(), px);
     {
-        let mut cache = BAR_ICONS.lock().unwrap();
-        let map = cache.get_or_insert_with(HashMap::new);
-        if let Some(&icon) = map.get(&key) {
+        let mut cache = BAR_ICON_CACHE.lock().unwrap();
+        if let Some(icon) = cache.get(&path, px, 0) {
             return icon;
         }
-        map.insert(key, 0);
+        // 0 = queued: later lookups wait for the worker instead of re-queueing.
+        cache.insert(&path, px, 0, 0, 0);
     }
     let job = IconJob::Bar(path, px);
     let mut q = ICON_QUEUE.lock().unwrap();
@@ -6401,21 +9525,60 @@ unsafe fn volume_poll() {
     }
 }
 
-/// Nudge the master volume (wheel over the volume widget). Updates the cached
-/// stat immediately so the bar repaint shows the new value without waiting for
-/// the 2s poll.
-unsafe fn volume_adjust(delta: f32) {
-    if let Some(v) = endpoint_volume() {
+// Bar wheel / click -> stats worker. The bar's window procedure runs on the
+// main thread, which pumps the LL hooks, and each notch used to run COM
+// activation plus audio-service RPCs there (an estimated 0.3-3 ms, more while
+// MMDevAPI first loads; not measured). The bar now only adds to these, shows
+// the change optimistically and wakes the worker, which applies it.
+static VOL_DELTA: AtomicIsize = AtomicIsize::new(0); // pending change, whole percent
+static MUTE_TOGGLES: AtomicU32 = AtomicU32::new(0); // pending mute clicks
+static STATS_WAKE: LazyLock<(Mutex<bool>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(false), Condvar::new()));
+
+fn stats_wake() {
+    *STATS_WAKE.0.lock().unwrap() = true;
+    STATS_WAKE.1.notify_one();
+}
+
+/// Sleep up to `timeout`, or until the bar queues a volume change.
+fn stats_wait(timeout: std::time::Duration) {
+    let guard = STATS_WAKE.0.lock().unwrap();
+    let (mut pending, _) = STATS_WAKE
+        .1
+        .wait_timeout_while(guard, timeout, |p| !*p)
+        .unwrap();
+    *pending = false;
+}
+
+/// Queued wheel steps (whole percent) and mute clicks as (level change,
+/// toggle once). An even number of clicks cancels out.
+fn volume_drain(delta_pct: isize, toggles: u32) -> (f32, bool) {
+    (delta_pct as f32 / 100.0, toggles % 2 == 1)
+}
+
+/// Stats worker: apply what the bar queued. The endpoint is resolved fresh,
+/// as the poll does, rather than cached: a cached one would keep adjusting
+/// the previous device after the default output changes. A failed call just
+/// leaves the optimistic value for the next poll to correct.
+unsafe fn volume_apply_pending() {
+    let (step, toggle) = volume_drain(
+        VOL_DELTA.swap(0, Ordering::Relaxed),
+        MUTE_TOGGLES.swap(0, Ordering::Relaxed),
+    );
+    if step == 0.0 && !toggle {
+        return;
+    }
+    let Some(v) = endpoint_volume() else {
+        return;
+    };
+    if step != 0.0 {
         if let Ok(s) = v.GetMasterVolumeLevelScalar() {
-            let ns = (s + delta).clamp(0.0, 1.0);
+            let ns = (s + step).clamp(0.0, 1.0);
             let _ = v.SetMasterVolumeLevelScalar(ns, std::ptr::null());
             STAT_VOL.store((ns * 100.0).round() as isize, Ordering::Relaxed);
         }
     }
-}
-
-unsafe fn volume_toggle_mute() {
-    if let Some(v) = endpoint_volume() {
+    if toggle {
         if let Ok(m) = v.GetMute() {
             let nm = !m.as_bool();
             let _ = v.SetMute(nm, std::ptr::null());
@@ -6479,10 +9642,21 @@ fn stats_worker() {
     let mut prev_idle = 0u64;
     let mut prev_total = 0u64;
     let mut prev_net: Option<(u64, u64, Instant)> = None;
+    let mut next_poll = Instant::now();
     loop {
+        // Before the STATS_ON gate: a notch over a painted volume widget must
+        // apply even while a reload is flipping the gate.
+        unsafe { volume_apply_pending() };
+        let now = Instant::now();
+        if now < next_poll {
+            // Woken early by the bar: back to sleep for the rest of the
+            // interval, without re-running the polls.
+            stats_wait(next_poll - now);
+            continue;
+        }
         if !STATS_ON.load(Ordering::Relaxed) {
             prev_net = None;
-            std::thread::sleep(std::time::Duration::from_millis(500));
+            next_poll = now + std::time::Duration::from_millis(500);
             continue;
         }
         unsafe {
@@ -6563,7 +9737,7 @@ fn stats_worker() {
                 MEDIA_TEXT.lock().unwrap().clear();
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(2000));
+        next_poll = Instant::now() + std::time::Duration::from_millis(2000);
     }
 }
 
@@ -6571,9 +9745,15 @@ fn stats_worker() {
 /// The clock is refreshed separately by each bar's 1s timer, so an idle desktop
 /// causes no repaints from here.
 unsafe fn update_bar(mgr: &Manager) {
+    // Before the early return and before any title read: whatever path
+    // consumes a BarRefresh, the next rename must be able to queue one, or the
+    // title freezes with nothing logged (BAR-10).
+    bar_refresh_clear(&BAR_REFRESH_QUEUED);
     if BARS.lock().unwrap().is_empty() {
         return;
     }
+    // Before the first bar_app_icon below (see BAR_ICON_GEN).
+    let icon_gen = BAR_ICON_GEN.fetch_add(1, Ordering::SeqCst) + 1;
     let hide_empty = mgr.cfg.bar_hide_empty;
     let mut mons = Vec::with_capacity(mgr.monitors.len());
     for (mi, m) in mgr.monitors.iter().enumerate() {
@@ -6634,6 +9814,9 @@ unsafe fn update_bar(mgr: &Manager) {
             .position(|&l| l == m.active)
             .unwrap_or(usize::MAX);
         let fh = m.workspaces.get(m.active).map(|ws| ws.focused).unwrap_or(0);
+        if let Some(slot) = BAR_TITLE_HWND.get(mi) {
+            slot.store(fh, Ordering::Relaxed);
+        }
         let title = if fh != 0 {
             window_title(hwnd_from(fh))
         } else {
@@ -6683,35 +9866,15 @@ unsafe fn update_bar(mgr: &Manager) {
             apps,
         });
     }
-    let (bg, fg, accent, inactive) = themed_bar_colors(&mgr.cfg);
-    let new = BarData {
-        bg,
-        fg,
-        accent,
-        inactive,
-        clock_24h: mgr.cfg.bar_clock_24h,
-        date_format: mgr.cfg.bar_date_format.clone(),
-        clock_format: mgr.cfg.bar_clock_format.clone(),
-        icon_mode: mgr.cfg.bar_icon_mode.clone(),
-        show_app_labels: mgr.cfg.bar_show_app_labels,
-        show_tooltips: mgr.cfg.bar_show_tooltips,
-        cpu_format: mgr.cfg.bar_cpu_format.clone(),
-        mem_format: mgr.cfg.bar_mem_format.clone(),
-        battery_format: mgr.cfg.bar_battery_format.clone(),
-        net_format: mgr.cfg.bar_net_format.clone(),
-        volume_format: mgr.cfg.bar_volume_format.clone(),
-        icon_cpu: mgr.cfg.bar_icon_cpu.clone(),
-        icon_mem: mgr.cfg.bar_icon_mem.clone(),
-        icon_battery: mgr.cfg.bar_icon_battery.clone(),
-        icon_net: mgr.cfg.bar_icon_net.clone(),
-        icon_volume: mgr.cfg.bar_icon_volume.clone(),
-        layout: mgr.cfg.layout.clone(),
-        tiling: mgr.tiling,
-        left: zone_widgets(&mgr.cfg.bar_left, &mgr.cfg),
-        center: zone_widgets(&mgr.cfg.bar_center, &mgr.cfg),
-        right: zone_widgets(&mgr.cfg.bar_right, &mgr.cfg),
+    for slot in BAR_TITLE_HWND.iter().skip(mgr.monitors.len()) {
+        slot.store(0, Ordering::Relaxed);
+    }
+    let new = bar_data_from(
+        &mgr.cfg,
+        THEME_LIGHT.load(Ordering::Relaxed),
+        mgr.tiling,
         mons,
-    };
+    );
 
     // Diff against the previous snapshot so only changed monitors repaint, and
     // seed a pill-highlight slide on any monitor whose active workspace moved.
@@ -6773,6 +9936,7 @@ unsafe fn update_bar(mgr: &Manager) {
         }
     }
     *BAR.lock().unwrap() = new;
+    BAR_SHOWN_GEN.store(icon_gen, Ordering::SeqCst);
     if changed.is_empty() && anim_seeds.is_empty() {
         return;
     }
@@ -6789,6 +9953,41 @@ unsafe fn update_bar(mgr: &Manager) {
                 LPARAM(tx as isize),
             );
         }
+    }
+}
+
+/// A bar snapshot: everything config-derived, around the manager's `mons`.
+/// update_bar and the startup seed both build through here, so the seed can
+/// never disagree with the manager's first snapshot on anything but `mons`.
+fn bar_data_from(cfg: &Config, light: bool, tiling: bool, mons: Vec<MonBar>) -> BarData {
+    let (bg, fg, accent, inactive) = bar_colors(cfg, light);
+    BarData {
+        bg,
+        fg,
+        accent,
+        inactive,
+        clock_24h: cfg.bar_clock_24h,
+        date_format: cfg.bar_date_format.clone(),
+        clock_format: cfg.bar_clock_format.clone(),
+        icon_mode: cfg.bar_icon_mode.clone(),
+        show_app_labels: cfg.bar_show_app_labels,
+        show_tooltips: cfg.bar_show_tooltips,
+        cpu_format: cfg.bar_cpu_format.clone(),
+        mem_format: cfg.bar_mem_format.clone(),
+        battery_format: cfg.bar_battery_format.clone(),
+        net_format: cfg.bar_net_format.clone(),
+        volume_format: cfg.bar_volume_format.clone(),
+        icon_cpu: cfg.bar_icon_cpu.clone(),
+        icon_mem: cfg.bar_icon_mem.clone(),
+        icon_battery: cfg.bar_icon_battery.clone(),
+        icon_net: cfg.bar_icon_net.clone(),
+        icon_volume: cfg.bar_icon_volume.clone(),
+        layout: cfg.layout.clone(),
+        tiling,
+        left: zone_widgets(&cfg.bar_left, cfg),
+        center: zone_widgets(&cfg.bar_center, cfg),
+        right: zone_widgets(&cfg.bar_right, cfg),
+        mons,
     }
 }
 
@@ -7192,6 +10391,9 @@ unsafe fn paint_bar(h: HWND) {
     // the main thread, one bar at a time.
     let dpi = window_dpi(h);
     BAR_PAINT_DPI.store(dpi, Ordering::Relaxed);
+    // Before the clone below: the previous paint's clone is gone and this one
+    // is not taken yet, the one point where no bar holds an icon handle.
+    bar_icons_sweep();
     let mut ps = PAINTSTRUCT::default();
     let win_hdc = BeginPaint(h, &mut ps);
     let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
@@ -7201,7 +10403,8 @@ unsafe fn paint_bar(h: HWND) {
     let _ = GetClientRect(h, &mut rc);
     let h_px = rc.bottom - rc.top;
     let w = rc.right - rc.left;
-    // Double buffer: the pill slide repaints at ~120Hz; direct painting flickers.
+    // Double buffer: the pill slide repaints at up to 100 Hz (a 10 ms timer);
+    // direct painting flickers.
     let bb = backbuf_begin(win_hdc, w, h_px);
     let hdc = bb.as_ref().map(|b| b.dc).unwrap_or(win_hdc);
 
@@ -7352,7 +10555,8 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         WM_PILL_ANIM => {
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
             pill_anim_set(hmon, w.0 as i32, l.0 as i32);
-            // ~120 Hz repaint while the highlight slides.
+            // Fast repaint while the highlight slides: 8 ms asked, but SetTimer
+            // clamps to USER_TIMER_MINIMUM (10 ms), so at most 100 Hz.
             SetTimer(h, PILL_TIMER_ID, 8, None);
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
@@ -7386,10 +10590,12 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         }
         WM_BAR_WHEEL => {
             // Routed from the LL mouse hook (the bar is NOACTIVATE, so the wheel
-            // never reaches it natively). wparam: 1 = up, 0 = down; lparam =
-            // screen x. Over the volume widget the wheel adjusts volume;
-            // anywhere else it cycles workspaces (if enabled).
-            let up = w.0 == 1;
+            // never reaches it natively). wparam: the signed wheel delta
+            // (WHEEL_DELTA = 120 a notch, > 0 = up); lparam = screen x. Over
+            // the volume widget the wheel adjusts volume; anywhere else it
+            // cycles workspaces (if enabled).
+            let delta = w.0 as isize as i32;
+            let up = delta > 0;
             let mut wr = RECT::default();
             let _ = GetWindowRect(h, &mut wr);
             let cx = l.0 as i32 - wr.left;
@@ -7400,11 +10606,33 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                 .and_then(|m| m.get(&(h.0 as isize)).cloned())
                 .unwrap_or_default();
             if lay.vol.1 > lay.vol.0 && cx >= lay.vol.0 && cx < lay.vol.1 {
-                volume_adjust(if up { 0.02 } else { -0.02 });
+                // Queued for the stats worker (no audio COM on this thread);
+                // shown at once, corrected by the worker's real read.
+                let step: isize = if up { 2 } else { -2 };
+                VOL_DELTA.fetch_add(step, Ordering::Relaxed);
+                let cur = STAT_VOL.load(Ordering::Relaxed);
+                if cur >= 0 {
+                    STAT_VOL.store((cur + step).clamp(0, 100), Ordering::Relaxed);
+                }
+                stats_wake();
                 let _ = InvalidateRect(h, None, BOOL(0));
             } else if BAR_WHEEL_WS.load(Ordering::Relaxed) {
                 let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
-                push_cmd(Cmd::BarCycle(hmon, if up { -1 } else { 1 }));
+                // One workspace per full notch, not per event: a high-resolution
+                // wheel or a touchpad sends many small deltas per notch, and
+                // each used to be a whole switch (SWITCH-17).
+                let steps = {
+                    let mut acc = BAR_WHEEL_ACC.lock().unwrap();
+                    let acc = acc
+                        .get_or_insert_with(HashMap::new)
+                        .entry(hmon)
+                        .or_insert(0);
+                    wheel_steps(acc, delta)
+                };
+                if steps != 0 {
+                    // Up = previous workspace.
+                    push_cmd(Cmd::BarCycle(hmon, -steps));
+                }
             }
             LRESULT(0)
         }
@@ -7425,6 +10653,34 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             let changed = BAR_HOVER_HWND.swap(h.0 as isize, Ordering::Relaxed) != h.0 as isize
                 || BAR_HOVER_APP.swap(app, Ordering::Relaxed) != app;
             if changed {
+                let _ = InvalidateRect(h, None, BOOL(0));
+            }
+            // Ask for a WM_MOUSELEAVE once per hover. Without one the tooltip and
+            // hover state stayed painted after the pointer left, until the next
+            // repaint for any other reason (with idle tick skipping, up to a
+            // minute). One pointer, so one tracked bar; TME_LEAVE is one-shot and
+            // re-armed by the next move after each leave.
+            if BAR_LEAVE_ARMED.swap(h.0 as isize, Ordering::Relaxed) != h.0 as isize {
+                let mut tme = TRACKMOUSEEVENT {
+                    cbSize: core::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: h,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut tme);
+            }
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            let me = h.0 as isize;
+            let _ = BAR_LEAVE_ARMED.compare_exchange(me, 0, Ordering::Relaxed, Ordering::Relaxed);
+            // Only if the hover is still ours: the pointer may already be on
+            // another monitor's bar, whose move got here first.
+            if BAR_HOVER_HWND
+                .compare_exchange(me, 0, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+            {
+                BAR_HOVER_APP.store(0, Ordering::Relaxed);
                 let _ = InvalidateRect(h, None, BOOL(0));
             }
             LRESULT(0)
@@ -7463,17 +10719,22 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             {
                 push_cmd(Cmd::BarFocus(hw));
             } else if lay.vol.1 > lay.vol.0 && x >= lay.vol.0 && x < lay.vol.1 {
-                volume_toggle_mute();
+                // Queued like the wheel above.
+                MUTE_TOGGLES.fetch_add(1, Ordering::Relaxed);
+                STAT_MUTE.fetch_xor(true, Ordering::Relaxed);
+                stats_wake();
                 let _ = InvalidateRect(h, None, BOOL(0));
             }
             LRESULT(0)
         }
         // Paint is double-buffered; a background erase would only add flicker.
         WM_ERASEBKGND => LRESULT(1),
-        WM_DISPLAYCHANGE => {
-            push_cmd(Cmd::RefreshMonitors);
-            DefWindowProcW(h, msg, w, l)
-        }
+        // No RefreshMonitors from here (TILE-11). Every bar gets this broadcast,
+        // hidden bars of unplugged monitors too, so each used to queue its own
+        // full refresh, the first ones before the bars were even rebuilt. The
+        // marker gets the same broadcast and queues exactly one, after the
+        // rebuild (WM_REBUILD_BARS).
+        WM_DISPLAYCHANGE => DefWindowProcW(h, msg, w, l),
         // The scale of the monitor this bar sits on changed (Settings ->
         // Display -> Scale, or a dock/undock). ensure_bars re-derives the
         // height/margin/radius from the new DPI, and RefreshMonitors re-reserves
@@ -7483,7 +10744,7 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         // would re-enter this handler from inside its own SetWindowPos — see
         // `request_bar_rebuild`. Ask, repaint, return.
         WM_DPICHANGED => {
-            request_bar_rebuild();
+            request_bar_rebuild(true);
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
         }
@@ -7590,34 +10851,311 @@ fn apply_bar_statics(cfg: &Config) {
     );
 }
 
+/// Startup config load. A file that exists but cannot be read is usually an
+/// editor mid-save holding it open, which clears in milliseconds, so retry
+/// briefly; after that run on the built-in defaults WITHOUT writing anything
+/// (the user's file is still there) and hand the error back to be logged once
+/// the log level is known. `config_watcher(true)` then keeps retrying it.
+fn load_config_for_startup() -> (Config, Option<config::ConfigReadError>) {
+    let mut last_err = None;
+    for attempt in 0..4 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        match load_config() {
+            Ok(cfg) => return (cfg, None),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    (config::default_config(), last_err)
+}
+
+/// Quiet time after the last change to a config file before it is read. It
+/// must span the settings GUI's back-to-back writes of both files (each a
+/// truncate then a write): see review B-10 in `config_watcher`.
+const CONFIG_QUIET: std::time::Duration = std::time::Duration::from_millis(120);
+/// With change notifications working, still compare mtimes this often, for a
+/// notification lost to a buffer overflow or never sent by a network share.
+const CONFIG_BACKSTOP: std::time::Duration = std::time::Duration::from_secs(10);
+/// The old fixed poll, kept for when notifications are unavailable and while a
+/// read keeps failing (an editor holding the file mid-save clears in ms).
+const CONFIG_POLL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Notifier threads -> config watcher: count of matching directory changes.
+static CONFIG_EVENTS: LazyLock<(Mutex<u32>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(0), Condvar::new()));
+/// Cleared when a config directory cannot be watched; the watcher then polls.
+static CONFIG_NOTIFY_OK: AtomicBool = AtomicBool::new(true);
+
+fn config_event_wake() {
+    *CONFIG_EVENTS.0.lock().unwrap() += 1;
+    CONFIG_EVENTS.1.notify_one();
+}
+
+/// Wait up to `timeout` for a config-file change. True = one arrived.
+fn config_event_wait(timeout: std::time::Duration) -> bool {
+    let guard = CONFIG_EVENTS.0.lock().unwrap();
+    let (mut n, _) = CONFIG_EVENTS
+        .1
+        .wait_timeout_while(guard, timeout, |n| *n == 0)
+        .unwrap();
+    std::mem::take(&mut *n) > 0
+}
+
+/// Trailing debounce: every event moves the deadline to event + quiet, so a
+/// burst of writes produces one read, `quiet` after the last of them.
+struct Debounce {
+    quiet: std::time::Duration,
+    due: Option<Instant>,
+}
+
+impl Debounce {
+    fn event(&mut self, now: Instant) {
+        self.due = Some(now + self.quiet);
+    }
+
+    /// How long to wait for the next event: until the deadline, or `idle`
+    /// when nothing is pending.
+    fn wait(&self, now: Instant, idle: std::time::Duration) -> std::time::Duration {
+        self.due
+            .map_or(idle, |due| due.saturating_duration_since(now))
+    }
+}
+
+/// The file names in one `ReadDirectoryChangesW` result: a chain of
+/// FILE_NOTIFY_INFORMATION records (u32 NextEntryOffset, u32 Action, u32
+/// FileNameLength in bytes, then that many bytes of UTF-16). Bounds-checked,
+/// so a short or corrupt buffer yields what parsed rather than a bad read.
+fn notify_file_names(buf: &[u8]) -> Vec<String> {
+    let u32_at = |o: usize| {
+        buf.get(o..o + 4)
+            .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while let (Some(next), Some(len)) = (u32_at(at), u32_at(at + 8)) {
+        let start = at + 12;
+        let Some(bytes) = buf.get(start..start + len as usize) else {
+            break;
+        };
+        let wide: Vec<u16> = bytes
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        out.push(String::from_utf16_lossy(&wide));
+        if next == 0 {
+            break;
+        }
+        at += next as usize;
+    }
+    out
+}
+
+/// Block on change notifications for `dir` and wake the config watcher when
+/// one of `names` (lowercase file names) is written, resized, created or
+/// renamed into place. Filtered by name: astur.log, state.conf, rescue.lst and
+/// launcher-mru.conf live in the same directory and change far more often.
+/// Returns if the directory cannot be watched; the watcher then polls.
+fn config_dir_notifier(dir: std::path::PathBuf, names: Vec<String>) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Storage::FileSystem::{
+        CreateFileW, ReadDirectoryChangesW, FILE_FLAG_BACKUP_SEMANTICS, FILE_LIST_DIRECTORY,
+        FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide: Vec<u16> = dir
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: `wide` is NUL-terminated and outlives the call. Share-delete so
+    // holding the handle never stops the user renaming or removing the folder.
+    let handle = match unsafe {
+        CreateFileW(
+            PCWSTR(wide.as_ptr()),
+            FILE_LIST_DIRECTORY.0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            None,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS,
+            None,
+        )
+    } {
+        Ok(h) => h,
+        Err(e) => {
+            log_error!(
+                "config watch: cannot open {} ({e}); polling every second",
+                dir.display()
+            );
+            CONFIG_NOTIFY_OK.store(false, Ordering::Relaxed);
+            config_event_wake();
+            return;
+        }
+    };
+    // DWORD-aligned, as ReadDirectoryChangesW requires.
+    let mut buf = vec![0u32; 2048];
+    loop {
+        let mut got = 0u32;
+        // SAFETY: synchronous call (no OVERLAPPED); `buf` is a live, aligned
+        // buffer of exactly the length passed, and `got` outlives the call.
+        let r = unsafe {
+            ReadDirectoryChangesW(
+                handle,
+                buf.as_mut_ptr() as *mut c_void,
+                (buf.len() * 4) as u32,
+                BOOL(0),
+                FILE_NOTIFY_CHANGE_LAST_WRITE
+                    | FILE_NOTIFY_CHANGE_SIZE
+                    | FILE_NOTIFY_CHANGE_FILE_NAME,
+                Some(&mut got),
+                None,
+                None,
+            )
+        };
+        if let Err(e) = r {
+            log_error!(
+                "config watch: {} stopped reporting changes ({e}); polling every second",
+                dir.display()
+            );
+            CONFIG_NOTIFY_OK.store(false, Ordering::Relaxed);
+            config_event_wake();
+            break;
+        }
+        // SAFETY: the kernel wrote `got` bytes (at most the buffer's length)
+        // into `buf`; viewing initialised u32s as bytes is always valid.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(buf.as_ptr() as *const u8, (got as usize).min(buf.len() * 4))
+        };
+        // 0 bytes = the change list overflowed and the names were dropped:
+        // one of ours may be among them, so let the mtime check decide.
+        if got == 0
+            || notify_file_names(bytes)
+                .iter()
+                .any(|n| names.contains(&n.to_lowercase()))
+        {
+            config_event_wake();
+        }
+    }
+    // SAFETY: opened above and used by nothing else.
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+}
+
 /// Watch the two config files and apply changes live, so editing + saving a
-/// config takes effect without restarting Astur.
-fn config_watcher() {
+/// config takes effect without restarting Astur. `unread` = startup could not
+/// read them and is running on defaults: treat the files as changed so the
+/// first check tries again instead of waiting for the user's next save.
+fn config_watcher(unread: bool) {
     use std::time::SystemTime;
     let wm = config_path("ASTUR_CONFIG", "astur.conf");
     let nav = config_path("ASTUR_NAVBAR", "navbar.conf");
     let mtime = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
-    let mut last: (Option<SystemTime>, Option<SystemTime>) = (mtime(&wm), mtime(&nav));
+    let mut last: (Option<SystemTime>, Option<SystemTime>) = if unread {
+        (None, None)
+    } else {
+        (mtime(&wm), mtime(&nav))
+    };
+    // On-disk version whose read last failed, so a file that stays unreadable
+    // (a UTF-16 save) logs once rather than every check.
+    let mut failed: Option<(Option<SystemTime>, Option<SystemTime>)> = None;
+    // One notifier per distinct directory (two when ASTUR_CONFIG/ASTUR_NAVBAR
+    // point elsewhere), each blocked in the kernel until something changes.
+    // This replaced a 1 s mtime poll: a save now applies ~CONFIG_QUIET after
+    // it lands instead of 300-1300 ms later, and idle costs no wakeups.
+    let mut dirs: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
+    for path in [&wm, &nav] {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            CONFIG_NOTIFY_OK.store(false, Ordering::Relaxed);
+            continue;
+        };
+        let name = name.to_string_lossy().to_lowercase();
+        match dirs.iter_mut().find(|(d, _)| d == dir) {
+            Some((_, names)) => names.push(name),
+            None => dirs.push((dir.to_path_buf(), vec![name])),
+        }
+    }
+    for (i, (dir, names)) in dirs.into_iter().enumerate() {
+        spawn_named(&format!("config-notify-{i}"), move || {
+            config_dir_notifier(dir, names)
+        });
+    }
+    let mut debounce = Debounce {
+        quiet: CONFIG_QUIET,
+        due: None,
+    };
+    if unread {
+        debounce.event(Instant::now());
+    }
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(1000));
-        let now = (mtime(&wm), mtime(&nav));
-        if now == last {
+        let idle = if failed.is_some() || !CONFIG_NOTIFY_OK.load(Ordering::Relaxed) {
+            CONFIG_POLL
+        } else {
+            CONFIG_BACKSTOP
+        };
+        if config_event_wait(debounce.wait(Instant::now(), idle)) {
+            debounce.event(Instant::now());
             continue;
         }
-        // Settle before reloading. The settings GUI writes astur.conf and
-        // navbar.conf in a loop; a tick landing between the two used to apply a
-        // MISMATCHED pair and then reload a second time — two full retiles,
-        // two snapshot clears, a visible double flash (review B-10).
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        last = (mtime(&wm), mtime(&nav));
-        let cfg = load_config();
-        log_info!("config changed on disk — reloading");
+        // Quiet for CONFIG_QUIET since the last change, or the backstop /
+        // poll came round: the mtimes decide whether anything changed.
+        let settled = debounce.due.take().is_some();
+        let seen = (mtime(&wm), mtime(&nav));
+        if seen == last {
+            continue;
+        }
+        if !settled {
+            // Found by the backstop or the poll, not a notification: the
+            // write may still be in progress, so settle first all the same.
+            debounce.event(Instant::now());
+            continue;
+        }
+        // Settled before reading. The settings GUI writes astur.conf and
+        // navbar.conf in a loop; a read landing between the two used to apply
+        // a MISMATCHED pair and then reload a second time — two full retiles,
+        // two snapshot clears, a visible double flash (review B-10). The fixed
+        // 300 ms settle is now the trailing CONFIG_QUIET debounce above, which
+        // restarts on every write to either file and so spans both.
+        let cfg = match load_config() {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                // Keep running on the current config and leave `last` alone, so
+                // the next check (CONFIG_POLL while failing) retries: a sharing
+                // violation mid editor-save clears in milliseconds, and giving
+                // up here would drop the user's save for good.
+                if failed != Some(seen) {
+                    failed = Some(seen);
+                    log_error!("config reload skipped, current settings kept: {e}");
+                }
+                continue;
+            }
+        };
+        last = seen;
+        failed = None;
+        // Diff before apply_theme overwrites UI_CFG (the last applied config),
+        // so only the subsystems a save actually touched are redone: a colour
+        // edit no longer re-enumerates the launcher or rebuilds the bars. The
+        // manager diffs its own groups against mgr.cfg in Cmd::Reload.
+        let groups = UI_CFG
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or_else(config::ReloadGroups::full, |old| {
+                config::reload_groups(old, &cfg)
+            });
+        if groups.is_empty() {
+            log_debug!("config file rewritten with identical settings — nothing to reload");
+            continue;
+        }
+        log_info!("config changed on disk — reloading {groups:?}");
         // Statics the hooks/workers read directly.
         apply_hook_config(&cfg);
         apply_bar_statics(&cfg);
         apply_theme(&cfg);
         let launcher = LAUNCHER_HWND.load(Ordering::Relaxed);
-        if launcher != 0 {
+        if launcher != 0 && groups.launcher {
             unsafe {
                 let _ = PostMessageW(
                     hwnd_from(launcher),
@@ -7628,9 +11166,9 @@ fn config_watcher() {
             }
         }
         // Manager applies the rest; the marker (main thread) rebuilds the bars.
-        push_cmd(Cmd::Reload(Box::new(cfg)));
+        push_cmd(Cmd::Reload(Box::new(cfg), false));
         let marker = MARKER_HWND.load(Ordering::Relaxed);
-        if marker != 0 {
+        if marker != 0 && groups.bar {
             unsafe {
                 let _ = PostMessageW(hwnd_from(marker), WM_RELOAD, WPARAM(0), LPARAM(0));
             }
@@ -7639,6 +11177,7 @@ fn config_watcher() {
 }
 
 fn manager_loop(cfg: Config) {
+    raise_current_thread(ThreadRole::Manager);
     let mut mgr = unsafe {
         let mut monitors = enumerate_monitors();
         // The main monitor (contains the origin 0,0) owns workspace 1 and gets
@@ -7658,11 +11197,23 @@ fn manager_loop(cfg: Config) {
             tiling: cfg.start_tiled,
             cfg,
             pending_launch_mon: 0,
+            park_origin: None,
         };
         assign_existing_windows(&mut m);
+        // Warm the wallpaper cache now, not on the first animation. Until it
+        // lands (one render, ~60-110 ms) glides place instantly.
+        wp_publish(&m.monitors, &m.cfg, std::time::Duration::ZERO);
         queue_workspace_wallpaper(&m, primary, m.monitors[primary].active);
         if m.tiling {
-            retile_all(&m);
+            // Instant, never the glide (ANIM-16): the glide handshake (capture,
+            // overlay up, DwmFlush; bounded by the 250 ms wait) held back the
+            // first placement, the first bar update and the first command.
+            // Owner-visible: monitor 0's startup resize now shows directly
+            // instead of under an overlay, as monitors 1..n (GLIDE_BUSY already
+            // set) always did. Reload and ToggleTiling keep their animation.
+            for mi in 0..m.monitors.len() {
+                place_active_instant(&m, mi);
+            }
         }
         style_all(&m);
         m
@@ -7672,21 +11223,57 @@ fn manager_loop(cfg: Config) {
         update_bar(&mgr);
     }
     loop {
-        let cmd = {
+        let (cmd, depth, burst) = {
             let mut q = CMDQ.lock().unwrap();
-            loop {
+            let c = loop {
                 if let Some(c) = q.pop_front() {
                     break c;
                 }
                 q = CMDCV.wait(q).unwrap();
-            }
+            };
+            // Switches that queued up while this thread was busy (a wheel
+            // flick over the bar, fast key taps, an IPC batch) only matter for
+            // where they end: fold them to that one workspace now, instead of
+            // N full switches each with a capture, an overlay handshake and
+            // two workspaces of cross-process show/hide (SWITCH-17). Model
+            // reads only while CMDQ is held; the switch runs after unlocking.
+            let burst = if matches!(c, Cmd::Switch(_) | Cmd::BarCycle(..)) {
+                let (target, folded) = mgr.fold_switches(&c, &mut q);
+                (folded > 0).then_some((target, folded))
+            } else {
+                None
+            };
+            (c, q.len(), burst)
         };
+        // Per-command probe: time in `process` and in the fixed tail (styles,
+        // bar, index sync), SetWindowPos calls issued, queue depth left behind.
+        // Everything here is skipped unless log_level = debug.
+        let probe = probe_now().map(|t0| (t0, cmd.name(), SWP_CALLS.load(Ordering::Relaxed)));
         unsafe {
-            process(&mut mgr, cmd);
+            match burst {
+                Some((target, folded)) => {
+                    log_debug!("switch burst: {} commands -> {target:?}", folded + 1);
+                    if let Some((mi, ws)) = target {
+                        show_workspace(&mut mgr, mi, ws);
+                    }
+                }
+                None => process(&mut mgr, cmd),
+            }
+        }
+        let t1 = probe.map(|_| Instant::now());
+        unsafe {
             apply_styles(&mgr);
             update_bar(&mgr);
         }
         sync_managed(&mgr);
+        if let (Some((t0, name, swp0)), Some(t1)) = (probe, t1) {
+            log_debug!(
+                "cmd {name} process={}us tail={}us swp={} queued={depth}",
+                (t1 - t0).as_micros(),
+                t1.elapsed().as_micros(),
+                SWP_CALLS.load(Ordering::Relaxed) - swp0
+            );
+        }
     }
 }
 
@@ -7807,6 +11394,116 @@ unsafe fn rescue_orphans() {
     }
 }
 
+/// Whether the manager tracks `h` as of its last command batch.
+fn is_managed(h: isize) -> bool {
+    MANAGED.lock().unwrap().contains(&h)
+}
+
+/// Should a show/foreground event queue `Cmd::Add`? SUPPRESS is one global
+/// flag the manager thread holds across a whole retile, while these events
+/// arrive on the main thread. Gating every window on it dropped any window an
+/// app opened mid-retile, for good (4 windows shown together: 1 tiled, 3 never
+/// managed; measured with the hidden-desktop bench). Only a window we already
+/// track can be the echo of our own show, so only those are skipped.
+fn show_needs_add(suppressed: bool, tracked: bool) -> bool {
+    !(suppressed && tracked)
+}
+
+/// A Cmd::BarRefresh is queued and not yet consumed (BAR-10). Set by the
+/// NAMECHANGE arm of win_event_proc and by the icon worker when a bar icon
+/// resolves (BAR-13); cleared by the manager before it reads any title (top
+/// of update_bar, and the BarRefresh arm).
+static BAR_REFRESH_QUEUED: AtomicBool = AtomicBool::new(false);
+
+/// The window whose title each monitor's bar shows (slot = monitor index; 0 =
+/// none), published by update_bar and read by the NAMECHANGE arm (BAR-9).
+static BAR_TITLE_HWND: [AtomicIsize; MAX_BARS] = [const { AtomicIsize::new(0) }; MAX_BARS];
+
+/// Does a rename of `h` need a bar refresh? When a bar shows its title: any
+/// monitor's displayed window, not only the foreground one. The foreground-
+/// only filter left a secondary monitor's title stale until some unrelated
+/// command ran; indefinitely at idle. The foreground check stays as the
+/// fallback, and is the only one for monitors past MAX_BARS. Relaxed loads:
+/// a stale slot costs at most one extra refresh, and the next update_bar
+/// republishes.
+fn namechange_forward(h: isize, fg: impl FnOnce() -> isize, slots: &[AtomicIsize]) -> bool {
+    h != 0 && (slots.iter().any(|s| s.load(Ordering::Relaxed) == h) || h == fg())
+}
+
+/// May a title change queue a Cmd::BarRefresh? At most one is pending: the
+/// manager clears the flag before it reads titles, so a rename landing after
+/// the clear queues exactly one more and none is lost. Gates ONLY BarRefresh;
+/// Add, Remove, Focused and Reload must never sit behind it, or a title storm
+/// would swallow a window. AcqRel on both sides: "clear, then read the title"
+/// is a store-then-load that Relaxed does not order.
+fn bar_refresh_gate(queued: &AtomicBool) -> bool {
+    !queued.swap(true, Ordering::AcqRel)
+}
+
+/// Manager side of `bar_refresh_gate`: the pending refresh is being consumed.
+fn bar_refresh_clear(queued: &AtomicBool) {
+    queued.swap(false, Ordering::AcqRel);
+}
+
+/// The monitor a minimize or restore of a window re-tiles (TILE-3): its own,
+/// and only while the window is tiled on that monitor's visible workspace.
+/// Layouts are per monitor, so no other monitor depends on it, and an untracked
+/// or floating window changes no layout at all. `loc` is locate(h); `active`
+/// and `floating` read the manager for that monitor / workspace. Deliberately
+/// no IsIconic test: the event can arrive before the state settles, and the
+/// layout reads IsIconic itself.
+fn retile_for_target(
+    loc: Option<(usize, usize)>,
+    active: impl Fn(usize) -> usize,
+    floating: impl Fn(usize, usize) -> bool,
+) -> Option<usize> {
+    let (mi, wi) = loc?;
+    (wi == active(mi) && !floating(mi, wi)).then_some(mi)
+}
+
+/// The WinEvent ranges Astur listens to, one SetWinEventHook each (EVENTS-1).
+/// Exact on purpose. SHOW (0x8002) sits inside DESTROY..HIDE, and a second,
+/// SHOW-only hook used to deliver every show twice: two Cmd::Add, two manager
+/// ticks. Never widen a range over CREATE (0x8000) or REORDER (0x8004): both
+/// fire constantly and nothing here handles them.
+const WINEVENT_RANGES: [(u32, u32, &str); 5] = [
+    (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, "destroy..hide"),
+    // F11/borderless fullscreen and maximize/restore change top-level
+    // geometry; title changes keep the bar's title widget current. The
+    // callback filters both noisy events before doing any work.
+    (
+        EVENT_OBJECT_LOCATIONCHANGE,
+        EVENT_OBJECT_NAMECHANGE,
+        "locationchange..namechange",
+    ),
+    (
+        EVENT_SYSTEM_FOREGROUND,
+        EVENT_SYSTEM_FOREGROUND,
+        "foreground",
+    ),
+    (
+        EVENT_SYSTEM_MINIMIZESTART,
+        EVENT_SYSTEM_MINIMIZEEND,
+        "minimize",
+    ),
+    // Native (non-Alt) move/resize finished: re-tile so windows never overlap.
+    (
+        EVENT_SYSTEM_MOVESIZEEND,
+        EVENT_SYSTEM_MOVESIZEEND,
+        "movesizeend",
+    ),
+];
+
+/// Bit i set = WINEVENT_RANGES[i] failed to register. Nonzero means Astur is
+/// partly blind to window lifecycle; shown in the counters line.
+static WINEVENT_HOOKS_FAILED: AtomicU32 = AtomicU32::new(0);
+
+/// Does a queued Cmd::Focused(h) still describe the foreground? `fg_root` is
+/// GetAncestor(GetForegroundWindow(), GA_ROOTOWNER) at processing time.
+fn focused_follow_allowed(fg_root: isize, h: isize) -> bool {
+    h != 0 && fg_root == h
+}
+
 /// WinEvent callback: translate OS window lifecycle/focus events into manager
 /// commands. Runs on the main thread's message loop.
 unsafe extern "system" fn win_event_proc(
@@ -7818,12 +11515,43 @@ unsafe extern "system" fn win_event_proc(
     _thread: u32,
     _time: u32,
 ) {
+    // Counted before the filter: the raw LOCATIONCHANGE rate (cursor moves
+    // included) is the cost of having that hook installed at all.
+    if event == EVENT_OBJECT_LOCATIONCHANGE {
+        ev_count(EVC_LOCATION);
+        if id_object == OBJID_CURSOR.0 {
+            ev_count(EVC_LOCATION_CURSOR);
+        }
+    }
     if id_object != 0 || id_child != 0 || hwnd.0.is_null() {
         return;
     }
+    match event {
+        EVENT_OBJECT_SHOW => ev_count(EVC_SHOW),
+        EVENT_OBJECT_HIDE => ev_count(EVC_HIDE),
+        EVENT_OBJECT_DESTROY => ev_count(EVC_DESTROY),
+        EVENT_SYSTEM_FOREGROUND => ev_count(EVC_FOREGROUND),
+        EVENT_OBJECT_NAMECHANGE => ev_count(EVC_NAMECHANGE),
+        _ => {}
+    }
     let h = hwnd.0 as isize;
+    // SHOW prefilter (EVENTS-1): a child, tool or no-activate window can never
+    // be adopted (app_surface_reject refuses the same bits), and every menu,
+    // tooltip and child control fires SHOW. GetWindowLongW reads the window
+    // without sending it a message, so this is safe on a hung app. Residual,
+    // accepted: a window that clears those bits right after its SHOW is
+    // adopted on its next FOREGROUND instead.
+    let show_junk = event == EVENT_OBJECT_SHOW
+        && show_rejected_by_style(
+            GetWindowLongW(hwnd, GWL_STYLE) as u32,
+            GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
+        );
     let tracked_fullscreen = fullscreen_window_tracked(h);
     let fullscreen_changed = match event {
+        // Skips the fullscreen probe, but not the stale-entry removal it would
+        // have done (such a window is never fullscreen): a recycled HWND must
+        // not pin a monitor's bar in fullscreen mode.
+        EVENT_OBJECT_SHOW if show_junk => tracked_fullscreen && remove_fullscreen_window(h),
         // Window is definitely leaving visible fullscreen state. Remove directly:
         // EVENT callbacks may run before IsIconic/IsWindowVisible settles.
         EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY | EVENT_SYSTEM_MINIMIZESTART
@@ -7848,9 +11576,12 @@ unsafe extern "system" fn win_event_proc(
         EVENT_OBJECT_SHOW => {
             // Someone made it visible — whoever hid it, the marker is stale now
             // (and a later app-driven hide must untrack it again).
+            // Unconditional and first, before the prefilter below.
             unmark_hidden_by_us(h);
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                push_cmd(Cmd::Add(h));
+            if show_junk {
+                ev_count(EVC_SHOW_STYLE);
+            } else if show_needs_add(SUPPRESS.load(Ordering::Relaxed), is_managed(h)) {
+                push_cmd(Cmd::Add(h, event));
             }
         }
         EVENT_OBJECT_NAMECHANGE => {
@@ -7859,10 +11590,21 @@ unsafe extern "system" fn win_event_proc(
             // draws from the cached snapshot (review B-08). Switching a browser
             // tab or opening another file left a stale title on screen, which
             // reads as "the bar is frozen".
-            // Only the foreground window's title is shown, so filter here and
-            // keep everything else off the queue.
-            if hwnd == GetForegroundWindow() {
-                push_cmd(Cmd::BarRefresh);
+            // Only displayed windows' titles are shown (see namechange_forward),
+            // so filter here and keep everything else off the queue. No bar,
+            // nothing to refresh.
+            if BAR_HEIGHT.load(Ordering::Relaxed) > 0
+                && namechange_forward(
+                    hwnd.0 as isize,
+                    || GetForegroundWindow().0 as isize,
+                    &BAR_TITLE_HWND,
+                )
+            {
+                if bar_refresh_gate(&BAR_REFRESH_QUEUED) {
+                    push_cmd(Cmd::BarRefresh);
+                } else {
+                    ev_count(EVC_BAR_REFRESH_FOLDED);
+                }
             }
         }
         EVENT_SYSTEM_FOREGROUND => {
@@ -7872,8 +11614,8 @@ unsafe extern "system" fn win_event_proc(
                 return;
             }
             push_cmd(Cmd::Focused(h));
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                push_cmd(Cmd::Add(h));
+            if show_needs_add(SUPPRESS.load(Ordering::Relaxed), is_managed(h)) {
+                push_cmd(Cmd::Add(h, event));
             }
         }
         EVENT_OBJECT_HIDE => {
@@ -7882,7 +11624,7 @@ unsafe extern "system" fn win_event_proc(
             // SUPPRESS alone misses the tail of the batch (async delivery), and
             // untracking those orphaned live windows on hidden workspaces.
             if !SUPPRESS.load(Ordering::Relaxed) && !was_hidden_by_us(h) {
-                push_cmd(Cmd::Remove(h));
+                push_cmd(Cmd::RemoveHidden(h));
             }
         }
         EVENT_OBJECT_DESTROY => {
@@ -7892,7 +11634,11 @@ unsafe extern "system" fn win_event_proc(
             push_cmd(Cmd::Remove(h));
         }
         EVENT_SYSTEM_MINIMIZESTART | EVENT_SYSTEM_MINIMIZEEND => {
-            push_cmd(Cmd::Retile);
+            // Only h's own monitor can change (TILE-3). This used to re-place
+            // every window on every monitor for any minimize anywhere, which
+            // also un-maximized and re-snapped windows elsewhere as a side
+            // effect; nothing relied on that.
+            push_cmd(Cmd::RetileFor(h));
         }
         // User finished a native (non-Alt) move/resize. Re-integrate the window
         // into the tiling: master keeps its new width as the ratio, everything
@@ -8713,31 +12459,241 @@ static LAUNCHER_LAST_MX: AtomicI32 = AtomicI32::new(i32::MIN);
 static LAUNCHER_LAST_MY: AtomicI32 = AtomicI32::new(i32::MIN);
 
 // Lazy icon loader: paint enqueues visible app/file rows; workers resolve shell
-// icons off the UI thread. File jobs carry search generation to reject stale rows.
+// icons off the UI thread into ICON_CACHE / BAR_ICON_CACHE / FILE_ICON_CACHE.
+// Every job carries
+// the physical px it is for (a worker must not read UI_DPI, which follows
+// whichever monitor a popup last opened on). File jobs carry the search
+// generation so rows of a superseded result are not resolved.
 #[derive(Clone, PartialEq, Eq)]
 enum IconJob {
-    App(usize),
-    File(u64, usize),
-    /// (exe path, physical pixel size to resolve at)
+    /// (index into LauncherState::all, px)
+    App(usize, i32),
+    /// (search generation, index into LauncherState::files, px)
+    File(u64, usize, i32),
+    /// (exe path, physical pixel size to resolve at), into BAR_ICON_CACHE
     Bar(String, i32),
+    /// (exe path, px): a switcher Window row, into ICON_CACHE
+    Exe(String, i32),
 }
 static ICON_QUEUE: Mutex<VecDeque<IconJob>> = Mutex::new(VecDeque::new());
 static ICON_CV: Condvar = Condvar::new();
+
+/// One resolved size of one icon source.
+#[derive(Clone, Copy)]
+struct IconSlot<H> {
+    px: i32,
+    stamp: u64,
+    icon: H,
+    used: u64, // cache clock at the last lookup (LRU order)
+}
+
+/// Shell icons keyed by (source, physical px, stamp): the source (a path or a
+/// shell parsing name), the size it was resolved at, and a stamp (the source
+/// file's mtime, 0 when there is none to read), so a changed source is a miss
+/// rather than a stale hit. The cache owns every handle it holds and hands a
+/// handle to `delete` exactly once, when it drops it; rows and bar buttons
+/// only look up. `cap` None = no LRU: entries go only through `retain_live`.
+///
+/// Why it exists (LAUNCH-13): icons used to be owned per list row, so every
+/// config reload destroyed and re-extracted hundreds of them, the startup
+/// preload ran at 96 DPI so 125%/150% monitors drew them upscaled from 32 px,
+/// and a reload on the main thread destroyed bar icons the launcher thread
+/// could be drawing at that moment.
+struct IconCache<H> {
+    map: HashMap<String, Vec<IconSlot<H>>>,
+    len: usize,
+    clock: u64,
+    cap: Option<usize>,
+}
+
+impl<H: Copy + PartialEq> IconCache<H> {
+    fn new(cap: Option<usize>) -> Self {
+        IconCache {
+            map: HashMap::new(),
+            len: 0,
+            clock: 0,
+            cap,
+        }
+    }
+
+    /// The icon for exactly this source, size and stamp.
+    fn get(&mut self, source: &str, px: i32, stamp: u64) -> Option<H> {
+        self.clock += 1;
+        let clock = self.clock;
+        let slot = self
+            .map
+            .get_mut(source)?
+            .iter_mut()
+            .find(|s| s.px == px && s.stamp == stamp)?;
+        slot.used = clock;
+        Some(slot.icon)
+    }
+
+    /// The closest other size of `source` whose icon passes `usable`: what a
+    /// paint draws (scaled, briefly) until the exact size resolves.
+    fn nearest(&self, source: &str, px: i32, stamp: u64, usable: impl Fn(H) -> bool) -> Option<H> {
+        self.map
+            .get(source)?
+            .iter()
+            .filter(|s| s.stamp == stamp && usable(s.icon))
+            .min_by_key(|s| (s.px - px).abs())
+            .map(|s| s.icon)
+    }
+
+    /// Store `icon`, replacing a `pending` placeholder. If the key already
+    /// holds anything else (two workers resolved the same key), the existing
+    /// entry wins and `icon` comes back for the caller to free.
+    fn insert(&mut self, source: &str, px: i32, stamp: u64, icon: H, pending: H) -> Option<H> {
+        self.clock += 1;
+        let clock = self.clock;
+        let slots = self.map.entry(source.to_string()).or_default();
+        match slots.iter_mut().find(|s| s.px == px && s.stamp == stamp) {
+            Some(s) if s.icon == pending => {
+                s.icon = icon;
+                s.used = clock;
+                None
+            }
+            Some(_) => Some(icon),
+            None => {
+                slots.push(IconSlot {
+                    px,
+                    stamp,
+                    icon,
+                    used: clock,
+                });
+                self.len += 1;
+                None
+            }
+        }
+    }
+
+    fn over_cap(&self) -> bool {
+        self.cap.is_some_and(|cap| self.len > cap)
+    }
+
+    /// Drop every entry `live(source, px, stamp)` rejects, whatever the cap,
+    /// handing each dropped handle to `dead` once: a size no monitor uses any
+    /// more or a superseded stamp, which no lookup can ask for again. The
+    /// caller decides when a dropped handle can be destroyed.
+    fn retain_live(&mut self, live: impl Fn(&str, i32, u64) -> bool, mut dead: impl FnMut(H)) {
+        let mut dropped = 0;
+        self.map.retain(|src, slots| {
+            slots.retain(|s| {
+                let keep = live(src, s.px, s.stamp);
+                if !keep {
+                    dead(s.icon);
+                    dropped += 1;
+                }
+                keep
+            });
+            !slots.is_empty()
+        });
+        self.len -= dropped;
+    }
+
+    /// Over `cap`: drop least-recently-used entries until back under it,
+    /// skipping every source `keep` claims (the rows on screen draw those),
+    /// and hand each dropped handle to `delete` once. An uncapped cache never
+    /// drops anything here.
+    fn evict(&mut self, keep: impl Fn(&str) -> bool, mut delete: impl FnMut(H)) {
+        let Some(cap) = self.cap else {
+            return;
+        };
+        if self.len <= cap {
+            return;
+        }
+        let mut order: Vec<(u64, String, i32, u64)> = self
+            .map
+            .iter()
+            .filter(|(src, _)| !keep(src))
+            .flat_map(|(src, slots)| slots.iter().map(|s| (s.used, src.clone(), s.px, s.stamp)))
+            .collect();
+        order.sort_unstable_by_key(|o| o.0);
+        for (_, src, px, stamp) in order {
+            if self.len <= cap {
+                break;
+            }
+            let Some(slots) = self.map.get_mut(&src) else {
+                continue;
+            };
+            if let Some(i) = slots.iter().position(|s| s.px == px && s.stamp == stamp) {
+                delete(slots.swap_remove(i).icon);
+                self.len -= 1;
+            }
+            if slots.is_empty() {
+                self.map.remove(&src);
+            }
+        }
+    }
+}
+
+/// Launcher app rows and switcher Window rows. Values: an HICON, or -1 =
+/// resolving failed (not retried). Only the launcher thread draws these, so it
+/// is also the one that frees them: LA_REFRESH drops sizes no monitor uses and
+/// superseded stamps, between paints, with no handle in flight anywhere else.
+/// Never evicted otherwise, so a reload or F5 re-extracts nothing it had.
+/// (Kept apart from bar and system-menu icons for exactly that: shared with
+/// the bar snapshot and the sysmenu thread, nothing could be freed safely, and
+/// every launcher_icon_size tried kept a full set per DPI until exit.)
+static ICON_CACHE: LazyLock<Mutex<IconCache<isize>>> =
+    LazyLock::new(|| Mutex::new(IconCache::new(None)));
+/// Bar app-button icons, keyed (exe path, px, 0). Values as ICON_CACHE, plus
+/// 0 = a bar job is queued for it. The main thread draws them, from the
+/// manager's BAR snapshot, so a handle dropped from here may still be in the
+/// published snapshot or in the clone a paint is drawing: `bar_icons_retire`
+/// parks it and `bar_icons_sweep` frees it once a snapshot built after that is
+/// published, on the main thread between paints.
+static BAR_ICON_CACHE: LazyLock<Mutex<IconCache<isize>>> =
+    LazyLock::new(|| Mutex::new(IconCache::new(None)));
+/// System-menu custom icons. Resolved and drawn only on the sysmenu thread,
+/// which frees an entry the moment it supersedes it.
+static SYSMENU_ICON_CACHE: LazyLock<Mutex<IconCache<isize>>> =
+    LazyLock::new(|| Mutex::new(IconCache::new(None)));
+/// File-result icons are unbounded (every search brings new paths), so LRU:
+/// each HICON is a USER object plus two GDI bitmaps, and running into the 10k
+/// per-process USER/GDI quota would break all GDI, snapshot overlays included.
+/// Evicted only on the launcher thread (end of paint), the only thread that
+/// draws file icons, and never for a row currently listed.
+static FILE_ICON_CACHE: LazyLock<Mutex<IconCache<isize>>> =
+    LazyLock::new(|| Mutex::new(IconCache::new(Some(FILE_ICON_CAP))));
+const FILE_ICON_CAP: usize = 512;
+
+/// Stamp for an icon source: its mtime, so an app update or a rewritten
+/// shortcut resolves anew; 0 for shell parsing names (UWP), which keep their
+/// first icon until Astur restarts.
+fn icon_stamp(source: &str) -> u64 {
+    if source.starts_with("shell:") {
+        return 0;
+    }
+    std::fs::metadata(source)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos() as u64)
+}
 
 struct AppEntry {
     name: String,
     name_lc: String,
     path: String,      // launch target: shortcut, app shell id, URL, file, or command
     icon_path: String, // icon source; defaults to path, custom entries may override it
-    icon: isize,       // 0 = not yet loaded, -1 = none/failed, else an HICON (owned)
+    stamp: u64,        // icon_stamp(icon_path) at enumeration: part of the icon key
 }
-/// One file/folder result from the Windows Search index (Phase 3).
+/// One file/folder result from the Windows Search index (Phase 3). Its icon
+/// lives in FILE_ICON_CACHE, keyed by path, px and `date`.
+#[derive(Clone)]
 struct FileHit {
     name: String,
     path: String,
     size: i64, // bytes (-1 = unknown / folder)
     date: f64, // OLE automation date (days since 1899-12-30); 0 = unknown
-    icon: isize,
+}
+
+impl FileHit {
+    /// Icon-key stamp: the indexed modified date, free with the result.
+    fn stamp(&self) -> u64 {
+        self.date.to_bits()
+    }
 }
 struct WindowHit {
     hwnd: isize,
@@ -8776,6 +12732,10 @@ struct LauncherState {
     wide: bool,        // Tab: wide column view (modified / size / path)
     window_only: bool, // Alt+Tab replacement mode
     search_gen: u64,   // generation of `files` (drops stale async results)
+    // Recent file-search results, newest first, keyed by `file_search_key`.
+    // Backspace to a query seen moments ago shows its rows at once instead of
+    // an empty file section for the ~145 ms round trip.
+    file_cache: VecDeque<(String, Vec<FileHit>)>,
 }
 static LAUNCHER_STATE: Mutex<LauncherState> = Mutex::new(LauncherState {
     query: String::new(),
@@ -8792,30 +12752,58 @@ static LAUNCHER_STATE: Mutex<LauncherState> = Mutex::new(LauncherState {
     wide: false,
     window_only: false,
     search_gen: 0,
+    file_cache: VecDeque::new(),
 });
 
 // File-search request hand-off to `filesearch_worker` (debounced + cancellable).
 static SEARCH_REQ: Mutex<Option<(u64, String)>> = Mutex::new(None);
 static SEARCH_CV: Condvar = Condvar::new();
 static SEARCH_GEN: AtomicU64 = AtomicU64::new(0);
+/// Query -> result pairs kept in `LauncherState::file_cache`.
+const FILE_CACHE_CAP: usize = 32;
 
+/// Destroy an HICON the icon caches own (or a duplicate nobody stored).
 unsafe fn release_launcher_icon(raw: isize) {
     if raw > 1 {
         let _ = DestroyIcon(HICON(raw as *mut c_void));
     }
 }
 
-unsafe fn clear_file_hits(files: &mut Vec<FileHit>) {
-    for file in files.drain(..) {
-        release_launcher_icon(file.icon);
-    }
+/// Move `key` to the front of the result cache with `hits`, dropping the
+/// least-recent entry past `cap`.
+fn file_cache_put<T>(cache: &mut VecDeque<(String, T)>, key: String, hits: T, cap: usize) {
+    cache.retain(|(k, _)| *k != key);
+    cache.push_front((key, hits));
+    cache.truncate(cap);
 }
 
-unsafe fn replace_launcher_apps(state: &mut LauncherState, apps: Vec<AppEntry>) {
-    for entry in state.all.drain(..) {
-        release_launcher_icon(entry.icon);
-    }
-    state.all = apps;
+/// Look `key` up in the result cache, marking it most recent.
+fn file_cache_get<'a, T>(cache: &'a mut VecDeque<(String, T)>, key: &str) -> Option<&'a T> {
+    let pos = cache.iter().position(|(k, _)| k == key)?;
+    let entry = cache.remove(pos)?;
+    cache.push_front(entry);
+    cache.front().map(|(_, v)| v)
+}
+
+/// Stand-in file rows for a query just edited, shown until the index answers:
+/// the cached result for exactly this query if there is one, else the current
+/// rows the new query still matches. Before this the file section emptied on
+/// every keystroke and came back ~145 ms later (45 ms debounce + the query).
+/// Rows can reorder when the real TOP-N lands; Enter on a stand-in row opens
+/// a real file that matches.
+/// Their icons come from FILE_ICON_CACHE by path, so a kept row keeps its icon.
+fn launcher_provisional_files(st: &mut LauncherState, cfg: &Config) {
+    let Some(key) = file_search_key(&st.query, cfg) else {
+        st.files.clear(); // no search runs for this query
+        return;
+    };
+    st.files = match file_cache_get(&mut st.file_cache, &key) {
+        Some(hits) => hits.clone(),
+        None => provisional_hits(st.files.iter().map(|f| f.name.as_str()), &st.query)
+            .into_iter()
+            .map(|i| st.files[i].clone())
+            .collect(),
+    };
 }
 
 /// Recursively collect `*.lnk` / `*.url` under a Start Menu root into `out`,
@@ -8839,7 +12827,7 @@ fn collect_shortcuts(dir: &std::path::Path, out: &mut std::collections::HashMap<
                         name_lc: key,
                         path: p.to_string_lossy().into_owned(),
                         icon_path: p.to_string_lossy().into_owned(),
-                        icon: 0,
+                        stamp: 0,
                     });
                 }
             }
@@ -8909,7 +12897,7 @@ unsafe fn enumerate_appsfolder(out: &mut std::collections::HashMap<String, AppEn
                     name_lc: key,
                     icon_path: path.clone(),
                     path,
-                    icon: 0,
+                    stamp: 0,
                 },
             );
         }
@@ -8953,12 +12941,17 @@ fn launcher_enumerate() -> Vec<AppEntry> {
                 name_lc: key,
                 path: entry.target,
                 icon_path,
-                icon: 0,
+                stamp: 0,
             },
         );
     }
     let mut v: Vec<AppEntry> = map.into_values().collect();
     v.sort_by(|a, b| a.name_lc.cmp(&b.name_lc));
+    // Once per enumeration (startup, F5, a launcher-list reload), never per
+    // paint: one metadata read per entry.
+    for e in &mut v {
+        e.stamp = icon_stamp(&e.icon_path);
+    }
     v
 }
 
@@ -8987,7 +12980,7 @@ unsafe fn load_icon(path: &str, px: i32) -> isize {
         return hicon.0 as isize;
     }
     // 3) Generic executable icon so a row never renders blank. Copy the cached
-    // base handle because each result row owns and later destroys its HICON.
+    // base handle because the icon caches own and may destroy what they hold.
     if let Some(hicon) = generic_app_icon() {
         if let Ok(copy) = CopyIcon(hicon) {
             return copy.0 as isize;
@@ -9099,72 +13092,60 @@ fn icon_worker() {
                     q = ICON_CV.wait(q).unwrap();
                 }
             };
-            // Short lock: copy source only if row still belongs to current model.
-            let path = {
+            // Short lock: copy the source only if the row still belongs to
+            // the current model, and skip what the cache already holds (a
+            // reload or F5 re-queues every app; nearly all are hits).
+            let (path, px, stamp) = {
                 let st = LAUNCHER_STATE.lock().unwrap();
                 match &job {
-                    IconJob::App(i) => match st.all.get(*i) {
-                        Some(e) if e.icon == 0 && !is_builtin_icon(&e.icon_path) => {
-                            e.icon_path.clone()
+                    IconJob::App(i, px) => match st.all.get(*i) {
+                        Some(e) if !is_builtin_icon(&e.icon_path) => {
+                            (e.icon_path.clone(), *px, e.stamp)
                         }
                         _ => continue,
                     },
-                    IconJob::File(gen, i) if st.search_gen == *gen => match st.files.get(*i) {
-                        Some(f) if f.icon == 0 => f.path.clone(),
+                    IconJob::File(gen, i, px) if st.search_gen == *gen => match st.files.get(*i) {
+                        Some(f) => (f.path.clone(), *px, f.stamp()),
                         _ => continue,
                     },
-                    IconJob::File(_, _) => continue,
-                    IconJob::Bar(path, _) => path.clone(),
+                    IconJob::File(..) => continue,
+                    IconJob::Bar(path, px) | IconJob::Exe(path, px) => (path.clone(), *px, 0),
                 }
             };
-            // Bar jobs carry the exact size they were queued for; the worker
+            let cache = match &job {
+                IconJob::File(..) => &FILE_ICON_CACHE,
+                IconJob::Bar(..) => &BAR_ICON_CACHE,
+                IconJob::App(..) | IconJob::Exe(..) => &ICON_CACHE,
+            };
+            // A Bar job's key holds the 0 placeholder bar_app_icon left there.
+            if !matches!(job, IconJob::Bar(..))
+                && cache.lock().unwrap().get(&path, px, stamp).is_some()
+            {
+                continue;
+            }
+            // Every job carries the exact size it was queued for; the worker
             // must not re-read a global, which on a mixed-DPI desk would be
             // whichever monitor painted last.
-            let px = match &job {
-                IconJob::Bar(_, px) => *px,
-                _ => la_icon_px(),
-            };
             let hicon = load_icon(&path, px);
-            let mut stored = false;
-            {
-                let mut st = LAUNCHER_STATE.lock().unwrap();
-                match job {
-                    IconJob::App(i) => {
-                        if let Some(e) = st.all.get_mut(i) {
-                            if e.icon == 0 && e.icon_path == path {
-                                e.icon = hicon;
-                                stored = true;
-                            }
-                        }
-                    }
-                    IconJob::File(gen, i) if st.search_gen == gen => {
-                        if let Some(f) = st.files.get_mut(i) {
-                            if f.icon == 0 && f.path == path {
-                                f.icon = hicon;
-                                stored = true;
-                            }
-                        }
-                    }
-                    IconJob::File(_, _) => {}
-                    IconJob::Bar(bar_path, bar_px) => {
-                        let old = BAR_ICONS
-                            .lock()
-                            .unwrap()
-                            .get_or_insert_with(HashMap::new)
-                            .insert((bar_path, bar_px), hicon);
-                        if let Some(old) = old {
-                            release_launcher_icon(old);
-                        }
-                        stored = true;
-                        for bar in BARS.lock().unwrap().iter() {
-                            let _ = InvalidateRect(hwnd_from(bar.hwnd), None, BOOL(0));
-                        }
-                    }
+            // Keyed by source, so an icon can never land on the wrong row
+            // however the list moved while it resolved.
+            let dup = cache.lock().unwrap().insert(&path, px, stamp, hicon, 0);
+            if let Some(dup) = dup {
+                release_launcher_icon(dup); // another worker got there first
+            }
+            if matches!(job, IconJob::Bar(..)) {
+                // Paint draws the manager's snapshot, which still holds the 0
+                // placeholder, so a repaint alone showed nothing until some
+                // unrelated command ran (BAR-13). Have update_bar publish the
+                // new handle: through the BarRefresh gate, so a startup or
+                // reload burst of N icons queues one refresh, not N ahead of
+                // the user's commands.
+                if bar_refresh_gate(&BAR_REFRESH_QUEUED) {
+                    push_cmd(Cmd::BarRefresh);
                 }
             }
-            if !stored {
-                release_launcher_icon(hicon);
-            }
+            // Launcher rows (app, file and switcher Window rows) repaint only
+            // on this.
             let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
             if hl != 0 {
                 let _ = InvalidateRect(hwnd_from(hl), None, BOOL(0));
@@ -9178,7 +13159,10 @@ fn icon_worker() {
 /// word-boundary starts, and earlier/shorter matches score up.
 unsafe fn launcher_windows() -> Vec<WindowHit> {
     let mut out = Vec::new();
-    for h in MANAGED.lock().unwrap().iter().copied() {
+    // A copy: the loop does OpenProcess and title reads per window, and the
+    // main (hook) thread takes MANAGED on every show and foreground event.
+    let managed = MANAGED.lock().unwrap().clone();
+    for h in managed {
         let hwnd = hwnd_from(h);
         if (h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
             && SCRATCHPAD_HIDDEN.load(Ordering::Relaxed))
@@ -9445,6 +13429,27 @@ fn launcher_refilter(st: &mut LauncherState) {
         st.sel = st.filtered.len().saturating_sub(1);
     }
 }
+/// Apply one typed edit to the query: reset the selection, put up provisional
+/// file rows, refilter, start the file search and repaint. Launcher thread.
+unsafe fn launcher_edit_query(h: HWND, edit: impl FnOnce(&mut String)) {
+    let cfg = UI_CFG
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(Config::defaults);
+    let q = {
+        let mut st = LAUNCHER_STATE.lock().unwrap();
+        edit(&mut st.query);
+        st.sel = 0;
+        st.scroll = 0;
+        launcher_provisional_files(&mut st, &cfg);
+        launcher_refilter(&mut st);
+        st.query.clone()
+    };
+    launcher_dispatch_search(&q);
+    let _ = InvalidateRect(h, None, BOOL(0));
+}
+
 /// Bump the search generation and hand the current query to `filesearch_worker`.
 /// Cheap; the worker debounces + drops stale generations.
 fn launcher_dispatch_search(query: &str) {
@@ -9453,20 +13458,55 @@ fn launcher_dispatch_search(query: &str) {
         .unwrap()
         .clone()
         .unwrap_or_else(Config::defaults);
+    if !file_search_wanted(query, &cfg) {
+        launcher_cancel_search();
+        return;
+    }
+    let gen = SEARCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
+    *SEARCH_REQ.lock().unwrap() = Some((gen, query.to_string()));
+    SEARCH_CV.notify_one();
+}
+
+/// Supersede any queued or in-flight file search, so its result is dropped.
+fn launcher_cancel_search() {
+    SEARCH_GEN.fetch_add(1, Ordering::Relaxed);
+    *SEARCH_REQ.lock().unwrap() = None;
+}
+
+/// Whether `query` runs a file search at all: files are on and the query is
+/// not a clipboard/emoji provider query.
+fn file_search_wanted(query: &str, cfg: &Config) -> bool {
     let provider_only = (cfg.launcher_source_clipboard
         && cfg.clipboard_history
         && prefixed_query(query.trim(), &cfg.clipboard_prefix).is_some())
         || (cfg.launcher_source_emoji
             && cfg.emoji_picker
             && prefixed_query(query.trim(), &cfg.emoji_prefix).is_some());
-    if !cfg.launcher_source_files || provider_only {
-        SEARCH_GEN.fetch_add(1, Ordering::Relaxed);
-        *SEARCH_REQ.lock().unwrap() = None;
-        return;
+    cfg.launcher_source_files && !provider_only
+}
+
+/// Result-cache key for `query`: its CONTAINS terms plus every setting that
+/// shapes the result (scope, excludes, row cap), so a cached result can never
+/// outlive a config change that would alter it. None when no search runs.
+fn file_search_key(query: &str, cfg: &Config) -> Option<String> {
+    if !file_search_wanted(query, cfg) {
+        return None;
     }
-    let gen = SEARCH_GEN.fetch_add(1, Ordering::Relaxed) + 1;
-    *SEARCH_REQ.lock().unwrap() = Some((gen, query.to_string()));
-    SEARCH_CV.notify_one();
+    let contains = build_contains(query)?;
+    Some(format!(
+        "{contains}\u{1}{}\u{1}{:?}\u{1}{}",
+        cfg.launcher_file_scope.trim(),
+        cfg.launcher_file_exclude,
+        cfg.launcher_max_results
+    ))
+}
+
+/// Whether a finished search for `gen` may replace the file rows: only the
+/// newest generation, and only forward. With two workers the older query can
+/// finish last; checked and stored under one LAUNCHER_STATE lock, so a stale
+/// result never overwrites a newer one (no later result would repair it).
+fn should_store_search(gen: u64, cur_gen: u64, st_gen: u64) -> bool {
+    gen == cur_gen && gen > st_gen
 }
 // ----- file search (Windows Search index via OLE DB Search.CollatorDSO) --------
 
@@ -9512,14 +13552,8 @@ fn is_fs_path(p: &str) -> bool {
 /// (~900ms). Returns None if there's no usable term. Words are stripped of `"`/`'`
 /// (phrase/SQL hazards) so the resulting `'…'` literal is safe.
 fn build_contains(query: &str) -> Option<String> {
-    let words: Vec<String> = query
-        .split_whitespace()
-        .map(|w| {
-            w.chars()
-                .filter(|c| *c != '"' && *c != '\'')
-                .collect::<String>()
-        })
-        .filter(|w| w.chars().count() >= 2)
+    let words: Vec<String> = contains_terms(query)
+        .into_iter()
         .map(|w| format!("\"{w}*\""))
         .collect();
     if words.is_empty() {
@@ -9527,6 +13561,50 @@ fn build_contains(query: &str) -> Option<String> {
     } else {
         Some(words.join(" AND "))
     }
+}
+
+/// The query words `build_contains` sends as prefix terms. Shared with
+/// `provisional_hits` so the local preview and the index query cannot drift.
+fn contains_terms(query: &str) -> Vec<String> {
+    query
+        .split_whitespace()
+        .map(|w| {
+            w.chars()
+                .filter(|c| *c != '"' && *c != '\'')
+                .collect::<String>()
+        })
+        .filter(|w| w.chars().count() >= 2)
+        .collect()
+}
+
+/// Indices of the file `names` that `query` still matches, mirroring
+/// `CONTAINS(System.FileName, '"w1*" AND "w2*"')`: every term must prefix a
+/// word of the name, case-insensitively. Empty when the query has no term,
+/// exactly as `FileSearch::run` returns nothing then. A preview: the indexer's
+/// word breaker is not a plain split on non-alphanumerics, so the real result
+/// may differ by a row when it lands.
+fn provisional_hits<'a>(names: impl Iterator<Item = &'a str>, query: &str) -> Vec<usize> {
+    let terms: Vec<String> = contains_terms(query)
+        .iter()
+        .map(|t| t.to_lowercase())
+        .collect();
+    if terms.is_empty() {
+        return Vec::new();
+    }
+    names
+        .enumerate()
+        .filter(|(_, name)| {
+            let name = name.to_lowercase();
+            let words: Vec<&str> = name
+                .split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .collect();
+            terms
+                .iter()
+                .all(|t| words.iter().any(|w| w.starts_with(t.as_str())))
+        })
+        .map(|(i, _)| i)
+        .collect()
 }
 
 fn fmt_size(bytes: i64) -> String {
@@ -9735,7 +13813,6 @@ impl FileSearch {
                         path,
                         size,
                         date,
-                        icon: 0,
                     });
                 }
             }
@@ -9755,11 +13832,20 @@ impl FileSearch {
 
 /// File-search worker: own COM STA + one persistent index connection. Drains the
 /// debounced request slot, drops stale generations, writes results + repaints.
-/// If the index can't be opened, file search is silently disabled (apps still work).
+/// Two run side by side on the one request slot, so the newest query starts at
+/// once instead of queueing behind a superseded one still in the index (a
+/// query cannot be abandoned mid-Execute). If the index can't be opened, file
+/// search is silently disabled (apps still work).
 fn filesearch_worker() {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-        let search = FileSearch::new();
+        // A worker with no session must not take requests: with two workers, a
+        // generation it swallowed would never be answered and the provisional
+        // rows for it would stay up.
+        let Some(search) = FileSearch::new() else {
+            log_debug!("file search: Windows Search index unavailable on this worker");
+            return;
+        };
         loop {
             let (gen, q) = {
                 let mut slot = SEARCH_REQ.lock().unwrap();
@@ -9776,21 +13862,23 @@ fn filesearch_worker() {
             if SEARCH_GEN.load(Ordering::Relaxed) != gen {
                 continue;
             }
-            let Some(search) = search.as_ref() else {
-                continue;
-            };
             let cfg = UI_CFG
                 .lock()
                 .unwrap()
                 .clone()
                 .unwrap_or_else(Config::defaults);
             let hits = search.run(&q, &cfg);
-            if SEARCH_GEN.load(Ordering::Relaxed) != gen {
-                continue; // superseded while the index query ran
-            }
             {
                 let mut st = LAUNCHER_STATE.lock().unwrap();
-                clear_file_hits(&mut st.files);
+                // Cache even a superseded result: it is still the true answer
+                // for `q`, which is what Backspace comes back to.
+                if let Some(key) = file_search_key(&q, &cfg) {
+                    file_cache_put(&mut st.file_cache, key, hits.clone(), FILE_CACHE_CAP);
+                }
+                let cur = SEARCH_GEN.load(Ordering::Relaxed);
+                if !should_store_search(gen, cur, st.search_gen) {
+                    continue; // superseded while the index query ran
+                }
                 st.files = hits;
                 st.search_gen = gen;
                 launcher_refilter(&mut st);
@@ -9924,7 +14012,10 @@ unsafe fn launcher_close(h: HWND) {
     st.query.clear();
     st.sel = 0;
     st.scroll = 0;
-    clear_file_hits(&mut st.files);
+    st.files.clear();
+    // Recent results are for backspacing within one session: kept across a
+    // close they could list, and let Enter open, a file deleted since.
+    st.file_cache.clear();
     st.calc = None;
     st.wide = false;
     st.window_only = false;
@@ -10390,6 +14481,90 @@ unsafe fn draw_builtin_icon(hdc: HDC, name: &str, x: i32, y: i32, size: i32, col
     let _ = DeleteObject(HGDIOBJ(pen.0));
 }
 
+/// Physical px of a `logical`-size icon on each connected monitor, deduped.
+unsafe fn icon_sizes(logical: i32) -> Vec<i32> {
+    let mut mons: Vec<(isize, RECT)> = Vec::new();
+    let _ = EnumDisplayMonitors(
+        None,
+        None,
+        Some(bar_mon_enum),
+        LPARAM(&mut mons as *mut _ as isize),
+    );
+    let mut sizes: Vec<i32> = mons
+        .iter()
+        .map(|&(hmon, _)| dpi_px(logical, monitor_dpi(hmon)))
+        .collect();
+    sizes.sort_unstable();
+    sizes.dedup();
+    sizes
+}
+
+/// Every launcher icon size a connected monitor needs (the popup's own if
+/// none enumerated).
+unsafe fn launcher_icon_sizes() -> Vec<i32> {
+    let sizes = icon_sizes(LA_ICON_CFG.load(Ordering::Relaxed));
+    if sizes.is_empty() {
+        vec![la_icon_px()]
+    } else {
+        sizes
+    }
+}
+
+/// Replace any queued app-icon jobs with one per app at every size in
+/// `sizes` (launcher_icon_sizes). At the popup's own DPI only, the startup
+/// preload ran at 96 (UI_DPI is set only once the popup is placed), so every
+/// icon on a 125%/150% monitor was drawn upscaled from 32 px.
+unsafe fn launcher_queue_app_icons(n: usize, sizes: &[i32]) {
+    let mut q = ICON_QUEUE.lock().unwrap();
+    q.retain(|job| !matches!(job, IconJob::App(..)));
+    for &px in sizes {
+        q.extend((0..n).map(|i| IconJob::App(i, px)));
+    }
+    drop(q);
+    ICON_CV.notify_all();
+}
+
+/// Draw `source`'s icon from `cache` into a `px` box at (x, y). The exact size
+/// is a 1:1 draw (no scaling blur); DrawIconEx composites the icon's own
+/// straight alpha — no premultiply, no halo. Until that size has resolved,
+/// the nearest other cached size is drawn scaled rather than leaving a gap
+/// (a new monitor DPI, a changed icon size), and true is returned so the
+/// caller queues the exact size; the scaled draw lasts one resolve.
+unsafe fn draw_cached_icon(
+    hdc: HDC,
+    cache: &Mutex<IconCache<isize>>,
+    source: &str,
+    stamp: u64,
+    x: i32,
+    y: i32,
+    px: i32,
+) -> bool {
+    let (icon, missing) = {
+        let mut c = cache.lock().unwrap();
+        match c.get(source, px, stamp) {
+            Some(icon) => (icon, false),
+            None => (
+                c.nearest(source, px, stamp, |icon| icon > 1).unwrap_or(0),
+                true,
+            ),
+        }
+    };
+    if icon > 1 {
+        let _ = DrawIconEx(
+            hdc,
+            x,
+            y,
+            HICON(icon as *mut c_void),
+            px,
+            px,
+            0,
+            None,
+            DI_NORMAL,
+        );
+    }
+    missing
+}
+
 unsafe fn launcher_paint(h: HWND) {
     make_launcher_font();
     let mut ps = PAINTSTRUCT::default();
@@ -10611,25 +14786,20 @@ unsafe fn launcher_paint(h: HWND) {
                         la_icon_px(),
                         if idx == st.sel { p.selfg } else { p.dim },
                     );
-                } else if e.icon > 1 {
-                    // The HICON was resolved at exactly la_icon_px(), so this is
-                    // a 1:1 draw (no scaling blur); DrawIconEx composites the icon's
-                    // own straight alpha — no premultiply, no halo.
-                    let hicon = HICON(e.icon as *mut c_void);
+                } else {
                     let iy = top + (la_row_h() - la_icon_px()) / 2;
-                    let _ = DrawIconEx(
+                    let px = la_icon_px();
+                    if draw_cached_icon(
                         hdc,
+                        &ICON_CACHE,
+                        &e.icon_path,
+                        e.stamp,
                         row.left + 6,
                         iy,
-                        hicon,
-                        la_icon_px(),
-                        la_icon_px(),
-                        0,
-                        None,
-                        DI_NORMAL,
-                    );
-                } else if e.icon == 0 {
-                    want.push(IconJob::App(i));
+                        px,
+                    ) {
+                        want.push(IconJob::App(i, px));
+                    }
                 }
                 (
                     e.name.as_str(),
@@ -10640,20 +14810,15 @@ unsafe fn launcher_paint(h: HWND) {
             }
             Hit::Window(i) => {
                 let win = &st.windows[i];
-                let icon = bar_app_icon(hwnd_from(win.hwnd), la_icon_px());
-                if icon > 1 {
+                // ICON_CACHE by the exe read when the list was built: this
+                // thread is the only one that draws it (so LA_REFRESH can free
+                // it), and a paint no longer opens each row's process.
+                if !win.exe.is_empty() {
                     let iy = top + (la_row_h() - la_icon_px()) / 2;
-                    let _ = DrawIconEx(
-                        hdc,
-                        row.left + 6,
-                        iy,
-                        HICON(icon as *mut c_void),
-                        la_icon_px(),
-                        la_icon_px(),
-                        0,
-                        None,
-                        DI_NORMAL,
-                    );
+                    let px = la_icon_px();
+                    if draw_cached_icon(hdc, &ICON_CACHE, &win.exe, 0, row.left + 6, iy, px) {
+                        want.push(IconJob::Exe(win.exe.clone(), px));
+                    }
                 }
                 (
                     win.title.as_str(),
@@ -10664,21 +14829,18 @@ unsafe fn launcher_paint(h: HWND) {
             }
             Hit::File(i) => {
                 let f = &st.files[i];
-                if f.icon > 1 {
-                    let iy = top + (la_row_h() - la_icon_px()) / 2;
-                    let _ = DrawIconEx(
-                        hdc,
-                        row.left + 6,
-                        iy,
-                        HICON(f.icon as *mut c_void),
-                        la_icon_px(),
-                        la_icon_px(),
-                        0,
-                        None,
-                        DI_NORMAL,
-                    );
-                } else if f.icon == 0 {
-                    want.push(IconJob::File(st.search_gen, i));
+                let iy = top + (la_row_h() - la_icon_px()) / 2;
+                let px = la_icon_px();
+                if draw_cached_icon(
+                    hdc,
+                    &FILE_ICON_CACHE,
+                    &f.path,
+                    f.stamp(),
+                    row.left + 6,
+                    iy,
+                    px,
+                ) {
+                    want.push(IconJob::File(st.search_gen, i, px));
                 }
                 (
                     f.name.as_str(),
@@ -10735,6 +14897,20 @@ unsafe fn launcher_paint(h: HWND) {
     if let Some(of) = old_font {
         SelectObject(hdc, of);
     }
+    // Trim the file-icon LRU here: this is the only thread that draws file
+    // icons and this paint is done with them, and a row still listed (even
+    // scrolled out of view) keeps its icon.
+    {
+        let mut cache = FILE_ICON_CACHE.lock().unwrap();
+        if cache.over_cap() {
+            let listed: std::collections::HashSet<&str> =
+                st.files.iter().map(|f| f.path.as_str()).collect();
+            cache.evict(
+                |src| listed.contains(src),
+                |icon| release_launcher_icon(icon),
+            );
+        }
+    }
     drop(st);
     if let Some(b) = bb {
         backbuf_end(win_hdc, b);
@@ -10766,13 +14942,16 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
                         if !st.loaded {
-                            replace_launcher_apps(&mut st, launcher_enumerate());
+                            st.all = launcher_enumerate();
                             st.loaded = true;
                         }
                         st.query.clear();
                         st.sel = 0;
                         st.scroll = 0;
-                        clear_file_hits(&mut st.files);
+                        // A search still in flight from the last session must
+                        // not land under the fresh, empty query.
+                        launcher_cancel_search();
+                        st.files.clear();
                         let cfg = UI_CFG
                             .lock()
                             .unwrap()
@@ -10803,7 +14982,8 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
                         st.query.clear();
-                        clear_file_hits(&mut st.files);
+                        launcher_cancel_search();
+                        st.files.clear();
                         st.windows = launcher_windows();
                         st.clipboard.clear();
                         st.emoji.clear();
@@ -10821,35 +15001,43 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                 LA_REFRESH => {
                     let apps = launcher_enumerate();
                     let n = apps.len();
+                    let sizes = launcher_icon_sizes();
                     {
                         let mut st = LAUNCHER_STATE.lock().unwrap();
-                        replace_launcher_apps(&mut st, apps);
+                        st.all = apps;
                         st.loaded = true;
                         st.sel = 0;
                         st.scroll = 0;
                         launcher_refilter(&mut st);
+                        // Free what no row can ask for again: a size no
+                        // monitor uses (launcher_icon_size changed) and an
+                        // app's superseded or removed stamp. Safe here: only
+                        // this thread draws ICON_CACHE, and it is not painting.
+                        // Stamp 0 (UWP ids, switcher exes) goes by size only.
+                        let live: std::collections::HashSet<(&str, u64)> = st
+                            .all
+                            .iter()
+                            .map(|e| (e.icon_path.as_str(), e.stamp))
+                            .collect();
+                        ICON_CACHE.lock().unwrap().retain_live(
+                            |src, px, stamp| {
+                                sizes.contains(&px) && (stamp == 0 || live.contains(&(src, stamp)))
+                            },
+                            |icon| release_launcher_icon(icon),
+                        );
                     }
-                    let mut q = ICON_QUEUE.lock().unwrap();
-                    q.retain(|job| !matches!(job, IconJob::App(_)));
-                    q.extend((0..n).map(IconJob::App));
-                    drop(q);
-                    ICON_CV.notify_all();
+                    // Cached icons are reused (the worker skips hits), so a
+                    // refresh re-extracts only new or changed entries.
+                    launcher_queue_app_icons(n, &sizes);
                     let _ = InvalidateRect(h, None, BOOL(0));
                 }
                 LA_CHAR => {
-                    let q = {
-                        let mut st = LAUNCHER_STATE.lock().unwrap();
+                    // Only the hook's Space arrives here; LA_KEY edits inline.
+                    launcher_edit_query(h, |q| {
                         if let Some(c) = char::from_u32(l.0 as u32) {
-                            st.query.push(c);
+                            q.push(c);
                         }
-                        st.sel = 0;
-                        st.scroll = 0;
-                        clear_file_hits(&mut st.files); // stale results vanish until the new query returns
-                        launcher_refilter(&mut st);
-                        st.query.clone()
-                    };
-                    launcher_dispatch_search(&q);
-                    let _ = InvalidateRect(h, None, BOOL(0));
+                    });
                 }
                 LA_KEY => {
                     // Raw key from the hook: vk | scan<<16 | shift<<32 | caps<<33.
@@ -10867,6 +15055,9 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     if caps {
                         state[VK_CAPITAL.0 as usize] = 0x01;
                     }
+                    // wFlags = 0, not 0x4 (no state change): 0 keeps a pending
+                    // dead key in this thread's buffer, so ´ then e composes é
+                    // on US-Intl / German / French layouts.
                     let mut buf = [0u16; 8];
                     let n = ToUnicode(vk, scan, Some(&state), &mut buf, 0);
                     if n >= 1 {
@@ -10875,23 +15066,18 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                             .and_then(|r| r.ok())
                             .filter(|c| *c >= ' ')
                         {
-                            let _ =
-                                PostMessageW(h, WM_LAUNCHER, WPARAM(LA_CHAR), LPARAM(c as isize));
+                            // Inline, not re-posted as LA_CHAR: a re-post lands
+                            // behind the Space / Backspace / Enter the hook
+                            // already queued, so whenever this thread lagged,
+                            // "cod"+Enter launched the pick for "co".
+                            launcher_edit_query(h, |q| q.push(c));
                         }
                     }
                 }
                 LA_BACK => {
-                    let q = {
-                        let mut st = LAUNCHER_STATE.lock().unwrap();
-                        st.query.pop();
-                        st.sel = 0;
-                        st.scroll = 0;
-                        clear_file_hits(&mut st.files);
-                        launcher_refilter(&mut st);
-                        st.query.clone()
-                    };
-                    launcher_dispatch_search(&q);
-                    let _ = InvalidateRect(h, None, BOOL(0));
+                    launcher_edit_query(h, |q| {
+                        q.pop();
+                    });
                 }
                 LA_UP => {
                     let mut rc = RECT::default();
@@ -11152,6 +15338,7 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
 /// Launcher thread: registers its class, creates the (hidden) picker window, and
 /// pumps its own message loop. Idle until the hook posts `WM_LAUNCHER`.
 fn launcher_thread() {
+    raise_current_thread(ThreadRole::Launcher);
     unsafe {
         let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
         let wc = WNDCLASSW {
@@ -11199,19 +15386,14 @@ fn launcher_thread() {
             let n = apps.len();
             {
                 let mut st = LAUNCHER_STATE.lock().unwrap();
-                replace_launcher_apps(&mut st, apps);
+                st.all = apps;
                 st.loaded = true;
                 launcher_refilter(&mut st);
             }
             // Preload every app's icon in the background so the list is fully
             // iconned before the picker is opened (the parallel icon workers chew
             // through these while Astur sits idle).
-            let mut q = ICON_QUEUE.lock().unwrap();
-            for i in 0..n {
-                q.push_back(IconJob::App(i));
-            }
-            drop(q);
-            ICON_CV.notify_all();
+            launcher_queue_app_icons(n, &launcher_icon_sizes());
         }
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -11462,22 +15644,40 @@ static SYSMENU_STATE: Mutex<SysMenuState> = Mutex::new(SysMenuState {
     confirm: false,
     stack: Vec::new(),
 });
-static SYSMENU_ICON_CACHE: Mutex<Option<HashMap<String, isize>>> = Mutex::new(None);
-
+/// A custom system-menu icon, from SYSMENU_ICON_CACHE keyed by (source, px,
+/// stamp). Keyed on the source alone it kept the first size it resolved at,
+/// so the menu opened on a monitor of another scale drew it rescaled.
 unsafe fn sysmenu_custom_icon(source: &str) -> isize {
     if source.is_empty()
         || (!std::path::Path::new(source).exists() && !source.starts_with("shell:"))
     {
         return 0;
     }
-    let mut cache = SYSMENU_ICON_CACHE.lock().unwrap();
-    let map = cache.get_or_insert_with(HashMap::new);
-    if let Some(icon) = map.get(source) {
-        return *icon;
+    let px = la_icon_px();
+    let stamp = icon_stamp(source);
+    if let Some(icon) = SYSMENU_ICON_CACHE.lock().unwrap().get(source, px, stamp) {
+        return icon;
     }
-    let icon = load_icon(source, la_icon_px());
-    map.insert(source.to_string(), icon);
-    icon
+    // Resolved on this thread, outside the lock, as before.
+    let icon = load_icon(source, px);
+    let sizes = launcher_icon_sizes();
+    // One guard for the rest: re-locking inside a `match` on a lock()
+    // temporary self-deadlocks, since the temporary lives to the match's end.
+    let mut cache = SYSMENU_ICON_CACHE.lock().unwrap();
+    // This source at a size no monitor uses or an older stamp is never asked
+    // for again. Free now: only this thread draws these, and DrawIconEx has
+    // finished with any it drew earlier in this paint.
+    cache.retain_live(
+        |src, p, s| src != source || (s == stamp && sizes.contains(&p)),
+        |old| release_launcher_icon(old),
+    );
+    match cache.insert(source, px, stamp, icon, 0) {
+        Some(dup) => {
+            release_launcher_icon(dup);
+            cache.get(source, px, stamp).unwrap_or(0)
+        }
+        None => icon,
+    }
 }
 /// Enable SeShutdownPrivilege on our token (required by ExitWindowsEx for reboot/
 /// shutdown). Lazy — only when a power action fires, never at startup.
@@ -11507,7 +15707,13 @@ unsafe fn enable_shutdown_priv() {
 }
 
 unsafe fn reload_config_now() {
-    let cfg = load_config();
+    let cfg = match load_config() {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            log_error!("config reload skipped, current settings kept: {e}");
+            return;
+        }
+    };
     apply_hook_config(&cfg);
     apply_theme(&cfg);
     apply_bar_statics(&cfg);
@@ -11520,7 +15726,9 @@ unsafe fn reload_config_now() {
             LPARAM(0),
         );
     }
-    push_cmd(Cmd::Reload(Box::new(cfg)));
+    // Full, never diffed: an explicit reload (IPC, system menu, extra hotkey)
+    // is the user's recovery tool for windows left mis-styled.
+    push_cmd(Cmd::Reload(Box::new(cfg), true));
     let hm = MARKER_HWND.load(Ordering::Relaxed);
     if hm != 0 {
         let _ = PostMessageW(hwnd_from(hm), WM_RELOAD, WPARAM(0), LPARAM(0));
@@ -12119,12 +16327,26 @@ unsafe fn tray_open_settings() {
     );
 }
 
+/// `tray_open_settings` on its own thread. The tray window lives on the main
+/// thread, which pumps the low-level hooks: process creation there (image
+/// load, AV scan; an estimated 5-50 ms, not measured) stalled every mouse and
+/// key event for its duration. The error MessageBox runs its own modal loop,
+/// so it is fine on the worker.
+unsafe fn tray_open_settings_async() {
+    let spawned = std::thread::Builder::new()
+        .name("tray-settings".to_string())
+        .spawn(|| unsafe { tray_open_settings() });
+    if spawned.is_err() {
+        tray_open_settings();
+    }
+}
+
 unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if msg == WM_TRAY {
         // Classic NOTIFYICON callback: lParam low word = the mouse message.
         let event = (l.0 as u32) & 0xFFFF;
         if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
-            tray_open_settings();
+            tray_open_settings_async();
         } else if event == WM_RBUTTONUP {
             if let Ok(menu) = CreatePopupMenu() {
                 let s1: Vec<u16> = "Settings\0".encode_utf16().collect();
@@ -12146,7 +16368,7 @@ unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) 
                 );
                 let _ = DestroyMenu(menu);
                 match cmd.0 as usize {
-                    TRAY_SETTINGS => tray_open_settings(),
+                    TRAY_SETTINGS => tray_open_settings_async(),
                     TRAY_QUIT => {
                         tray_remove(h);
                         restore_all_windows();
@@ -12438,7 +16660,9 @@ unsafe fn windows_build() -> String {
 }
 
 /// The report shared by `--check` and (at `info`) the startup log.
-unsafe fn diagnostics_report(dpi_aware: bool) -> String {
+/// `live` = produced inside the running WM, so its counters mean something; a
+/// `--check` process has its own, all zero, and prints none.
+unsafe fn diagnostics_report(dpi_aware: bool, live: bool) -> String {
     let mut out = String::new();
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
@@ -12483,11 +16707,16 @@ unsafe fn diagnostics_report(dpi_aware: bool) -> String {
         log_path().display(),
         log_level_name(LOG_LEVEL.load(Ordering::Relaxed)),
     ));
-    {
-        let cfg = load_config();
-        if cfg.unknown_keys.is_empty() {
+    match load_config() {
+        Err(e) => {
+            out.push_str(&format!(
+                "  config keys    : UNREADABLE, file left untouched: {e}\n"
+            ));
+        }
+        Ok(cfg) if cfg.unknown_keys.is_empty() => {
             out.push_str("  config keys    : all understood\n");
-        } else {
+        }
+        Ok(cfg) => {
             out.push_str(&format!(
                 "  config keys    : {} NOT understood (ignored):\n",
                 cfg.unknown_keys.len()
@@ -12501,6 +16730,17 @@ unsafe fn diagnostics_report(dpi_aware: bool) -> String {
         "  hook re-arms   : {}\n",
         HOOK_REARMS.load(Ordering::Relaxed)
     ));
+    if live {
+        out.push_str(&format!(
+            "  placement      : {}\n",
+            if ASYNC_WINDOW_POS.load(Ordering::Relaxed) {
+                "posted (async_window_pos = true)"
+            } else {
+                "synchronous (async_window_pos = false)"
+            }
+        ));
+        out.push_str(&format!("  counters       : {}\n", counters_line()));
+    }
     out.push_str(&format!(
         "  other instance : {}\n",
         if instance_already_running() {
@@ -12521,7 +16761,7 @@ unsafe fn log_startup_environment(dpi_aware: bool) {
     if !log_on(LOG_INFO) {
         return;
     }
-    for line in diagnostics_report(dpi_aware).lines() {
+    for line in diagnostics_report(dpi_aware, true).lines() {
         log_info!("{}", line.trim_end());
     }
 }
@@ -12529,7 +16769,7 @@ unsafe fn log_startup_environment(dpi_aware: bool) {
 /// Write `--check` output to the parent console when there is one, and always
 /// to a file, so a GUI-subsystem process can still be asked what it sees.
 unsafe fn run_check() -> i32 {
-    let report = diagnostics_report(true);
+    let report = diagnostics_report(true, false);
     let path = config_path("ASTUR_CHECK", "astur-check.txt");
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -12618,13 +16858,27 @@ unsafe fn restore_foreground_lock() {
     if saved == 0 {
         return;
     }
-    let mut value = saved - 1;
+    let value = saved - 1;
+    // By value, like the disable path: pvParam IS the timeout. This used to pass
+    // a pointer to `value`, which set the timeout to the low bits of a stack
+    // address on every graceful exit instead of the user's original value.
     let _ = SystemParametersInfoW(
         SPI_SETFOREGROUNDLOCKTIMEOUT,
         0,
-        Some(&mut value as *mut u32 as *mut c_void),
+        Some(value as usize as *mut c_void),
         SPIF_SENDCHANGE,
     );
+    let mut now: u32 = 0;
+    let read = SystemParametersInfoW(
+        SPI_GETFOREGROUNDLOCKTIMEOUT,
+        0,
+        Some(&mut now as *mut u32 as *mut c_void),
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+    )
+    .is_ok();
+    if read && now != value {
+        log_error!("foreground lock timeout restore failed: wanted {value}, system has {now}");
+    }
 }
 
 fn main() {
@@ -12653,7 +16907,8 @@ fn main() {
         match parse_args() {
             CliAction::Check => {
                 attach_parent_console();
-                let cfg = load_config();
+                // An unreadable file is reported by the check itself.
+                let cfg = load_config().unwrap_or_else(|_| config::default_config());
                 LOG_LEVEL.store(log_level_from_str(&cfg.log_level), Ordering::Relaxed);
                 std::process::exit(run_check());
             }
@@ -12690,8 +16945,12 @@ fn main() {
 
         // Load config once here so the bars (main thread) and the manager thread
         // share the exact same settings.
-        let cfg = load_config();
+        let (cfg, cfg_err) = load_config_for_startup();
+        let cfg_unread = cfg_err.is_some();
         apply_hook_config(&cfg); // also applies log_level, so log after this
+        if let Some(e) = cfg_err {
+            log_error!("running on built-in defaults, config file left untouched: {e}");
+        }
         log_startup_environment(dpi_aware.is_ok());
         if cfg.persist_state {
             load_launcher_mru();
@@ -12699,6 +16958,20 @@ fn main() {
         BAR_HINST.store(hinst.0 as isize, Ordering::Relaxed);
         apply_bar_statics(&cfg);
         apply_theme(&cfg);
+        // Seed the bar snapshot from the config before any bar exists (BAR-23):
+        // the bars used to paint BarData::new()'s hard-coded dark defaults with
+        // no widgets until the manager had adopted, retiled and styled every
+        // window, a dark flash for light-theme users. Here, before the manager
+        // thread is spawned, so it can never overwrite the manager's first
+        // snapshot. `mons` stays empty: seeded pill slots or an active index
+        // that the first real update then changes would start a spurious pill
+        // slide or flash a label.
+        *BAR.lock().unwrap() = bar_data_from(
+            &cfg,
+            THEME_LIGHT.load(Ordering::Relaxed),
+            cfg.start_tiled,
+            Vec::new(),
+        );
 
         // Red, click-through, topmost corner-marker overlay.
         let brush = CreateSolidBrush(COLORREF(0x000000FF)); // 0x00BBGGRR -> red
@@ -12739,6 +17012,16 @@ fn main() {
         .expect("CreateWindowExW failed");
         let _ = SetLayeredWindowAttributes(marker, COLORREF(0), 200, LWA_ALPHA);
         MARKER_HWND.store(marker.0 as isize, Ordering::Relaxed);
+        // Explorer broadcasts "TaskbarCreated" when it (re)starts; the marker
+        // resets the wallpaper source cache on it. It is a registered message
+        // above WM_USER, so UIPI drops it from medium-IL Explorer to an
+        // elevated Astur unless explicitly allowed (ChangeWindowMessageFilter
+        // remarks). Allowed only when elevated: that is the only case needing it.
+        let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
+        TASKBAR_CREATED_MSG.store(taskbar_created, Ordering::Relaxed);
+        if taskbar_created != 0 && process_elevated() {
+            let _ = ChangeWindowMessageFilterEx(marker, taskbar_created, MSGFLT_ALLOW, None);
+        }
 
         // Drag-outline overlay: an accent-coloured hollow frame previewing the
         // move/resize target. Region-shaped per drag; layered + click-through so it
@@ -12821,6 +17104,9 @@ fn main() {
             ensure_bars();
         }
 
+        // This thread runs the LL hooks and WinEvents from here on: raise it
+        // before they exist (see the thread scheduling notes).
+        raise_current_thread(ThreadRole::Main);
         // Without these Astur is inert, but `panic = "abort"` would turn an
         // .expect() here into a silent process death with no window and no
         // message (review W-03). Say why, then leave cleanly.
@@ -12849,123 +17135,88 @@ fn main() {
         }
 
         // React to windows opening/closing/focusing for tiling. Out-of-context
-        // callbacks run on this thread's message loop; own-process events skipped.
-        let _ = SetWinEventHook(
-            EVENT_OBJECT_DESTROY,
-            EVENT_OBJECT_HIDE,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        let _ = SetWinEventHook(
-            EVENT_OBJECT_SHOW,
-            EVENT_OBJECT_SHOW,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        // F11/borderless fullscreen and maximize/restore both change top-level
-        // geometry. Callback filters this noisy event to foreground or already-
-        // fullscreen windows before doing any work.
-        let _ = SetWinEventHook(
-            EVENT_OBJECT_LOCATIONCHANGE,
-            EVENT_OBJECT_LOCATIONCHANGE,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        let _ = SetWinEventHook(
-            EVENT_SYSTEM_FOREGROUND,
-            EVENT_SYSTEM_FOREGROUND,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        let _ = SetWinEventHook(
-            EVENT_SYSTEM_MINIMIZESTART,
-            EVENT_SYSTEM_MINIMIZEEND,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        // Native (non-Alt) move/resize finished: re-tile so windows never overlap.
-        let _ = SetWinEventHook(
-            EVENT_SYSTEM_MOVESIZEEND,
-            EVENT_SYSTEM_MOVESIZEEND,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
-        // Title changes, so the bar's title widget tracks browser tabs, editor
-        // files and download progress instead of freezing between commands.
-        // The callback filters to the foreground window (OBJID_WINDOW only —
-        // the proc already drops every id_object != 0), so this noisy event
-        // costs one comparison per fire.
-        let _ = SetWinEventHook(
-            EVENT_OBJECT_NAMECHANGE,
-            EVENT_OBJECT_NAMECHANGE,
-            None,
-            Some(win_event_proc),
-            0,
-            0,
-            WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
-        );
+        // callbacks run on this thread's message loop; own-process events
+        // skipped. One hook per range in WINEVENT_RANGES, each checked: every
+        // result used to be dropped, so a failed one failed silently.
+        for (i, &(min, max, name)) in WINEVENT_RANGES.iter().enumerate() {
+            let hook = SetWinEventHook(
+                min,
+                max,
+                None,
+                Some(win_event_proc),
+                0,
+                0,
+                WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS,
+            );
+            if hook.0.is_null() {
+                WINEVENT_HOOKS_FAILED.fetch_or(1 << i, Ordering::Relaxed);
+                log_error!("SetWinEventHook({name}) failed; those window events are not seen");
+            }
+        }
+        if WINEVENT_HOOKS_FAILED.load(Ordering::Relaxed) & 1 != 0 {
+            // Without DESTROY..HIDE Astur neither adopts shown windows nor
+            // untracks closed ones, and nothing on screen would say why.
+            message_box(
+                "Astur could not subscribe to window show / hide / close events.\n\n\
+                 New windows will not be tiled and closed windows will leave gaps \
+                 until Astur is restarted.",
+            );
+        }
 
         // System tray icon — the control surface for Astur Full (no console in
         // release): left/double-click opens Settings, right-click menu = Settings/Quit.
         let _tray = setup_tray(hinst);
 
         // Focus-follows-mouse poll loop (no-op unless enabled in config).
-        std::thread::spawn(focus_follow_worker);
+        spawn_named("focus-follow", focus_follow_worker);
         // CPU/RAM/battery poll loop (idles unless a stats widget is enabled).
-        std::thread::spawn(stats_worker);
+        spawn_named("stats", stats_worker);
         // Wallpaper/state writes can involve disk/shell I/O; keep them off manager/hooks.
-        std::thread::spawn(wallpaper_worker);
-        std::thread::spawn(state_worker);
-        std::thread::spawn(mru_worker);
+        spawn_named("wallpaper", wallpaper_worker);
+        spawn_named("state", state_worker);
+        spawn_named("mru", mru_worker);
         // Workspace-slide compositor (owns its overlay + message pump; idle on a
         // condvar until the manager dispatches a slide).
-        std::thread::spawn(transition_worker);
+        spawn_named("transition", transition_worker);
         // Per-window glide compositor (move/open/close/re-tile). Own overlay +
         // pump; idle on a condvar until the manager dispatches a glide.
-        std::thread::spawn(glide_worker);
+        spawn_named("glide", glide_worker);
+        // Wallpaper renders for both compositors (the only PrintWindow caller;
+        // see the wallpaper cache notes). Normal priority, idle on a condvar.
+        spawn_named("wallpaper-capture", wallpaper_capture_worker);
         // App launcher (Alt+Space): owns its picker window + message pump, idle
         // until the keyboard hook posts an open/key message.
-        std::thread::spawn(launcher_thread);
+        spawn_named("launcher", launcher_thread);
         // Resolve launcher app icons to HBITMAPs off the UI thread, in parallel so
         // the whole list is iconned fast (each worker is a COM STA; they idle on a
         // condvar once the queue drains). Count is a speed/RAM trade — see
-        // plan/optimization.md.
-        for _ in 0..3 {
-            std::thread::spawn(icon_worker);
+        // plan/optimization.md. RAM is no longer the constraint, so one per core
+        // from 3 up to 8: preload and new-DPI bursts finish sooner, unless the
+        // shell serialises extraction internally (not measured).
+        let icon_workers = std::thread::available_parallelism()
+            .map_or(3, |n| n.get())
+            .clamp(3, 8);
+        for i in 0..icon_workers {
+            spawn_named(&format!("icon-{i}"), icon_worker);
         }
-        // File search against the Windows Search index (debounced, own COM STA).
-        std::thread::spawn(filesearch_worker);
+        // File search against the Windows Search index (debounced, own COM STA
+        // each). Two, so the newest query never waits on a superseded one.
+        for i in 0..2 {
+            spawn_named(&format!("filesearch-{i}"), filesearch_worker);
+        }
         // System / power menu (Alt+Shift+Space): owns its popup + message pump.
-        std::thread::spawn(sysmenu_thread);
+        spawn_named("sysmenu", sysmenu_thread);
         // Hot-reload config files on save.
-        std::thread::spawn(config_watcher);
+        spawn_named("config-watcher", move || config_watcher(cfg_unread));
         // Put the input hooks back if Windows silently drops them.
-        std::thread::spawn(hook_watchdog);
+        spawn_named("hook-watchdog", hook_watchdog);
         // Optional local-only named-pipe command API; blocks on its own worker.
-        std::thread::spawn(ipc_worker);
+        spawn_named("ipc", ipc_worker);
         // Crash rescue: un-hide anything a previous (killed) instance left hidden
         // BEFORE the manager adopts windows, so they're adopted visible.
         rescue_orphans();
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
-        std::thread::spawn(move || manager_loop(cfg));
+        spawn_named("manager", move || manager_loop(cfg));
 
         println!("Astur running.");
         println!("  LEFT ALT + left-drag  = move window (drops back into the tiling)");
@@ -13015,6 +17266,678 @@ fn main() {
 mod tests {
     use super::*;
 
+    #[test]
+    fn hook_delay_keeps_the_worst_and_ignores_future_stamps() {
+        // The only test that touches HOOK_DELAY_MAX.
+        HOOK_DELAY_MAX.store(0, Ordering::Relaxed);
+        let now = unsafe { GetTickCount() };
+        hook_delay_note(now.wrapping_sub(40));
+        hook_delay_note(now.wrapping_sub(20));
+        let worst = HOOK_DELAY_MAX.load(Ordering::Relaxed);
+        assert!((40..1_000).contains(&worst), "worst = {worst}");
+        // A stamp ahead of our tick read must not wrap to ~49 days.
+        hook_delay_note(now.wrapping_add(10_000));
+        assert_eq!(HOOK_DELAY_MAX.load(Ordering::Relaxed), worst);
+    }
+
+    #[test]
+    fn frame_stats_are_upper_median_and_max() {
+        assert_eq!(p50_max(&mut []), (0, 0));
+        assert_eq!(p50_max(&mut [7]), (7, 7));
+        assert_eq!(p50_max(&mut [9, 1, 5]), (5, 9));
+        // Even count: the upper of the two middle values.
+        assert_eq!(p50_max(&mut [4, 1, 3, 2]), (3, 4));
+    }
+
+    #[test]
+    fn show_event_adds_untracked_windows_even_mid_retile() {
+        // An app opening a window while the manager holds SUPPRESS for a
+        // retile must still be adopted (the 1-of-4 burst bug).
+        assert!(show_needs_add(true, false));
+        assert!(show_needs_add(false, false));
+        // Tracked + not ours: Add runs the follow-to-workspace logic.
+        assert!(show_needs_add(false, true));
+        // Tracked + SUPPRESS: echo of our own show, skip.
+        assert!(!show_needs_add(true, true));
+    }
+
+    // ---- drag drops (batch 17, INPUT-9 / INPUT-5) -----------------------------
+
+    #[test]
+    fn a_resize_drop_skips_its_commit_only_when_tiled_and_instant() {
+        use ResizeDrop::*;
+        // Untiled windows, and any glide, commit the preview as before.
+        assert_eq!(resize_drop_plan(false, false, false), Commit);
+        assert_eq!(resize_drop_plan(false, true, false), Commit);
+        assert_eq!(resize_drop_plan(true, true, true), Commit);
+        assert_eq!(resize_drop_plan(true, false, true), Commit);
+        // Tiled + instant: un-park if parked, else straight to the retile.
+        assert_eq!(resize_drop_plan(true, true, false), UnparkOrigin);
+        assert_eq!(resize_drop_plan(true, false, false), NoUnpark);
+    }
+
+    #[test]
+    fn placement_rects_shift_by_the_work_area_inset_not_its_origin() {
+        let r = RECT {
+            left: 2100,
+            top: 60,
+            right: 2740,
+            bottom: 540,
+        };
+        // A secondary monitor with no toolbar: workspace == screen.
+        assert_eq!(placement_to_workspace(r, (0, 0), false), r);
+        // A top taskbar 48 px tall on that monitor.
+        let w = placement_to_workspace(r, (0, 48), false);
+        assert_eq!((w.left, w.top, w.right, w.bottom), (2100, 12, 2740, 492));
+        // Tool windows use screen coordinates.
+        assert_eq!(placement_to_workspace(r, (0, 48), true), r);
+    }
+
+    // ---- thread scheduling (batch 11, EVENTS-12) ------------------------------
+
+    #[test]
+    fn raised_threads_never_go_below_normal_and_the_manager_leads_the_compositors() {
+        use windows::Win32::System::Threading::{
+            THREAD_PRIORITY_NORMAL, THREAD_PRIORITY_TIME_CRITICAL,
+        };
+        let roles = [
+            ThreadRole::Main,
+            ThreadRole::Manager,
+            ThreadRole::Compositor,
+            ThreadRole::Launcher,
+        ];
+        for r in roles {
+            let p = role_priority(r).0;
+            assert!(p >= THREAD_PRIORITY_NORMAL.0, "{r:?} below normal");
+            assert!(p < THREAD_PRIORITY_TIME_CRITICAL.0, "{r:?} time-critical");
+        }
+        assert!(role_priority(ThreadRole::Manager).0 >= role_priority(ThreadRole::Compositor).0);
+        assert!(role_priority(ThreadRole::Main).0 <= THREAD_PRIORITY_HIGHEST.0);
+    }
+
+    // ---- posted placement (batch 10, TILE-1) ----------------------------------
+
+    #[test]
+    fn foreign_swp_flags_adds_only_the_async_bit_and_only_when_on() {
+        let base = SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSENDCHANGING;
+        assert_eq!(foreign_swp_flags(base, false), base);
+        assert_eq!(foreign_swp_flags(base, true), base | SWP_ASYNCWINDOWPOS);
+        let park = SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSENDCHANGING;
+        assert_eq!(
+            foreign_swp_flags(park, true).0 & !SWP_ASYNCWINDOWPOS.0,
+            park.0
+        );
+    }
+
+    #[test]
+    fn border_insets_outside_a_plausible_frame_are_rejected() {
+        assert_eq!(bounded_insets(7, 0, 7, 7, 16), Some((7, 0, 7, 7)));
+        assert_eq!(bounded_insets(0, 0, 0, 0, 16), Some((0, 0, 0, 0)));
+        assert_eq!(bounded_insets(16, 16, 16, 16, 16), Some((16, 16, 16, 16)));
+        // A pair read across a landing: the "inset" is the move distance.
+        assert_eq!(bounded_insets(412, 7, -405, 7, 16), None);
+        assert_eq!(bounded_insets(7, -1, 7, 7, 16), None);
+        assert_eq!(bounded_insets(7, 0, 17, 7, 16), None);
+    }
+
+    #[test]
+    fn a_drop_commit_counts_as_landed_only_off_the_park() {
+        let rc = |l, t, r, b| RECT {
+            left: l,
+            top: t,
+            right: r,
+            bottom: b,
+        };
+        let parked = rc(-32000, -32000, -31360, -31520);
+        let drop = rc(100, 100, 740, 580);
+        // Parked during the drag, commit not processed yet.
+        assert!(!swp_landed(parked, parked, drop));
+        // Landed exactly, or where the app rounded it to.
+        assert!(swp_landed(parked, drop, drop));
+        assert!(swp_landed(parked, rc(100, 100, 740, 582), drop));
+        // Outline drag (never parked), dropped where it already was.
+        assert!(swp_landed(drop, drop, drop));
+        // The park itself was still queued at the drop and has just landed:
+        // that is not the commit.
+        let orig = rc(0, 0, 640, 480);
+        assert!(!swp_landed(orig, parked, drop));
+        assert!(!swp_landed(orig, orig, drop));
+    }
+
+    #[test]
+    fn a_drop_glides_only_when_wanted_and_landed() {
+        assert_eq!(drop_glide_plan(true, true), DropRetile::Glide);
+        assert_eq!(drop_glide_plan(true, false), DropRetile::Instant);
+        assert_eq!(drop_glide_plan(false, true), DropRetile::Instant);
+        assert_eq!(drop_glide_plan(false, false), DropRetile::Instant);
+        assert!(rect_parked(&RECT {
+            left: -32000,
+            top: -32000,
+            right: 0,
+            bottom: 0
+        }));
+        assert!(!rect_parked(&RECT {
+            left: -3840,
+            top: 0,
+            right: 0,
+            bottom: 2160
+        }));
+    }
+
+    // ---- event intake (batch 8) ---------------------------------------------
+
+    #[test]
+    fn a_minimize_retiles_only_its_own_tiled_monitor() {
+        let active = |mi: usize| [0usize, 2][mi];
+        let never = |_: usize, _: usize| false;
+        assert_eq!(retile_for_target(Some((1, 2)), active, never), Some(1));
+        assert_eq!(retile_for_target(Some((0, 0)), active, never), Some(0));
+        // Untracked, on a hidden workspace, or floating: nothing to re-tile.
+        assert_eq!(retile_for_target(None, active, never), None);
+        assert_eq!(retile_for_target(Some((1, 0)), active, never), None);
+        assert_eq!(retile_for_target(Some((1, 2)), active, |_, _| true), None);
+    }
+
+    #[test]
+    fn the_show_prefilter_rejects_exactly_the_app_surface_style_bits() {
+        let (child, tool, noact) = (WS_CHILD.0, WS_EX_TOOLWINDOW.0, WS_EX_NOACTIVATE.0);
+        assert!(show_rejected_by_style(child, 0));
+        assert!(show_rejected_by_style(0, tool));
+        assert!(show_rejected_by_style(0, noact));
+        // An ordinary app window: overlapped, with the usual extended bits.
+        let overlapped = 0x00CF_0000; // WS_OVERLAPPEDWINDOW
+        let ex_app = 0x0000_0100 | 0x0000_0200 | WS_EX_LAYERED.0; // WINDOWEDGE | CLIENTEDGE
+        assert!(!show_rejected_by_style(overlapped, ex_app));
+        assert!(!show_rejected_by_style(
+            0,
+            WS_EX_TOPMOST.0 | WS_EX_TRANSPARENT.0
+        ));
+    }
+
+    #[test]
+    fn winevent_ranges_cover_show_once_and_never_create_or_reorder() {
+        let covers = |e: u32| {
+            WINEVENT_RANGES
+                .iter()
+                .filter(|&&(lo, hi, _)| (lo..=hi).contains(&e))
+                .count()
+        };
+        assert_eq!(covers(EVENT_OBJECT_SHOW), 1);
+        assert_eq!(covers(0x8000), 0, "EVENT_OBJECT_CREATE");
+        assert_eq!(covers(0x8004), 0, "EVENT_OBJECT_REORDER");
+        for e in [
+            EVENT_OBJECT_DESTROY,
+            EVENT_OBJECT_HIDE,
+            EVENT_OBJECT_LOCATIONCHANGE,
+            EVENT_OBJECT_NAMECHANGE,
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_MINIMIZESTART,
+            EVENT_SYSTEM_MINIMIZEEND,
+            EVENT_SYSTEM_MOVESIZEEND,
+        ] {
+            assert_eq!(covers(e), 1, "event {e:#x}");
+        }
+        // The failure mask has a bit per range.
+        assert!(WINEVENT_RANGES.len() <= 32);
+    }
+
+    #[test]
+    fn at_most_one_bar_refresh_is_queued_until_the_manager_takes_it() {
+        let q = AtomicBool::new(false);
+        assert!(bar_refresh_gate(&q));
+        assert!(!bar_refresh_gate(&q));
+        assert!(!bar_refresh_gate(&q));
+        bar_refresh_clear(&q);
+        assert!(bar_refresh_gate(&q), "a clear re-enables the next push");
+        assert!(!bar_refresh_gate(&q));
+    }
+
+    // ---- switch commit ------------------------------------------------------
+
+    #[test]
+    fn the_foreground_is_hidden_last_and_only_when_it_is_outgoing() {
+        let order = |ws: &[isize], fg: isize| hide_order(ws, fg).collect::<Vec<_>>();
+        assert_eq!(order(&[1, 2, 3], 1), vec![2, 3, 1]);
+        assert_eq!(order(&[1, 2, 3], 2), vec![1, 3, 2]);
+        assert_eq!(order(&[1, 2, 3], 3), vec![1, 2, 3]);
+        // Foreground elsewhere (another monitor, an owned dialog, nothing):
+        // list order, nothing dropped or added.
+        assert_eq!(order(&[1, 2, 3], 9), vec![1, 2, 3]);
+        assert_eq!(order(&[1, 2, 3], 0), vec![1, 2, 3]);
+        assert!(order(&[], 1).is_empty());
+    }
+
+    #[test]
+    fn a_focus_event_is_followed_only_while_it_owns_the_foreground() {
+        assert!(focused_follow_allowed(0xA, 0xA));
+        // Stale: the foreground moved on (to the switch's own target).
+        assert!(!focused_follow_allowed(0xB, 0xA));
+        // No foreground at all is not ownership.
+        assert!(!focused_follow_allowed(0, 0xA));
+        assert!(!focused_follow_allowed(0, 0));
+    }
+
+    #[test]
+    fn alpha_is_resent_unless_the_window_already_has_it() {
+        let alpha = LWA_ALPHA.0;
+        assert!(!alpha_set_needed(true, alpha, 204, 204));
+        assert!(alpha_set_needed(true, alpha, 255, 204));
+        // Failed read (never set through SLWA): set it.
+        assert!(alpha_set_needed(false, alpha, 204, 204));
+        // Colour key or no flags: not ours, set it.
+        assert!(alpha_set_needed(true, 0, 204, 204));
+        assert!(alpha_set_needed(true, alpha | 1, 204, 204));
+    }
+
+    #[test]
+    fn short_animations_let_clicks_through_their_overlays() {
+        let blocking = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
+        let through = blocking | WS_EX_LAYERED | WS_EX_TRANSPARENT;
+        assert_eq!(overlay_ex_style(140), through); // the default
+        assert_eq!(overlay_ex_style(0), through);
+        assert_eq!(overlay_ex_style(CLICK_THROUGH_MAX_MS), through);
+        // Long animations keep blocking input: a click would land on a layout
+        // the user has not seen yet.
+        assert_eq!(overlay_ex_style(CLICK_THROUGH_MAX_MS + 1), blocking);
+        assert_eq!(overlay_ex_style(2000), blocking);
+    }
+
+    #[test]
+    fn focus_follows_mouse_waits_out_the_settle_window() {
+        assert!(!focus_mouse_allowed(100, 300));
+        assert!(!focus_mouse_allowed(299, 300));
+        assert!(focus_mouse_allowed(300, 300));
+        assert!(focus_mouse_allowed(301, 300));
+        assert!(focus_mouse_allowed(5, 0), "never settled");
+    }
+
+    // ---- wallpaper cache ----------------------------------------------------
+
+    #[test]
+    fn wallpaper_is_rendered_only_when_an_animation_reads_it() {
+        // Animations off: never, whatever the styles say.
+        assert!(!wallpaper_needed(false, WsAnim::Slide, "glide"));
+        // Fade and off never read it; only a glide would.
+        assert!(!wallpaper_needed(true, WsAnim::Fade, "off"));
+        assert!(!wallpaper_needed(true, WsAnim::Off, "off"));
+        assert!(wallpaper_needed(true, WsAnim::Fade, "glide"));
+        assert!(wallpaper_needed(true, WsAnim::Off, "glide"));
+        // Moving slide / spring frames read it with or without the glide.
+        assert!(wallpaper_needed(true, WsAnim::Slide, "off"));
+        assert!(wallpaper_needed(true, WsAnim::Spring, "off"));
+    }
+
+    #[test]
+    fn only_moving_slides_take_a_wallpaper() {
+        assert!(slide_wants_wallpaper(WsAnim::Slide, true));
+        assert!(slide_wants_wallpaper(WsAnim::Spring, true));
+        // Fade blends whole captures; a first visit holds frame 0.
+        assert!(!slide_wants_wallpaper(WsAnim::Fade, true));
+        assert!(!slide_wants_wallpaper(WsAnim::Slide, false));
+        assert!(!slide_wants_wallpaper(WsAnim::Spring, false));
+        assert!(!slide_wants_wallpaper(WsAnim::Fade, false));
+    }
+
+    #[test]
+    fn a_wallpaper_crop_is_used_only_on_an_exact_match() {
+        let wa = RECT {
+            left: 0,
+            top: 40,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert!(wp_entry_usable(7, 7, 0x10, wa, 0x10, wa));
+        // Stale gen: a different wallpaper, never blitted.
+        assert!(!wp_entry_usable(6, 7, 0x10, wa, 0x10, wa));
+        // Another monitor.
+        assert!(!wp_entry_usable(7, 7, 0x11, wa, 0x10, wa));
+        // Same monitor, different work area (bar or resolution change).
+        let taller = RECT { top: 0, ..wa };
+        assert!(!wp_entry_usable(7, 7, 0x10, taller, 0x10, wa));
+        let wider = RECT { right: 1921, ..wa };
+        assert!(!wp_entry_usable(7, 7, 0x10, wa, 0x10, wider));
+    }
+
+    // ---- glide compose ------------------------------------------------------
+
+    #[test]
+    fn glide_blits_equal_sizes_and_stretches_the_rest() {
+        assert_eq!(glide_blit_kind(950, 1060, 950, 1060), GlideBlit::Blit);
+        // Off by one either way is a real scale.
+        assert_eq!(glide_blit_kind(951, 1060, 950, 1060), GlideBlit::Stretch);
+        assert_eq!(glide_blit_kind(950, 1059, 950, 1060), GlideBlit::Stretch);
+        // Any non-positive size draws nothing.
+        assert_eq!(glide_blit_kind(0, 1060, 950, 1060), GlideBlit::Skip);
+        assert_eq!(glide_blit_kind(950, -3, 950, 1060), GlideBlit::Skip);
+        assert_eq!(glide_blit_kind(950, 1060, 0, 1060), GlideBlit::Skip);
+        assert_eq!(glide_blit_kind(950, 1060, 950, -1), GlideBlit::Skip);
+    }
+
+    #[test]
+    fn glide_still_is_the_two_pixel_jitter_band() {
+        let a = RECT {
+            left: 10,
+            top: 10,
+            right: 500,
+            bottom: 400,
+        };
+        assert!(glide_still(&a, &a));
+        let jitter = RECT {
+            left: 12,
+            top: 8,
+            right: 502,
+            bottom: 398,
+        };
+        assert!(glide_still(&a, &jitter));
+        assert!(!glide_still(&a, &RECT { left: 13, ..a }));
+        assert!(!glide_still(&a, &RECT { bottom: 403, ..a }));
+    }
+
+    fn rc(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    #[test]
+    fn glide_damage_covers_only_what_moves_plus_the_shadow() {
+        // 1920x1040 work area. Left window static (1 px jitter), right column
+        // split: the top one grows down over a closed sibling's slot.
+        let items = [
+            GlideItem {
+                old: rc(8, 8, 956, 1032),
+                new: rc(9, 8, 956, 1032),
+            },
+            GlideItem {
+                old: rc(964, 8, 1912, 516),
+                new: rc(964, 8, 1912, 1032),
+            },
+        ];
+        // Union over the moving item only, grown by 32 and clamped.
+        assert_eq!(
+            glide_damage(&items, 32, 1920, 1040),
+            Some(rc(932, 0, 1920, 1040))
+        );
+        // No margin: the exact union.
+        assert_eq!(
+            glide_damage(&items, 0, 1920, 1040),
+            Some(rc(964, 8, 1912, 1032))
+        );
+        // Nothing moves beyond the jitter band: no glide at all.
+        assert_eq!(glide_damage(&items[..1], 32, 1920, 1040), None);
+        assert_eq!(glide_damage(&[], 32, 1920, 1040), None);
+    }
+
+    #[test]
+    fn glide_damage_near_the_whole_area_takes_the_full_path() {
+        let full = Some(rc(0, 0, 1920, 1040));
+        // A layout change moving everything: the whole work area.
+        let items = [
+            GlideItem {
+                old: rc(8, 8, 956, 1032),
+                new: rc(8, 8, 1280, 1032),
+            },
+            GlideItem {
+                old: rc(964, 8, 1912, 1032),
+                new: rc(1288, 8, 1912, 1032),
+            },
+        ];
+        assert_eq!(glide_damage(&items, 32, 1920, 1040), full);
+        // Just under the threshold stays a sub-rect, at it goes full: 90% of
+        // 1000x1000 is 900000 = 900x1000.
+        let near = |right: i32| {
+            [GlideItem {
+                old: rc(0, 0, 10, 1000),
+                new: rc(0, 0, right, 1000),
+            }]
+        };
+        assert_eq!(
+            glide_damage(&near(899), 0, 1000, 1000),
+            Some(rc(0, 0, 899, 1000))
+        );
+        assert_eq!(
+            glide_damage(&near(900), 0, 1000, 1000),
+            Some(rc(0, 0, 1000, 1000))
+        );
+        // A move entirely off the work area (another monitor) shows nothing.
+        let off = [GlideItem {
+            old: rc(-900, 0, -500, 400),
+            new: rc(-800, 0, -400, 400),
+        }];
+        assert_eq!(glide_damage(&off, 32, 1000, 1000), None);
+    }
+
+    #[test]
+    fn fade_alpha_runs_from_the_outgoing_to_the_incoming_frame() {
+        // Endpoints match what frame 0 and the reveal show, even past them.
+        assert_eq!(fade_alpha(-0.5), 0);
+        assert_eq!(fade_alpha(0.0), 0);
+        assert_eq!(fade_alpha(1.0), 255);
+        assert_eq!(fade_alpha(7.0), 255);
+        // Never steps back in between.
+        let mut last = 0u8;
+        for i in 0..=1000 {
+            let a = fade_alpha(i as f64 / 1000.0);
+            assert!(a >= last, "alpha fell at t={}", i as f64 / 1000.0);
+            last = a;
+        }
+    }
+
+    #[test]
+    fn rects_overlap_needs_a_shared_pixel() {
+        let a = rc(0, 0, 10, 10);
+        assert!(rects_overlap(&a, &rc(9, 9, 20, 20)));
+        assert!(
+            !rects_overlap(&a, &rc(10, 0, 20, 10)),
+            "touching edges share none"
+        );
+        assert!(!rects_overlap(&a, &rc(0, 10, 10, 20)));
+        assert!(rects_overlap(&a, &rc(-5, -5, 50, 50)));
+    }
+
+    // ---- workspace snapshots ------------------------------------------------
+
+    fn snap(bmp: isize, w: i32, h: i32) -> Snap {
+        Snap {
+            bmp: Bmp::new(bmp).unwrap(),
+            rects: vec![RECT {
+                left: 0,
+                top: 0,
+                right: 10,
+                bottom: 10,
+            }],
+            w,
+            h,
+        }
+    }
+
+    /// Handles the test deleter has freed on this thread so far, cleared.
+    fn freed() -> Vec<isize> {
+        BMP_FREED.with(|f| std::mem::take(&mut *f.borrow_mut()))
+    }
+
+    #[test]
+    fn a_snapshot_is_taken_once_and_handed_over_whole() {
+        let mut map = SnapMap::new();
+        map.insert((0x10, 2), snap(0xB1, 1920, 1040));
+        map.insert((0x10, 3), snap(0xB2, 1920, 1040));
+        let mut rejected = Vec::new();
+        let got = snap_take_from(&mut map, (0x10, 2), 1920, 1040, |b| rejected.push(b.raw()));
+        let got = got.expect("first take hands the snapshot over");
+        assert_eq!((got.bmp.raw(), got.rects.len()), (0xB1, 1));
+        // Gone from the cache: a second take finds nothing, and nothing else
+        // was touched.
+        assert!(
+            snap_take_from(&mut map, (0x10, 2), 1920, 1040, |b| rejected.push(b.raw())).is_none()
+        );
+        assert!(map.contains_key(&(0x10, 3)));
+        assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn a_wrong_size_snapshot_is_removed_and_freed_not_handed_over() {
+        let mut map = SnapMap::new();
+        map.insert((0x10, 2), snap(0xB1, 1920, 1040));
+        let mut rejected = Vec::new();
+        // The work area shrank (bar height, resolution) since it was stored.
+        let got = snap_take_from(&mut map, (0x10, 2), 1920, 1000, |b| rejected.push(b.raw()));
+        assert!(got.is_none());
+        assert_eq!(rejected, vec![0xB1]);
+        assert!(map.is_empty());
+        // A missing key rejects nothing.
+        assert!(
+            snap_take_from(&mut map, (0x11, 0), 1920, 1000, |b| rejected.push(b.raw())).is_none()
+        );
+        assert_eq!(rejected, vec![0xB1]);
+    }
+
+    #[test]
+    fn a_removed_snapshot_is_freed_exactly_once() {
+        let _ = freed();
+        let mut map = SnapMap::new();
+        map.insert((0x10, 2), snap(0xB1, 1920, 1040));
+        map.insert((0x10, 3), snap(0xB2, 1920, 1040));
+        let mut dead = Vec::new();
+        assert!(snap_remove_from(&mut map, (0x10, 2), |b| dead.push(b)));
+        assert!(
+            freed().is_empty(),
+            "not freed while the caller still holds it"
+        );
+        drop(dead);
+        assert_eq!(freed(), vec![0xB1]);
+        assert!(!map.contains_key(&(0x10, 2)));
+        assert!(map.contains_key(&(0x10, 3)), "only that entry");
+        // Nothing left to remove: nothing freed twice.
+        assert!(!snap_remove_from(&mut map, (0x10, 2), drop)); // was |b| drop(b) ));
+        assert!(freed().is_empty());
+    }
+
+    #[test]
+    fn an_owned_bitmap_is_freed_exactly_once_and_cannot_be_cloned() {
+        let _ = freed();
+        // A failed capture is no bitmap at all: nothing to own, nothing freed.
+        assert!(Bmp::new(0).is_none());
+        let b = Bmp::new(0xC1).unwrap();
+        // Moved through a hand-off (a request, the return queue): still one owner.
+        let moved = Some(b);
+        assert!(freed().is_empty());
+        drop(moved);
+        assert_eq!(freed(), vec![0xC1]);
+        // Compile-time: Bmp must not be Clone (and so not Copy). If it were,
+        // both impls below would apply and the `_` would be ambiguous.
+        trait AmbiguousIfClone<A> {
+            fn check() {}
+        }
+        impl<T: ?Sized> AmbiguousIfClone<()> for T {}
+        impl<T: Clone> AmbiguousIfClone<u8> for T {}
+        <Bmp as AmbiguousIfClone<_>>::check();
+    }
+
+    fn ret(key: (isize, usize), gen: u64, bmp: isize) -> SnapReturn {
+        SnapReturn {
+            key,
+            gen,
+            snap: snap(bmp, 1920, 1040),
+        }
+    }
+
+    #[test]
+    fn the_first_capture_after_a_clear_comes_back_as_the_snapshot() {
+        // The only test touching the SNAP / SNAP_RETURNS statics. No real
+        // GDI object is involved (the test deleter records; GdiFlush is a
+        // no-op without a batch).
+        unsafe {
+            snap_clear(); // no cache at all: the state after startup or a reload
+            let _ = freed();
+            snap_keep(0x20, 1, 5);
+            snap_return(ret((0x20, 1), 5, 0xD1));
+            // A stale capture of another key, handed back meanwhile, is freed.
+            snap_return(ret((0x20, 2), 4, 0xD2));
+            snap_drain();
+            assert_eq!(freed(), vec![0xD2]);
+            let (bmp, rects) = snap_take(0x20, 1, 1920, 1040).expect("kept on its return");
+            assert_eq!((bmp.raw(), rects.len()), (0xD1, 1));
+            drop(bmp);
+            // Left again without a keepable capture: the next one is disowned.
+            snap_keep(0x20, 1, 6);
+            assert!(!snap_remove(0x20, 1));
+            snap_return(ret((0x20, 1), 6, 0xD3));
+            snap_drain();
+            assert!(snap_take(0x20, 1, 1920, 1040).is_none());
+            let mut f = freed();
+            f.sort_unstable();
+            assert_eq!(f, vec![0xD1, 0xD3]);
+            snap_clear();
+        }
+    }
+
+    #[test]
+    fn a_returned_capture_is_kept_only_if_it_is_the_newest_wanted() {
+        let _ = freed();
+        let mut cache = SnapCache::default();
+        // (m, 1): left with capture 7, whose capture is wanted; an entry
+        // already sits there (stored by some earlier drain).
+        cache.map.insert((0x10, 1), snap(0xA0, 1920, 1040));
+        cache.newest.insert((0x10, 1), 7);
+        // (m, 2): left again since (newest 9), so capture 8 is stale.
+        cache.newest.insert((0x10, 2), 9);
+        // (m, 3): left with an overlay in the capture, or a reload since:
+        // no newest entry at all.
+        let rets = vec![
+            ret((0x10, 1), 7, 0xB7),
+            ret((0x10, 2), 8, 0xB8),
+            ret((0x10, 3), 5, 0xB5),
+        ];
+        let mut dead = Vec::new();
+        snap_apply_returns(&mut cache, rets, &mut dead);
+        // Kept: 7, replacing (and freeing, once) the older entry.
+        assert_eq!(cache.map.get(&(0x10, 1)).map(|s| s.bmp.raw()), Some(0xB7));
+        assert!(
+            !cache.newest.contains_key(&(0x10, 1)),
+            "a gen is stored at most once"
+        );
+        // Stale and unwanted ones never land, and 9 is still awaited.
+        assert!(!cache.map.contains_key(&(0x10, 2)));
+        assert!(!cache.map.contains_key(&(0x10, 3)));
+        assert_eq!(cache.newest.get(&(0x10, 2)), Some(&9));
+        // Nothing freed under the (would-be) lock; the caller drops `dead`.
+        assert!(freed().is_empty());
+        drop(dead);
+        let mut f = freed();
+        f.sort_unstable();
+        assert_eq!(f, vec![0xA0, 0xB5, 0xB8]);
+        // The same capture returned twice (a bug) is not stored twice.
+        let mut dead = Vec::new();
+        snap_apply_returns(&mut cache, vec![ret((0x10, 1), 7, 0xB9)], &mut dead);
+        assert_eq!(cache.map.get(&(0x10, 1)).map(|s| s.bmp.raw()), Some(0xB7));
+        drop(dead);
+        assert_eq!(freed(), vec![0xB9]);
+    }
+
+    #[test]
+    fn only_a_cross_monitor_move_reflows_the_source_at_once() {
+        assert!(!move_needs_source_retile(0, 0));
+        assert!(!move_needs_source_retile(2, 2));
+        assert!(move_needs_source_retile(1, 0));
+        assert!(move_needs_source_retile(0, 1));
+    }
+
+    #[test]
+    fn a_pure_move_keeps_its_width_every_frame() {
+        // The compose lerp: the Blit fast path only fires if moving both edges
+        // by the same delta never changes the rounded width.
+        let lerp = |a: i32, b: i32, e: f64| (a as f64 + (b - a) as f64 * e).round() as i32;
+        for step in 0..=100 {
+            let e = step as f64 / 100.0;
+            let l = lerp(10, 973, e);
+            let r = lerp(960, 1923, e);
+            assert_eq!(r - l, 950, "e = {e}");
+        }
+    }
+
     // ---- workspace model --------------------------------------------------
     // `Manager` owns window membership. These tests exercise it directly (no
     // Win32, no real windows), which is the whole point of routing every
@@ -13047,6 +17970,7 @@ mod tests {
             tiling: true,
             cfg: Config::defaults(),
             pending_launch_mon: 0,
+            park_origin: None,
         }
     }
 
@@ -13197,6 +18121,168 @@ mod tests {
         assert_model_sound(&mgr, &[0xA, 0xB]);
     }
 
+    // ---- switch bursts ------------------------------------------------------
+
+    fn queue(cmds: Vec<Cmd>) -> VecDeque<Cmd> {
+        cmds.into()
+    }
+
+    fn five_workspaces() -> Manager {
+        let mut mgr = test_manager(1, 5);
+        mgr.cfg.workspaces = 5;
+        mgr
+    }
+
+    #[test]
+    fn a_later_switch_overrides_earlier_wheel_steps() {
+        let mgr = five_workspaces();
+        let hm = mgr.monitors[0].hmon;
+        let mut rest = queue(vec![Cmd::Switch(3)]);
+        let got = mgr.fold_switches(&Cmd::BarCycle(hm, 1), &mut rest);
+        assert_eq!(got, (Some((0, 3)), 1));
+        assert!(rest.is_empty());
+    }
+
+    #[test]
+    fn a_wheel_step_applies_to_where_the_burst_has_got_to() {
+        let mgr = five_workspaces();
+        let hm = mgr.monitors[0].hmon;
+        // [Switch(5th), BarCycle(+1)] wraps to the 1st, not active + 1.
+        let mut rest = queue(vec![Cmd::BarCycle(hm, 1)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::Switch(4), &mut rest),
+            (Some((0, 0)), 1)
+        );
+        let mut rest = queue(vec![Cmd::BarCycle(hm, 1), Cmd::BarCycle(hm, 1)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::BarCycle(hm, 1), &mut rest),
+            (Some((0, 3)), 2)
+        );
+    }
+
+    #[test]
+    fn a_no_op_switch_never_becomes_the_target() {
+        let mgr = five_workspaces();
+        // Alt+2 then Alt+7 with 5 workspaces: today that ends on ws2.
+        let mut rest = queue(vec![Cmd::Switch(6)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::Switch(1), &mut rest),
+            (Some((0, 1)), 1)
+        );
+        // Every command a no-op (bad index, unknown bar): nothing to do.
+        let mut rest = queue(vec![Cmd::Switch(99), Cmd::BarCycle(0xDEAD, 1)]);
+        assert_eq!(mgr.fold_switches(&Cmd::Switch(9), &mut rest), (None, 2));
+        // One workspace: the wheel cannot cycle.
+        let one = test_manager(1, 1);
+        let hm = one.monitors[0].hmon;
+        assert_eq!(
+            one.fold_switches(&Cmd::BarCycle(hm, 1), &mut VecDeque::new()),
+            (None, 0)
+        );
+    }
+
+    #[test]
+    fn a_burst_stops_at_any_other_command() {
+        let mgr = five_workspaces();
+        let mut rest = queue(vec![Cmd::Switch(2), Cmd::Focused(0xA), Cmd::Switch(3)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::Switch(1), &mut rest),
+            (Some((0, 2)), 1)
+        );
+        assert!(matches!(rest.front(), Some(Cmd::Focused(0xA))));
+        assert_eq!(rest.len(), 2);
+        // Extra may switch internally: never looked inside, never crossed.
+        let mut rest = queue(vec![Cmd::Extra(0), Cmd::Switch(3)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::Switch(1), &mut rest),
+            (Some((0, 1)), 0)
+        );
+        assert_eq!(rest.len(), 2);
+    }
+
+    #[test]
+    fn a_burst_stops_at_a_switch_for_another_monitor() {
+        // Shared mode, primary 0: even globals on monitor 0, odd on monitor 1.
+        let mgr = test_manager(2, 3);
+        let mut rest = queue(vec![Cmd::Switch(2), Cmd::Switch(1), Cmd::Switch(4)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::Switch(0), &mut rest),
+            (Some((0, 1)), 1)
+        );
+        assert_eq!(rest.len(), 2);
+        let hm1 = mgr.monitors[1].hmon;
+        let mut rest = queue(vec![Cmd::BarCycle(hm1, 1)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::Switch(2), &mut rest),
+            (Some((0, 1)), 0)
+        );
+        assert_eq!(rest.len(), 1);
+    }
+
+    #[test]
+    fn per_monitor_switches_go_where_a_wheel_step_moved_focus() {
+        let mut mgr = test_manager(2, 3);
+        mgr.cfg.per_monitor = true;
+        mgr.cfg.workspaces = 3;
+        let hm1 = mgr.monitors[1].hmon;
+        // The wheel over monitor 1's bar focuses monitor 1, so the Switch
+        // behind it lands there too, as it does unfolded.
+        let mut rest = queue(vec![Cmd::Switch(2)]);
+        assert_eq!(
+            mgr.fold_switches(&Cmd::BarCycle(hm1, 1), &mut rest),
+            (Some((1, 2)), 1)
+        );
+    }
+
+    #[test]
+    fn a_burst_that_ends_where_it_started_targets_the_active_workspace() {
+        let mut mgr = five_workspaces();
+        mgr.monitors[0].active = 2;
+        let hm = mgr.monitors[0].hmon;
+        let mut rest = queue(vec![Cmd::BarCycle(hm, -1)]);
+        // == active: show_workspace then takes the already-showing branch.
+        assert_eq!(
+            mgr.fold_switches(&Cmd::BarCycle(hm, 1), &mut rest),
+            (Some((0, 2)), 1)
+        );
+    }
+
+    #[test]
+    fn the_wheel_steps_once_per_full_notch() {
+        let mut acc = 0;
+        assert_eq!([40, 40, 40].map(|d| wheel_steps(&mut acc, d)), [0, 0, 1]);
+        assert_eq!(acc, 0);
+        // A flip drops the partial notch rather than cancelling against it.
+        let mut acc = 0;
+        assert_eq!(wheel_steps(&mut acc, 80), 0);
+        assert_eq!(wheel_steps(&mut acc, -80), 0);
+        assert_eq!(acc, -80);
+        // Several notches in one event (a fast spin), both ways.
+        let mut acc = 0;
+        assert_eq!(wheel_steps(&mut acc, 240), 2);
+        assert_eq!(wheel_steps(&mut acc, -360), -3);
+    }
+
+    #[test]
+    fn slide_generations_and_holds_never_cross() {
+        // An abort for k-1 cannot stop k; k's own abort, or a newer request, does.
+        assert!(slide_gen_live(5, 5, 4));
+        assert!(!slide_gen_live(5, 5, 5));
+        assert!(!slide_gen_live(5, 6, 0));
+        // Only an overlay on the glass can be held; every hold is a new value.
+        assert_eq!(glass_hold(0), None);
+        let on = 5u64 << 16;
+        assert_eq!(glass_hold(on), Some(on + 1));
+        assert_eq!(glass_hold(on + 1), Some(on + 2));
+        assert_eq!(glass_hold(on | GLASS_HOLDS), None);
+        // A release matches only that exact hold: not an older one, not another
+        // gen's, and never an overlay nobody holds.
+        assert!(glass_released(on + 2, on + 2));
+        assert!(!glass_released(on + 2, on + 1));
+        assert!(!glass_released(on + 1, (4u64 << 16) + 1));
+        assert!(!glass_released(on, on));
+    }
+
     #[test]
     fn monitor_cover_requires_all_four_edges() {
         let monitor = RECT {
@@ -13229,5 +18315,370 @@ mod tests {
         assert!(rect_covers_monitor(dwm_tolerance, monitor));
         assert!(!rect_covers_monitor(navbar_reserved, monitor));
         assert!(!rect_covers_monitor(taskbar_reserved, monitor));
+    }
+
+    // ---- launcher file search (batch 9, LAUNCH-10 / LAUNCH-11) ------------------
+
+    #[test]
+    fn provisional_rows_are_the_names_every_term_still_prefixes() {
+        let names = ["Annual Report 2024.pdf", "report-draft.docx", "Budget.xlsx"];
+        let keep = |q: &str| provisional_hits(names.iter().copied(), q);
+        assert_eq!(keep("rep"), vec![0, 1]);
+        // Case-insensitive, and every term must match (the AND of the query).
+        assert_eq!(keep("ANN rep"), vec![0]);
+        // A term prefixes a word; it does not match mid-word.
+        assert_eq!(keep("eport"), Vec::<usize>::new());
+        // Refinement only narrows: the result is a subset of the wider query's.
+        let wide = keep("re");
+        assert!(keep("repo").iter().all(|i| wide.contains(i)));
+        // No 2+ char term: the index query returns nothing, and so does this.
+        assert!(build_contains("r").is_none());
+        assert_eq!(keep("r"), Vec::<usize>::new());
+        assert_eq!(keep("   "), Vec::<usize>::new());
+        // Quotes are stripped exactly as build_contains strips them.
+        assert_eq!(keep("\"bud"), vec![2]);
+    }
+
+    #[test]
+    fn a_search_result_is_stored_only_for_the_newest_generation_and_forward() {
+        assert!(should_store_search(5, 5, 4));
+        // Superseded while it ran.
+        assert!(!should_store_search(5, 6, 4));
+        // A newer generation already landed (the two-worker race).
+        assert!(!should_store_search(5, 5, 5));
+        assert!(!should_store_search(5, 5, 6));
+    }
+
+    #[test]
+    fn the_file_result_cache_keeps_the_most_recent_queries() {
+        let mut cache: VecDeque<(String, u32)> = VecDeque::new();
+        for i in 0..3 {
+            file_cache_put(&mut cache, format!("q{i}"), i, 2);
+        }
+        // Capacity 2: the oldest went first.
+        assert!(file_cache_get(&mut cache, "q0").is_none());
+        assert_eq!(file_cache_get(&mut cache, "q1"), Some(&1));
+        // q1 is now the most recent, so a new entry pushes out q2.
+        file_cache_put(&mut cache, "q3".into(), 3, 2);
+        assert!(file_cache_get(&mut cache, "q2").is_none());
+        assert_eq!(file_cache_get(&mut cache, "q1"), Some(&1));
+        // Re-putting a key replaces it rather than duplicating it.
+        file_cache_put(&mut cache, "q1".into(), 9, 2);
+        assert_eq!(cache.len(), 2);
+        assert_eq!(file_cache_get(&mut cache, "q1"), Some(&9));
+    }
+
+    // ---- config watcher (batch 12, LAUNCH-18) ------------------------------------
+
+    #[test]
+    fn two_writes_40ms_apart_read_once_120ms_after_the_last() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let idle = Duration::from_secs(10);
+        let mut d = Debounce {
+            quiet: Duration::from_millis(120),
+            due: None,
+        };
+        assert_eq!(d.wait(t0, idle), idle, "nothing pending: the backstop");
+        d.event(t0);
+        d.event(t0 + Duration::from_millis(40));
+        // The first write's deadline (t0 + 120) no longer fires.
+        assert_eq!(
+            d.wait(t0 + Duration::from_millis(120), idle),
+            Duration::from_millis(40)
+        );
+        assert_eq!(
+            d.wait(t0 + Duration::from_millis(160), idle),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn notify_records_yield_every_file_name_and_stop_at_a_short_buffer() {
+        fn record(name: &str, last: bool) -> Vec<u8> {
+            let wide: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+            // Records are DWORD-aligned; the offset includes that padding.
+            let len = 12 + wide.len();
+            let padded = (len + 3) & !3;
+            let mut r = Vec::new();
+            r.extend_from_slice(&(if last { 0 } else { padded as u32 }).to_le_bytes());
+            r.extend_from_slice(&3u32.to_le_bytes()); // FILE_ACTION_MODIFIED
+            r.extend_from_slice(&(wide.len() as u32).to_le_bytes());
+            r.extend_from_slice(&wide);
+            r.resize(padded, 0);
+            r
+        }
+        let mut buf = record("astur.log", false);
+        buf.extend(record("navbar.conf", true));
+        assert_eq!(notify_file_names(&buf), vec!["astur.log", "navbar.conf"]);
+        // A name running past the end is dropped, not read out of bounds.
+        let cut = &buf[..buf.len() - 8];
+        assert_eq!(notify_file_names(cut), vec!["astur.log"]);
+        assert!(notify_file_names(&[]).is_empty());
+    }
+
+    // ---- blocking work off the hook thread (batch 13, BAR-15 / INPUT-12) ------
+
+    #[test]
+    fn queued_volume_steps_sum_and_mute_clicks_cancel_in_pairs() {
+        assert_eq!(volume_drain(0, 0), (0.0, false));
+        assert_eq!(volume_drain(6, 0), (0.06, false));
+        assert_eq!(volume_drain(-2, 1), (-0.02, true));
+        // Two clicks before the worker ran: muted and unmuted again.
+        assert_eq!(volume_drain(0, 2), (0.0, false));
+        assert_eq!(volume_drain(0, 3), (0.0, true));
+    }
+
+    #[test]
+    fn the_watchdog_re_arms_only_for_input_the_hooks_could_have_seen() {
+        let (silent, typing) = (WATCHDOG_SILENCE_MS, 0u32);
+        // Plain dead hooks: input, no callbacks.
+        assert!(hooks_look_dead(silent, typing, false, false, false));
+        // Not silent long enough, or nobody is using the machine.
+        assert!(!hooks_look_dead(silent - 1, typing, false, false, false));
+        assert!(!hooks_look_dead(
+            silent,
+            WATCHDOG_INPUT_WINDOW_MS + 1,
+            false,
+            false,
+            false
+        ));
+        // UIPI: an elevated foreground is invisible to a non-elevated Astur...
+        assert!(!hooks_look_dead(silent, typing, true, false, false));
+        // ...but not to an elevated one.
+        assert!(hooks_look_dead(silent, typing, true, true, false));
+        // The secure desktop is invisible to everyone.
+        assert!(!hooks_look_dead(silent, typing, false, false, true));
+        assert!(!hooks_look_dead(silent, typing, false, true, true));
+    }
+
+    // ---- icon cache (batch 14, LAUNCH-13) ----------------------------------------
+
+    #[test]
+    fn an_icon_is_keyed_by_source_size_and_stamp() {
+        let mut c: IconCache<i64> = IconCache::new(None);
+        assert_eq!(c.insert("app.lnk", 32, 7, 100, 0), None);
+        assert_eq!(c.get("app.lnk", 32, 7), Some(100));
+        // px is part of the key: a 150% monitor does not get the 100% bitmap.
+        assert_eq!(c.get("app.lnk", 48, 7), None);
+        // A changed source (new mtime) is a miss, not a stale hit.
+        assert_eq!(c.get("app.lnk", 32, 8), None);
+        // ...but the paint may draw the nearest size of the same version.
+        c.insert("app.lnk", 40, 7, 101, 0);
+        assert_eq!(c.nearest("app.lnk", 48, 7, |h| h > 1), Some(101));
+        assert_eq!(c.nearest("app.lnk", 48, 8, |h| h > 1), None);
+    }
+
+    #[test]
+    fn a_placeholder_is_replaced_and_a_raced_duplicate_comes_back_to_free() {
+        let mut c: IconCache<i64> = IconCache::new(None);
+        c.insert("x.exe", 20, 0, 0, 0); // queued placeholder
+        assert_eq!(c.insert("x.exe", 20, 0, 55, 0), None);
+        assert_eq!(c.get("x.exe", 20, 0), Some(55));
+        // A second worker resolved the same key: the stored one wins.
+        assert_eq!(c.insert("x.exe", 20, 0, 56, 0), Some(56));
+        assert_eq!(c.get("x.exe", 20, 0), Some(55));
+    }
+
+    #[test]
+    fn the_lifetime_cache_never_deletes() {
+        let mut c: IconCache<i64> = IconCache::new(None);
+        for i in 0..100 {
+            c.insert(&format!("app{i}"), 32, 0, i + 2, 0);
+        }
+        let mut deleted = Vec::new();
+        c.evict(|_| false, |h| deleted.push(h));
+        assert!(
+            deleted.is_empty(),
+            "app and bar icons are never LRU-evicted (only retain_live drops them)"
+        );
+        assert!(!c.over_cap());
+    }
+
+    #[test]
+    fn retain_live_frees_dead_sizes_and_stamps_once_and_keeps_the_rest() {
+        let mut c: IconCache<i64> = IconCache::new(None);
+        c.insert("a.lnk", 32, 7, 10, 0);
+        c.insert("a.lnk", 48, 7, 11, 0); // a size no monitor uses now
+        c.insert("a.lnk", 32, 6, 12, 0); // superseded stamp
+        c.insert("b.exe", 32, 0, 13, 0);
+        let mut dead = Vec::new();
+        c.retain_live(
+            |src, px, stamp| px == 32 && (stamp == 0 || (src, stamp) == ("a.lnk", 7)),
+            |h| dead.push(h),
+        );
+        dead.sort();
+        assert_eq!(dead, vec![11, 12]);
+        assert_eq!(c.get("a.lnk", 32, 7), Some(10));
+        assert_eq!(c.get("b.exe", 32, 0), Some(13));
+        assert_eq!(c.get("a.lnk", 48, 7), None);
+        // The count follows, so a capped cache's over_cap stays true to it.
+        let mut again = Vec::new();
+        c.retain_live(|_, _, _| false, |h| again.push(h));
+        again.sort();
+        assert_eq!(again, vec![10, 13]);
+        assert_eq!(c.len, 0);
+        assert!(c.map.is_empty());
+    }
+
+    #[test]
+    fn the_file_lru_frees_each_evicted_icon_once_and_never_a_listed_one() {
+        let mut c: IconCache<i64> = IconCache::new(Some(3));
+        for i in 0..6 {
+            c.insert(&format!("f{i}"), 32, 0, 10 + i, 0);
+        }
+        // f0 is oldest but on screen; f4 was just drawn.
+        c.get("f4", 32, 0);
+        let mut deleted = Vec::new();
+        c.evict(|src| src == "f0", |h| deleted.push(h));
+        deleted.sort();
+        // Three go (6 -> cap 3): the oldest unlisted ones, f1 f2 f3.
+        assert_eq!(deleted, vec![11, 12, 13]);
+        assert_eq!(c.get("f0", 32, 0), Some(10));
+        assert_eq!(c.get("f4", 32, 0), Some(14));
+        assert_eq!(c.get("f1", 32, 0), None);
+        // Under cap now: a second pass frees nothing more.
+        let mut again = Vec::new();
+        c.evict(|_| false, |h| again.push(h));
+        assert!(again.is_empty());
+        // Every row listed: over cap, but nothing may go.
+        for i in 6..9 {
+            c.insert(&format!("f{i}"), 32, 0, 10 + i, 0);
+        }
+        let mut none = Vec::new();
+        c.evict(|_| true, |h| none.push(h));
+        assert!(none.is_empty());
+        assert!(c.over_cap());
+    }
+
+    // ---- startup bar seed (batch 15, BAR-23) --------------------------------------
+
+    #[test]
+    fn the_startup_bar_seed_is_themed_and_carries_no_monitors() {
+        let mut cfg = Config::defaults();
+        cfg.start_tiled = false;
+        let seed = bar_data_from(&cfg, true, cfg.start_tiled, Vec::new());
+        assert!(!seed.tiling, "tiling follows start_tiled");
+        assert!(
+            seed.mons.is_empty(),
+            "no pills until the first manager update"
+        );
+        assert_eq!(
+            (seed.bg, seed.fg, seed.accent, seed.inactive),
+            (
+                config::BAR_LIGHT[0],
+                config::BAR_LIGHT[1],
+                config::BAR_LIGHT[2],
+                config::BAR_LIGHT[3]
+            )
+        );
+        assert_eq!(seed.layout, cfg.layout);
+        assert!(seed.left == zone_widgets(&cfg.bar_left, &cfg));
+        // An explicit colour still wins over the theme preset.
+        cfg.bar_bg = Some(0x0012_3456);
+        assert_eq!(bar_data_from(&cfg, true, true, Vec::new()).bg, 0x0012_3456);
+    }
+
+    // ---- bar visuals (batch 20, BAR-3 / BAR-9 / BAR-19) -------------------------
+
+    #[test]
+    fn a_retargeted_pill_slide_starts_where_the_highlight_is() {
+        use std::time::Duration;
+        let t0 = Instant::now();
+        let a = PillAnim {
+            from: 0.0,
+            to_i: 4,
+            start: t0,
+        };
+        let mid = t0 + Duration::from_millis(80); // half of PILL_ANIM_MS
+        let (before, arrived) = pill_pos(&a, mid);
+        assert!(!arrived && before > 0.0 && before < 4.0);
+        // Alt+5 then Alt+2 mid-slide: the new slide begins exactly where the
+        // highlight was, not back at update_bar's previous target (4).
+        let b = pill_retarget(Some(&a), 4, 1, mid);
+        assert_eq!(b.from, before);
+        assert_eq!(pill_pos(&b, mid), (before, false));
+        // Same curve and duration, ending on the new target.
+        let (end, done) = pill_pos(&b, mid + Duration::from_millis(160));
+        assert!(done && (end - 1.0).abs() < 1e-9);
+        // A finished slide, or none, starts from the previous target as before.
+        let late = pill_retarget(Some(&a), 4, 2, t0 + Duration::from_millis(200));
+        assert_eq!(late.from, 4.0);
+        assert_eq!(pill_retarget(None, 3, 5, t0).from, 3.0);
+    }
+
+    #[test]
+    fn a_rename_refreshes_the_bar_of_any_monitor_showing_that_window() {
+        let slots = [
+            AtomicIsize::new(0x10),
+            AtomicIsize::new(0x20),
+            AtomicIsize::new(0),
+        ];
+        // Monitor 2's title while the user types on monitor 1: the case the
+        // foreground-only filter left stale. A slot hit never asks for fg.
+        assert!(namechange_forward(
+            0x20,
+            || unreachable!("slot matched"),
+            &slots
+        ));
+        // The foreground window still counts (the only test past MAX_BARS).
+        assert!(namechange_forward(0x30, || 0x30, &slots));
+        // Shown nowhere and not foreground: kept off the manager queue.
+        assert!(!namechange_forward(0x40, || 0x10, &slots));
+        // An empty slot (0) never matches a null handle.
+        assert!(!namechange_forward(0, || 0, &slots));
+    }
+
+    #[test]
+    fn only_a_fullscreen_app_snaps_the_bar_hidden_and_never_under_the_pointer() {
+        assert!(bar_snap_hide(true, false, false));
+        // The pointer is on the bar or its reveal strip: the timer decides.
+        assert!(!bar_snap_hide(true, false, true));
+        // Configured auto-hide keeps its slide; no auto-hide, nothing to do.
+        assert!(!bar_snap_hide(true, true, false));
+        assert!(!bar_snap_hide(false, true, false));
+        assert!(!bar_snap_hide(false, false, false));
+
+        let strip = RECT {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 2,
+        };
+        let over = |x, y| bar_cursor_over(POINT { x, y }, 0, 1920, 100, 30, 8, strip);
+        assert!(over(10, 110), "on the bar");
+        assert!(over(10, 92) && over(10, 137), "inside the grab slack");
+        assert!(!over(10, 91) && !over(10, 138));
+        assert!(!over(1920, 110), "right edge is exclusive");
+        assert!(over(1919, 1), "in the reveal strip");
+
+        // Snap parks a new bar hidden in one step, and later rebuilds keep it
+        // there (progress 1) through a geometry change.
+        let geo = AhBar {
+            x: 0,
+            w: 1920,
+            h: 30,
+            y_shown: 0,
+            y_hidden: -32,
+            y_cur: 0.0,
+            shown: true,
+            strip,
+            tol: 8,
+        };
+        let (snapped, fresh) = (-0x5eed_0001, -0x5eed_0002); // never a real bar hwnd
+        assert_eq!(ah_bar_update(snapped, &geo, true), (-32, false));
+        assert_eq!(ah_bar_update(snapped, &geo, false), (-32, false));
+        let taller = AhBar {
+            h: 40,
+            y_hidden: -42,
+            ..geo
+        };
+        assert_eq!(ah_bar_update(snapped, &taller, false), (-42, false));
+        // Without a snap a new bar starts shown, as it always did.
+        assert_eq!(ah_bar_update(fresh, &geo, false), (0, true));
+        if let Some(m) = AH_BARS.lock().unwrap().as_mut() {
+            m.remove(&snapped);
+            m.remove(&fresh);
+        }
     }
 }
