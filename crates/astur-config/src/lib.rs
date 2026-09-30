@@ -549,7 +549,7 @@ focus_follows_mouse = false
 # Animations apply to the WORKSPACE SWITCH. The switch itself is always instant
 # and correct underneath; the animation is a cosmetic overlay composited on top,
 # so it is smooth even with heavy apps (the apps themselves aren't moved).
-# Window open/close/move/resize placement is currently instant.
+# Window glide applies only to size-preserving moves; resized layouts land directly.
 
 # Enable animations.  bool
 animations = true
@@ -571,10 +571,11 @@ workspace_anim = slide
 workspace_slide = true
 # Window move / open / close / re-tile animation:
 #   off   - instant placement
-#   glide - windows glide from their old position to the new tile slot. Opening a
-#           window glides it in from where it spawned; closing reflows the rest.
-#           Composited on a brief overlay (the real windows are placed instantly
-#           underneath), so it stays smooth even with heavy apps. Drawn over a
+#   glide - windows glide to equal-sized tile slots with pixels kept 1:1.
+#           Layouts that resize windows land directly, without stretched text.
+#           New layouts or keyboard/mouse input cancel obsolete glides.
+#           Composited on a brief overlay (real windows are placed instantly
+#           underneath). Drawn over a
 #           cached copy of the wallpaper: for about 1.5 s after it changes (or a
 #           reload that re-tiles or changes animation settings), and without
 #           Explorer, placement is instant.  string

@@ -77,8 +77,10 @@ Manager) too.
   configurable.
 - **Animations** — workspace switches animate with a composited overlay:
   `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`. Windows
-  also **glide** to their tile slot on open / move / resize / re-tile, composited so
-  the real windows land instantly underneath — smooth even with heavy apps. At
+  also **glide** between equal-sized tile slots, with pixels kept at their original
+  size. Layouts that resize windows land directly, avoiding stretched text and a
+  jump when the application repaints. New layouts or keyboard/mouse input cancel stale
+  glides. At
   `animation_ms` up to 250 (default 140) clicks pass straight through a running
   animation to those windows. A switch made while one is still sliding happens at
   once underneath it, and the overlay then reveals the result.
@@ -192,9 +194,12 @@ crate, no workspace).
 Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) that
 intercept input before it reaches any application. Left Alt is swallowed so it never
 triggers app menus or Alt shortcuts — only Astur sees it. Drag commands are queued to
-the manager; a DWM-thumbnail overlay (outline fallback) previews movement while the
-real window is committed once on release. Slow application repainting stays out of
-the per-frame input path. Tiles are placed with posted (`SWP_ASYNCWINDOWPOS`) moves,
+the manager. Alt-drag moves and resizes the real window: no thumbnail, outline,
+off-screen parking, or preview handoff. The manager samples the newest pointer
+geometry at up to 120 Hz; repeated samples are skipped. Final drops run on the same
+thread, preserving placement order. Tiling waits until an active drag ends.
+Application repainting stays off the input hook. Tiles and live drag updates use
+posted (`SWP_ASYNCWINDOWPOS`) moves,
 so a re-tile finishes after the slowest app instead of after every app in turn, and
 a busy app no longer holds up the next re-tile; `async_window_pos = false` in
 `astur.conf` makes Astur wait for each app instead. Showing and hiding windows on a
