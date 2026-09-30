@@ -2930,7 +2930,7 @@ fn hook_watchdog() {
             }
             // Intake counters every 10 s, only when something moved.
             debug_ticks += 1;
-            if debug_ticks % 10 == 0 {
+            if debug_ticks.is_multiple_of(10) {
                 let line = counters_line();
                 if line != last_counters {
                     log_debug!("counters {line}");
@@ -10939,7 +10939,9 @@ fn notify_file_names(buf: &[u8]) -> Vec<String> {
             break;
         };
         let wide: Vec<u16> = bytes
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .collect();
         out.push(String::from_utf16_lossy(&wide));
@@ -17809,7 +17811,7 @@ mod tests {
         assert!(!map.contains_key(&(0x10, 2)));
         assert!(map.contains_key(&(0x10, 3)), "only that entry");
         // Nothing left to remove: nothing freed twice.
-        assert!(!snap_remove_from(&mut map, (0x10, 2), |b| drop(b)));
+        assert!(!snap_remove_from(&mut map, (0x10, 2), drop)); // was |b| drop(b) ));
         assert!(freed().is_empty());
     }
 
@@ -17830,7 +17832,7 @@ mod tests {
             fn check() {}
         }
         impl<T: ?Sized> AmbiguousIfClone<()> for T {}
-        impl<T: ?Sized + Clone> AmbiguousIfClone<u8> for T {}
+        impl<T: Clone> AmbiguousIfClone<u8> for T {}
         <Bmp as AmbiguousIfClone<_>>::check();
     }
 
