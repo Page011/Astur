@@ -80,7 +80,8 @@ queues. Keep it that way — do not move work onto the hook threads.
 - **Position worker** (`position_worker`) — applies drag move/resize off the hook
   so a slow app's `SetWindowPos` can't stall input.
 - **Transition worker** (`transition_worker` / `run_transition`) — owns the
-  workspace-switch overlay, pumps its own message loop, GDI-composites frames.
+  workspace-switch overlay, pumps its own message loop, GDI-composites frames
+  (fade: DWM blends a second, layered overlay instead).
 - **Glide worker** (`glide_worker` / `run_window_glide`) — same pattern for the
   per-window move/open/close/resize glide overlay.
 - **Stats worker** (`stats_worker`) — polls CPU/RAM/battery ~2s for the bar.
@@ -93,8 +94,13 @@ queues. Keep it that way — do not move work onto the hook threads.
 - Hot paths: no allocation, no `Mutex` lock unless an atomic guard says there's
   work. Comment *why* a fast-path exists so nobody "simplifies" it away.
 - Colours are `COLORREF` (`0x00BBGGRR`) internally; config parses `#RRGGBB`.
-- Cosmetic threads get **private copies** of any bitmap/rect data — never share a
-  live handle the manager still owns.
+- Cosmetic threads get bitmap/rect data by **single-owner hand-off, never
+  shared** — a handle the owner gives up, moved rather than copied (the
+  incoming workspace snapshot is taken out of the cache; the outgoing capture
+  goes to the transition worker and is handed back as the snapshot). Exactly
+  one thread owns, and frees, each bitmap at any moment; the owned `Bmp` type
+  (no `Clone`) enforces it for snapshots. Deselect, then `GdiFlush`, before
+  every hand-off.
 - Prefer the simplest built-in Win32 path first; document alternatives + tradeoffs
   in `plan/` before adding complexity.
 
