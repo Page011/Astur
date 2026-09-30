@@ -1,0 +1,17 @@
+# Merge into YASB config.yaml. Add astur_workspaces to your bar's widgets.left.
+# In that bar's window_flags, set windows_app_bar: true.
+widgets:
+  astur_workspaces:
+    type: "glazewm.workspaces.GlazewmWorkspacesWidget"
+    options:
+      glazewm_server_uri: "ws://127.0.0.1:6123"
+      offline_label: "Astur offline"
+      hide_if_offline: false
+      monitor_exclusive: true
+      enable_scroll_switching: true
+      reverse_scroll_direction: false
+      app_icons:
+        enabled_populated: true
+        enabled_active: true
+        size: 16
+        max_icons: 4

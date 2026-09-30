@@ -1,0 +1,33 @@
+/* Append to YASB styles.css if no GlazeWM workspace styles exist yet. */
+.glazewm-workspaces .ws-btn {
+    color: #a6adc8;
+    background-color: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 0 8px;
+    margin: 3px 2px;
+}
+.glazewm-workspaces .ws-btn.populated {
+    color: #cdd6f4;
+}
+.glazewm-workspaces .ws-btn.active_empty,
+.glazewm-workspaces .ws-btn.active_populated {
+    background-color: #313244;
+    color: #cdd6f4;
+}
+.glazewm-workspaces .ws-btn.focused_empty,
+.glazewm-workspaces .ws-btn.focused_populated {
+    background-color: #89b4fa;
+    color: #1e1e2e;
+}
+.glazewm-workspaces .ws-btn .label {
+    color: #cdd6f4;
+}
+.glazewm-workspaces .ws-btn.focused_empty .label,
+.glazewm-workspaces .ws-btn.focused_populated .label {
+    color: #1e1e2e;
+}
+.glazewm-workspaces .offline-status {
+    color: #a6adc8;
+    padding: 0 8px;
+}

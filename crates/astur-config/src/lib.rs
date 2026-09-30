@@ -121,6 +121,9 @@ pub struct Config {
     pub media_enabled: bool,
     pub ipc_enabled: bool,
     pub ipc_pipe: String,
+    /// GlazeWM-compatible workspace API for YASB, bound to IPv4 loopback only.
+    pub yasb_enabled: bool,
+    pub yasb_port: u16,
     /// Allow the IPC `launch` verb to run arbitrary commands. Off by default:
     /// scripting a window manager rarely needs arbitrary exec, and leaving it on
     /// makes Astur a convenient parent process for something else already
@@ -344,6 +347,8 @@ impl Config {
             media_enabled: false,
             ipc_enabled: false,
             ipc_pipe: "astur".to_string(),
+            yasb_enabled: false,
+            yasb_port: 6123,
             ipc_allow_launch: false,
             foreground_lock_disable: true,
             async_window_pos: true,
@@ -729,6 +734,14 @@ ipc_pipe = astur
 # actually script launching through Astur: on, any process running as you can use
 # Astur as the parent process for a command of its choosing.
 ipc_allow_launch = false
+
+# YASB workspace integration. Uses YASB's existing GlazeWM workspace widget.
+# WebSocket server on 127.0.0.1 only; independent of the named-pipe API above.
+# Local processes can read workspace/window handles and switch workspaces.
+# Browser origins and arbitrary launch commands are rejected. Hot-reloaded.
+# Disable Astur's bar in navbar.conf when replacing it with YASB.
+yasb_enabled = false
+yasb_port = 6123
 
 # Windows normally refuses to let a background app steal the foreground. Astur
 # disables that timeout so focus changes land reliably. It is a SYSTEM-WIDE
@@ -1539,6 +1552,12 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "wallpaper_dir" => c.wallpaper_dir = v.to_string(),
             "media_enabled" => c.media_enabled = parse_bool(v),
             "ipc_enabled" => c.ipc_enabled = parse_bool(v),
+            "yasb_enabled" => c.yasb_enabled = parse_bool(v),
+            "yasb_port" => {
+                if let Ok(port @ 1..=65535) = v.parse::<u16>() {
+                    c.yasb_port = port;
+                }
+            }
             "ipc_pipe" => {
                 if !v.is_empty() {
                     c.ipc_pipe = v.to_string()
@@ -1919,6 +1938,8 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         media_enabled,
         ipc_enabled,
         ipc_pipe,
+        yasb_enabled,
+        yasb_port,
         ipc_allow_launch,
         foreground_lock_disable,
         async_window_pos,
@@ -2039,6 +2060,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(live: clipboard_history, clipboard_limit, clipboard_prefix, emoji_picker);
     diff!(live: emoji_prefix, wallpaper_dir, workspace_wallpapers, ipc_enabled, ipc_pipe);
     diff!(live: ipc_allow_launch, foreground_lock_disable, async_window_pos);
+    diff!(live: yasb_enabled, yasb_port);
     diff!(live: persist_state, log_level, unknown_keys, extra_hotkeys, window_rules);
     diff!(live: ignore_classes, float_classes, key_focus_next, key_focus_prev);
     diff!(live: key_shrink_master, key_grow_master, key_promote_master);

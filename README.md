@@ -189,6 +189,16 @@ missing companion instead of failing silently.
 lives on the [`lite`](https://github.com/Page011/Astur/tree/lite) branch (a single
 crate, no workspace).
 
+## YASB integration
+
+Use YASB's existing GlazeWM workspace widget with Astur's optional localhost
+WebSocket server: live workspace indicators, app icons, click-to-switch and wheel
+cycling, including per-monitor workspaces. Open **Settings > YASB integration**
+to enable it, choose a port, and copy the widget configuration and example CSS.
+Alternatively, set `yasb_enabled = true` in `astur.conf` and connect the widget
+to `ws://127.0.0.1:6123`.
+See [setup and ready-to-merge YASB configuration](integrations/yasb/README.md).
+
 ## How it works
 
 Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) that
