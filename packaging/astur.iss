@@ -12,7 +12,7 @@
 ; (The hawk .ico is embedded in both exes via build.rs + embed-resource.)
 
 #define AppName "Astur"
-#define AppVersion "2.1.3"
+#define AppVersion "2.2.0"
 #define AppPublisher "Astur"
 #define AppURL "https://astur.app"
 #define AppExe "Astur.exe"
