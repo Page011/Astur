@@ -39,4 +39,5 @@ features = [
     "Win32_Storage_Xps",
     "Win32_UI_Shell",
     "Win32_Security",
+    "Win32_System_Registry",
 ]

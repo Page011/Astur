@@ -15,7 +15,7 @@
 
 #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,26 +46,30 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LCONTROL, VK_LMENU,
     VK_LWIN, VK_MENU, VK_RBUTTON, VK_RCONTROL, VK_RWIN, VK_TAB,
 };
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetAncestor, GetDesktopWindow,
     GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, MessageBoxW, PostQuitMessage,
-    RegisterClassW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
-    HC_ACTION, HICON, HWND_TOPMOST, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-    LR_DEFAULTCOLOR, LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MF_SEPARATOR, MF_STRING, MSG,
-    MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SW_HIDE, SW_RESTORE, SW_SHOWNA, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NULL, WM_QUERYENDSESSION, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    RegisterClassW, RegisterWindowMessageW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+    WindowFromPoint, GA_ROOT, HC_ACTION, HICON, HWND_TOPMOST, IDI_APPLICATION, KBDLLHOOKSTRUCT,
+    LLKHF_INJECTED, LR_DEFAULTCOLOR, LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MF_SEPARATOR, MF_STRING,
+    MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_QUERYENDSESSION, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -4643,6 +4647,13 @@ fn config_watcher() {
         // Statics the hooks/workers read directly.
         FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
         MOD_WIN_ALT.store(cfg.modifier.eq_ignore_ascii_case("win_alt"), Ordering::Relaxed);
+        set_tray_theme_mode(&cfg.tray_icon_theme);
+        let tray_h = TRAY_HWND.load(Ordering::Relaxed);
+        if tray_h != 0 {
+            unsafe {
+                tray_update_icon(hwnd_from(tray_h), true);
+            }
+        }
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
         *PASSTHROUGH_CLASSES.lock().unwrap() = cfg.passthrough_classes.clone();
@@ -5026,14 +5037,67 @@ const TRAY_QUIT: usize = 2;
 
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
-// Embedded tray icon PNG (32x32 transparent).
-const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+// Embedded tray icon PNGs (32x32 transparent).
+// For dark mode taskbars (white hawk silhouette on dark background).
+const TRAY_ICON_DARK_PNG: &[u8] = include_bytes!("../assets/tray-icon-dark.png");
+// For light mode taskbars (black hawk silhouette on light background).
+const TRAY_ICON_LIGHT_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
 
-/// Build the tray HICON from the embedded PNG (Win10/11 accept PNG icon bits).
-/// Falls back to the stock application icon if creation fails.
-unsafe fn tray_icon() -> HICON {
+static TRAY_THEME_MODE: AtomicU8 = AtomicU8::new(0); // 0 = auto, 1 = dark, 2 = light
+static TRAY_ICON_DARK: AtomicIsize = AtomicIsize::new(0);
+static TRAY_ICON_LIGHT: AtomicIsize = AtomicIsize::new(0);
+static TRAY_IS_DARK: AtomicBool = AtomicBool::new(false);
+static WM_TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+fn set_tray_theme_mode(theme: &str) {
+    let mode = match theme.to_ascii_lowercase().as_str() {
+        "dark" => 1,
+        "light" => 2,
+        _ => 0, // auto
+    };
+    TRAY_THEME_MODE.store(mode, Ordering::Relaxed);
+}
+
+/// Query the Windows registry to determine if the system taskbar is in dark mode.
+/// Windows 10/11 stores this in `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`.
+/// `SystemUsesLightTheme = 0` means dark taskbar, `1` means light taskbar.
+/// If absent or unreadable, defaults to `true` (dark mode) as modern Windows defaults to dark taskbars.
+fn is_taskbar_dark_mode() -> bool {
+    unsafe {
+        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &mut hkey).is_ok() {
+            let mut val: u32 = 0;
+            let mut size: u32 = std::mem::size_of::<u32>() as u32;
+            let val_name = w!("SystemUsesLightTheme");
+            let res = RegQueryValueExW(
+                hkey,
+                val_name,
+                None,
+                None,
+                Some(&mut val as *mut u32 as *mut u8),
+                Some(&mut size),
+            );
+            let _ = RegCloseKey(hkey);
+            if res.is_ok() {
+                return val == 0;
+            }
+        }
+        true
+    }
+}
+
+fn resolve_tray_dark_mode() -> bool {
+    match TRAY_THEME_MODE.load(Ordering::Relaxed) {
+        1 => true,  // Forced dark
+        2 => false, // Forced light
+        _ => is_taskbar_dark_mode(), // Auto-detect
+    }
+}
+
+unsafe fn create_hicon_from_png(png_bytes: &[u8]) -> HICON {
     CreateIconFromResourceEx(
-        TRAY_ICON_PNG,
+        png_bytes,
         BOOL(1),
         0x0003_0000,
         0,
@@ -5043,20 +5107,61 @@ unsafe fn tray_icon() -> HICON {
     .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default())
 }
 
+unsafe fn get_tray_icon(dark_mode: bool) -> HICON {
+    let slot = if dark_mode {
+        &TRAY_ICON_DARK
+    } else {
+        &TRAY_ICON_LIGHT
+    };
+    let mut h = slot.load(Ordering::Relaxed);
+    if h == 0 {
+        let icon = if dark_mode {
+            create_hicon_from_png(TRAY_ICON_DARK_PNG)
+        } else {
+            create_hicon_from_png(TRAY_ICON_LIGHT_PNG)
+        };
+        slot.store(icon.0 as isize, Ordering::Relaxed);
+        h = icon.0 as isize;
+    }
+    HICON(h as *mut c_void)
+}
+
 unsafe fn tray_add(hwnd: HWND) {
+    let is_dark = resolve_tray_dark_mode();
+    TRAY_IS_DARK.store(is_dark, Ordering::Relaxed);
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAY,
-        hIcon: tray_icon(),
+        hIcon: get_tray_icon(is_dark),
         ..Default::default()
     };
     for (i, c) in "Astur".encode_utf16().enumerate().take(127) {
         nid.szTip[i] = c;
     }
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+unsafe fn tray_update_icon(hwnd: HWND, force: bool) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let is_dark = resolve_tray_dark_mode();
+    let prev = TRAY_IS_DARK.swap(is_dark, Ordering::Relaxed);
+    if !force && prev == is_dark {
+        return;
+    }
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON,
+        hIcon: get_tray_icon(is_dark),
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 unsafe fn tray_remove(hwnd: HWND) {
@@ -5086,6 +5191,15 @@ fn open_config_directory() {
 }
 
 unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    let tb_msg = WM_TASKBAR_CREATED.load(Ordering::Relaxed);
+    if tb_msg != 0 && msg == tb_msg {
+        tray_add(h);
+        return LRESULT(0);
+    }
+    if msg == WM_SETTINGCHANGE || msg == WM_THEMECHANGED {
+        tray_update_icon(h, false);
+        return LRESULT(0);
+    }
     if msg == WM_TRAY {
         let event = (l.0 as u32) & 0xFFFF;
         if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
@@ -5130,6 +5244,9 @@ unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) 
 
 /// Register + create the hidden tray window and add the tray icon. Returns its HWND.
 unsafe fn setup_tray(hinst: HINSTANCE) -> Option<HWND> {
+    let tb_msg = RegisterWindowMessageW(w!("TaskbarCreated"));
+    WM_TASKBAR_CREATED.store(tb_msg, Ordering::Relaxed);
+
     let wc = WNDCLASSW {
         lpfnWndProc: Some(tray_wndproc),
         hInstance: hinst,
@@ -5198,6 +5315,7 @@ fn main() {
         let cfg = load_config();
         FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
         MOD_WIN_ALT.store(cfg.modifier.eq_ignore_ascii_case("win_alt"), Ordering::Relaxed);
+        set_tray_theme_mode(&cfg.tray_icon_theme);
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
         *PASSTHROUGH_CLASSES.lock().unwrap() = cfg.passthrough_classes.clone();
@@ -5406,12 +5524,25 @@ mod tests {
 
     #[test]
     fn test_tray_icon_bytes_valid() {
-        assert!(!TRAY_ICON_PNG.is_empty());
-        assert_eq!(&TRAY_ICON_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        assert!(!TRAY_ICON_LIGHT_PNG.is_empty());
+        assert_eq!(&TRAY_ICON_LIGHT_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        assert!(!TRAY_ICON_DARK_PNG.is_empty());
+        assert_eq!(&TRAY_ICON_DARK_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
         unsafe {
-            let icon = tray_icon();
-            assert!(!icon.0.is_null());
+            let icon_light = get_tray_icon(false);
+            assert!(!icon_light.0.is_null());
+            let icon_dark = get_tray_icon(true);
+            assert!(!icon_dark.0.is_null());
+            let active = get_tray_icon(resolve_tray_dark_mode());
+            assert!(!active.0.is_null());
         }
+        // Test mode resolution
+        set_tray_theme_mode("dark");
+        assert!(resolve_tray_dark_mode());
+        set_tray_theme_mode("light");
+        assert!(!resolve_tray_dark_mode());
+        set_tray_theme_mode("auto");
+        assert_eq!(resolve_tray_dark_mode(), is_taskbar_dark_mode());
     }
 
     #[test]
