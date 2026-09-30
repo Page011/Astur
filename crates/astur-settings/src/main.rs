@@ -18,6 +18,11 @@ use astur_config::{
 };
 use eframe::egui;
 
+// Embed the shipped examples so the portable settings exe can copy them without
+// depending on a repository checkout or separate files beside the executable.
+const YASB_WIDGET_YAML: &str = include_str!("../../../integrations/yasb/workspaces.yaml");
+const YASB_WIDGET_CSS: &str = include_str!("../../../integrations/yasb/workspaces.css");
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -44,6 +49,7 @@ enum Section {
     SystemMenu,
     Desktop,
     Bar,
+    Yasb,
     Widgets,
     Hotkeys,
     Rules,
@@ -60,6 +66,7 @@ const SECTIONS: &[(Section, &str)] = &[
     (Section::SystemMenu, "System menu"),
     (Section::Desktop, "Desktop tools"),
     (Section::Bar, "Bar"),
+    (Section::Yasb, "YASB integration"),
     (Section::Widgets, "Bar widgets"),
     (Section::Hotkeys, "Hotkeys"),
     (Section::Rules, "Window rules"),
@@ -321,6 +328,8 @@ impl App {
             ("media_enabled", b(c.media_enabled)),
             ("ipc_enabled", b(c.ipc_enabled)),
             ("ipc_pipe", c.ipc_pipe.clone()),
+            ("yasb_enabled", b(c.yasb_enabled)),
+            ("yasb_port", c.yasb_port.to_string()),
             ("persist_state", b(c.persist_state)),
             ("log_level", c.log_level.clone()),
             ("extra_hotkeys", format_hotkeys(&c.extra_hotkeys)),
@@ -555,6 +564,7 @@ impl eframe::App for App {
                     Section::SystemMenu => self.ui_system_menu(ui),
                     Section::Desktop => self.ui_desktop(ui),
                     Section::Bar => self.ui_bar(ui),
+                    Section::Yasb => self.ui_yasb(ui),
                     Section::Widgets => self.ui_widgets(ui),
                     Section::Hotkeys => self.ui_hotkeys(ui),
                     Section::Rules => self.ui_rules(ui),
@@ -954,6 +964,61 @@ impl App {
                 ui.text_edit_singleline(&mut self.cfg.ipc_pipe);
             });
         });
+    }
+
+    fn ui_yasb(&mut self, ui: &mut egui::Ui) {
+        heading(ui, "YASB integration");
+        ui.label("Show Astur workspaces in YASB, with live indicators, app icons and click or wheel switching.");
+        ui.add_space(8.0);
+        ui.checkbox(
+            &mut self.cfg.yasb_enabled,
+            "Enable YASB workspace integration",
+        );
+        ui.add_enabled_ui(self.cfg.yasb_enabled, |ui| {
+            ui.horizontal(|ui| {
+                ui.label("Port");
+                ui.add(egui::DragValue::new(&mut self.cfg.yasb_port).range(1..=65535))
+                    .on_hover_text(
+                        "Default: 6123. Choose a free port and use the same one in YASB.",
+                    );
+            });
+        });
+        let endpoint = format!("ws://127.0.0.1:{}", self.cfg.yasb_port);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("YASB server address:");
+            ui.monospace(&endpoint);
+            if ui.button("Copy address").clicked() {
+                ui.ctx().copy_text(endpoint.clone());
+            }
+        });
+        ui.label(egui::RichText::new("Save applies the integration and port changes live.").weak());
+
+        heading(ui, "Astur bar");
+        ui.checkbox(&mut self.cfg.bar_enabled, "Show Astur's built-in bar");
+        ui.label("Turn this off once YASB is ready, then Save. Turn it back on to restore the Astur bar.");
+
+        heading(ui, "Set up YASB");
+        ui.label("1. Enable the integration above and click Save.");
+        ui.label("2. Merge the widget YAML below into YASB's config.yaml. If a widgets section already exists, add astur_workspaces inside it.");
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Copy widget YAML").clicked() {
+                ui.ctx()
+                    .copy_text(YASB_WIDGET_YAML.replace("ws://127.0.0.1:6123", &endpoint));
+            }
+            if ui.button("Copy example CSS").clicked() {
+                ui.ctx().copy_text(YASB_WIDGET_CSS.to_string());
+            }
+        });
+        ui.label("The copied YAML uses the port shown above. Append the CSS to styles.css, or keep your existing GlazeWM workspace styles.");
+        ui.collapsing("Preview widget YAML", |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.code(YASB_WIDGET_YAML.replace("ws://127.0.0.1:6123", &endpoint));
+            });
+        });
+        ui.label("3. Add astur_workspaces to your bar's widgets.left list. In that bar's window_flags, set windows_app_bar: true to reserve space for YASB.");
+        ui.label("4. Reload YASB, then turn off the Astur bar above and Save.");
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Uses YASB's GlazeWM workspace widget. GlazeWM itself must be stopped. Binding-mode and tiling-direction widgets are not supported.").weak());
     }
 
     fn ui_bar(&mut self, ui: &mut egui::Ui) {

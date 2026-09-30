@@ -25,6 +25,7 @@ use std::sync::{Condvar, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
 
 mod layout;
+mod yasb;
 // Config now lives in the shared `astur-config` crate (the settings GUI parses the
 // same model). Aliased to `config` so the rest of this file is unchanged.
 use astur_config as config;
@@ -1977,6 +1978,7 @@ enum Cmd {
     PromoteMaster,
     ResizeMaster(f32),
     Switch(usize),
+    YasbFocus(yasb::Focus),
     MoveToWs(usize),
     ToggleTiling,
     ToggleFloat,
@@ -2034,6 +2036,7 @@ impl Cmd {
             Cmd::PromoteMaster => "PromoteMaster",
             Cmd::ResizeMaster(_) => "ResizeMaster",
             Cmd::Switch(_) => "Switch",
+            Cmd::YasbFocus(_) => "YasbFocus",
             Cmd::MoveToWs(_) => "MoveToWs",
             Cmd::ToggleTiling => "ToggleTiling",
             Cmd::ToggleFloat => "ToggleFloat",
@@ -8143,6 +8146,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             show_workspace(mgr, mi, local);
         }
+        Cmd::YasbFocus(focus) => yasb::focus_workspace(mgr, focus),
         Cmd::MoveToWs(i) => {
             if i >= mgr.cfg.workspaces || !mgr.tiling || mgr.monitors.is_empty() {
                 return;
@@ -11015,6 +11019,7 @@ fn manager_loop(cfg: Config) {
 /// Refresh the shutdown registry and the O(1) locate index from current manager
 /// state. One walk feeds both, so the index costs nothing extra.
 fn sync_managed(mgr: &Manager) {
+    yasb::publish(mgr);
     let mut all = MANAGED.lock().unwrap();
     all.clear();
     let mut map: HashMap<isize, (usize, usize)> = HashMap::new();
@@ -16899,6 +16904,7 @@ fn main() {
         spawn_named("hook-watchdog", hook_watchdog);
         // Optional local-only named-pipe command API; blocks on its own worker.
         spawn_named("ipc", ipc_worker);
+        spawn_named("yasb", yasb::worker);
         // Crash rescue: un-hide anything a previous (killed) instance left hidden
         // BEFORE the manager adopts windows, so they're adopted visible.
         rescue_orphans();
