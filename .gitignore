@@ -15,3 +15,7 @@ Desktop.ini
 
 # Review / audit output (internal, same policy as plan/)
 /review/
+
+# Local Plane connection details
+/.plane.json
+/.plane/
