@@ -15,7 +15,7 @@
 
 #![windows_subsystem = "windows"]
 
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -46,26 +46,30 @@ use windows::Win32::System::Console::{
 };
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NOTIFYICONDATAW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE,
+    NIM_MODIFY,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
     KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, VIRTUAL_KEY, VK_CONTROL, VK_LBUTTON, VK_LCONTROL, VK_LMENU,
     VK_LWIN, VK_MENU, VK_RBUTTON, VK_RCONTROL, VK_RWIN, VK_TAB,
 };
+use windows::Win32::System::Registry::{
+    HKEY, HKEY_CURRENT_USER, KEY_READ, RegCloseKey, RegOpenKeyExW, RegQueryValueExW,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CallNextHookEx, CreateIconFromResourceEx, CreatePopupMenu, CreateWindowExW,
     DefWindowProcW, DestroyMenu, DestroyWindow, DispatchMessageW, GetAncestor, GetDesktopWindow,
     GetMessageW, GetShellWindow, GetWindowRect, IsZoomed, MessageBoxW, PostQuitMessage,
-    RegisterClassW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos, SetWindowsHookExW,
-    ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
-    HC_ACTION, HICON, HWND_TOPMOST, IDI_APPLICATION, KBDLLHOOKSTRUCT, LLKHF_INJECTED,
-    LR_DEFAULTCOLOR, LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MF_SEPARATOR, MF_STRING, MSG,
-    MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
-    SW_HIDE, SW_RESTORE, SW_SHOWNA, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL, WH_MOUSE_LL,
-    WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NULL, WM_QUERYENDSESSION, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    RegisterClassW, RegisterWindowMessageW, SetCursorPos, SetLayeredWindowAttributes, SetWindowPos,
+    SetWindowsHookExW, ShowWindow, TrackPopupMenu, TranslateMessage, UnhookWindowsHookEx,
+    WindowFromPoint, GA_ROOT, HC_ACTION, HICON, HWND_TOPMOST, IDI_APPLICATION, KBDLLHOOKSTRUCT,
+    LLKHF_INJECTED, LR_DEFAULTCOLOR, LWA_ALPHA, MB_ICONINFORMATION, MB_OK, MF_SEPARATOR, MF_STRING,
+    MSG, MSLLHOOKSTRUCT, SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER,
+    SWP_SHOWWINDOW, SW_HIDE, SW_RESTORE, SW_SHOWNA, TPM_RETURNCMD, TPM_RIGHTBUTTON, WH_KEYBOARD_LL,
+    WH_MOUSE_LL, WM_ENDSESSION, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE, WM_NULL, WM_QUERYENDSESSION, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    WM_SETTINGCHANGE, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_THEMECHANGED, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -88,7 +92,7 @@ use windows::Win32::UI::Accessibility::SetWinEventHook;
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, EnumWindows, FindWindowExW, FindWindowW, SendMessageTimeoutW, SMTO_ABORTIFHUNG,
-    GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW, GetWindowTextLengthW,
+    GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongW,
     GetClientRect, GetCursorPos, GetWindowLongPtrW, GetWindowTextW, GetWindowThreadProcessId,
     IsIconic, IsWindow, IsWindowVisible, PeekMessageW, PostMessageW, SetWindowLongPtrW, GWLP_USERDATA, PM_REMOVE,
     KillTimer, PW_RENDERFULLCONTENT, SetForegroundWindow, SetTimer, SetWindowLongW, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
@@ -1269,6 +1273,21 @@ impl Workspace {
             splits: Vec::new(),
         }
     }
+
+    unsafe fn tiled_windows(&self, active: bool) -> Vec<isize> {
+        self.windows
+            .iter()
+            .copied()
+            .filter(|h| {
+                let hwnd = hwnd_from(*h);
+                IsWindow(hwnd).as_bool()
+                    && (!active || IsWindowVisible(hwnd).as_bool())
+                    && !self.floating.contains(h)
+                    && !IsIconic(hwnd).as_bool()
+                    && !is_cloaked(hwnd)
+            })
+            .collect()
+    }
 }
 
 /// One physical display: its own workspaces, tiled on its own work area.
@@ -1413,6 +1432,8 @@ const BLOCK_CLASSES: &[&str] = &[
     "IME",
     "MSCTFIME UI",
     "Default IME",
+    "GDI+ Hook Window Class",
+    "CiceroUIWndFrame",
     "astur_marker",
     "astur_bar",
     "astur_slide",
@@ -1570,7 +1591,26 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
     {
         return false;
     }
-    if GetWindowTextLengthW(hwnd) == 0 {
+    let title = window_title(hwnd);
+    // Framework internal background/notification windows
+    if title == "Hidden Window"
+        || title == "MediaContextNotificationWindow"
+        || title == "SystemResourceNotifyWindow"
+    {
+        return false;
+    }
+    // WPF windows without a title or without resizable frame and maximize box
+    // are splash screens, popups, or helper windows, not main application windows.
+    if class.starts_with("HwndWrapper") {
+        if title.is_empty() {
+            return false;
+        }
+        let is_standard_app = (style & WS_THICKFRAME.0 != 0) && (style & WS_MAXIMIZEBOX.0 != 0);
+        if !is_standard_app {
+            return false;
+        }
+    }
+    if title.is_empty() {
         // ApplicationFrameWindow with an empty title is a background phantom frame;
         // real UWP apps (e.g. Settings, Calculator) always have a non-empty title.
         if class == "ApplicationFrameWindow" {
@@ -1786,10 +1826,13 @@ unsafe fn window_under_point(mgr: &Manager, mi: usize, pt: POINT, exclude: isize
     let a = mgr.monitors[mi].active;
     let ws = &mgr.monitors[mi].workspaces[a];
     for &w in &ws.windows {
+        let hwnd = hwnd_from(w);
         if w == exclude
+            || !IsWindow(hwnd).as_bool()
+            || !IsWindowVisible(hwnd).as_bool()
             || ws.floating.contains(&w)
-            || IsIconic(hwnd_from(w)).as_bool()
-            || is_cloaked(hwnd_from(w))
+            || IsIconic(hwnd).as_bool()
+            || is_cloaked(hwnd)
         {
             continue;
         }
@@ -1993,16 +2036,7 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
     let Some(ws) = mon.workspaces.get(wi) else {
         return Vec::new();
     };
-    let tiled: Vec<isize> = ws
-        .windows
-        .iter()
-        .copied()
-        .filter(|h| {
-            !ws.floating.contains(h)
-                && !IsIconic(hwnd_from(*h)).as_bool()
-                && !is_cloaked(hwnd_from(*h))
-        })
-        .collect();
+    let tiled = ws.tiled_windows(wi == mon.active);
     let n = tiled.len();
     if n == 0 {
         return Vec::new();
@@ -2302,6 +2336,39 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     BOOL(1)
 }
 
+/// Purge any destroyed window handles from all workspaces and floating state.
+unsafe fn prune_dead_windows(mgr: &mut Manager) {
+    let mut any_removed = false;
+    let mut mons_to_retile = Vec::new();
+    for (mi, mon) in mgr.monitors.iter_mut().enumerate() {
+        let mut mon_changed = false;
+        for (wi, ws) in mon.workspaces.iter_mut().enumerate() {
+            let before = ws.windows.len();
+            ws.windows.retain(|&h| IsWindow(hwnd_from(h)).as_bool());
+            ws.floating.retain(|&h| IsWindow(hwnd_from(h)).as_bool());
+            if ws.windows.len() != before {
+                any_removed = true;
+                if !ws.windows.contains(&ws.focused) {
+                    ws.focused = ws.windows.first().copied().unwrap_or(0);
+                }
+                if wi == mon.active {
+                    mon_changed = true;
+                }
+            }
+        }
+        if mon_changed {
+            mons_to_retile.push(mi);
+        }
+    }
+    if any_removed {
+        mgr.floating_state.retain(|&k, _| IsWindow(hwnd_from(k)).as_bool());
+        sync_managed(mgr);
+        for mi in mons_to_retile {
+            retile_monitor(mgr, mi);
+        }
+    }
+}
+
 /// Add every currently-manageable window to its monitor's active workspace.
 unsafe fn assign_existing_windows(mgr: &mut Manager) {
     let mut v: Vec<isize> = Vec::new();
@@ -2320,6 +2387,7 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
         mgr.set_window_floating(h, float);
         mgr.monitors[mi].workspaces[a].focused = h;
     }
+    prune_dead_windows(mgr);
 }
 
 /// A cosmetic workspace-slide request handed from the manager to the transition
@@ -3082,6 +3150,26 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 if wi == mgr.monitors[mi].active {
                     retile_monitor(mgr, mi);
                 }
+            } else {
+                let mut retile_mons = Vec::new();
+                for (mi, mon) in mgr.monitors.iter_mut().enumerate() {
+                    for (wi, ws) in mon.workspaces.iter_mut().enumerate() {
+                        let before = ws.windows.len();
+                        ws.windows.retain(|&x| x != h);
+                        ws.floating.retain(|&x| x != h);
+                        if ws.windows.len() != before {
+                            if ws.focused == h {
+                                ws.focused = ws.windows.first().copied().unwrap_or(0);
+                            }
+                            if wi == mon.active {
+                                retile_mons.push(mi);
+                            }
+                        }
+                    }
+                }
+                for mi in retile_mons {
+                    retile_monitor(mgr, mi);
+                }
             }
             // Clean up floating state for dead/destroyed windows so HWNDs don't leak
             // or collide with future windows. Windows that are merely cloaked/hidden
@@ -3221,16 +3309,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 // something useful here too (master_ratio is unused by dwindle).
                 let a = mgr.monitors[mi].active;
                 let ws = &mgr.monitors[mi].workspaces[a];
-                let tiled: Vec<isize> = ws
-                    .windows
-                    .iter()
-                    .copied()
-                    .filter(|h| {
-                        !ws.floating.contains(h)
-                            && !IsIconic(hwnd_from(*h)).as_bool()
-                            && !is_cloaked(hwnd_from(*h))
-                    })
-                    .collect();
+                let tiled = ws.tiled_windows(true);
                 let n = tiled.len();
                 if n >= 2 {
                     if let Some(idx) = tiled.iter().position(|&h| h == ws.focused) {
@@ -4568,6 +4647,13 @@ fn config_watcher() {
         // Statics the hooks/workers read directly.
         FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
         MOD_WIN_ALT.store(cfg.modifier.eq_ignore_ascii_case("win_alt"), Ordering::Relaxed);
+        set_tray_theme_mode(&cfg.tray_icon_theme);
+        let tray_h = TRAY_HWND.load(Ordering::Relaxed);
+        if tray_h != 0 {
+            unsafe {
+                tray_update_icon(hwnd_from(tray_h), true);
+            }
+        }
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
         *PASSTHROUGH_CLASSES.lock().unwrap() = cfg.passthrough_classes.clone();
@@ -4634,6 +4720,7 @@ fn manager_loop(cfg: Config) {
             }
         };
         unsafe {
+            prune_dead_windows(&mut mgr);
             process(&mut mgr, cmd);
             apply_styles(&mgr);
             update_bar(&mgr);
@@ -4690,21 +4777,22 @@ unsafe extern "system" fn win_event_proc(
                 push_cmd(Cmd::Add(hwnd.0 as isize));
             }
         }
-        EVENT_OBJECT_HIDE | EVENT_OBJECT_DESTROY => {
+        EVENT_OBJECT_DESTROY => {
+            push_cmd(Cmd::Remove(hwnd.0 as isize));
+        }
+        EVENT_OBJECT_HIDE => {
             if !SUPPRESS.load(Ordering::Relaxed) {
                 push_cmd(Cmd::Remove(hwnd.0 as isize));
             }
         }
         EVENT_OBJECT_CLOAKED => {
-            if !SUPPRESS.load(Ordering::Relaxed) {
-                // When a UWP app (e.g. Windows Settings) is closed, Windows cloaks it
-                // instead of destroying or hiding it. If it is iconic (minimized),
-                // retile so it stops taking space; if not iconic, it was closed so remove it.
-                if IsIconic(hwnd).as_bool() {
-                    push_cmd(Cmd::Retile);
-                } else {
-                    push_cmd(Cmd::Remove(hwnd.0 as isize));
-                }
+            // When a UWP app (e.g. Windows Settings) is closed, Windows cloaks it
+            // instead of destroying or hiding it. If it is iconic (minimized),
+            // retile so it stops taking space; if not iconic, it was closed so remove it.
+            if IsIconic(hwnd).as_bool() {
+                push_cmd(Cmd::Retile);
+            } else {
+                push_cmd(Cmd::Remove(hwnd.0 as isize));
             }
         }
         EVENT_SYSTEM_FOREGROUND => {
@@ -4949,14 +5037,67 @@ const TRAY_QUIT: usize = 2;
 
 static TRAY_HWND: AtomicIsize = AtomicIsize::new(0);
 
-// Embedded tray icon PNG (32x32 transparent).
-const TRAY_ICON_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
+// Embedded tray icon PNGs (32x32 transparent).
+// For dark mode taskbars (white hawk silhouette on dark background).
+const TRAY_ICON_DARK_PNG: &[u8] = include_bytes!("../assets/tray-icon-dark.png");
+// For light mode taskbars (black hawk silhouette on light background).
+const TRAY_ICON_LIGHT_PNG: &[u8] = include_bytes!("../assets/tray-icon.png");
 
-/// Build the tray HICON from the embedded PNG (Win10/11 accept PNG icon bits).
-/// Falls back to the stock application icon if creation fails.
-unsafe fn tray_icon() -> HICON {
+static TRAY_THEME_MODE: AtomicU8 = AtomicU8::new(0); // 0 = auto, 1 = dark, 2 = light
+static TRAY_ICON_DARK: AtomicIsize = AtomicIsize::new(0);
+static TRAY_ICON_LIGHT: AtomicIsize = AtomicIsize::new(0);
+static TRAY_IS_DARK: AtomicBool = AtomicBool::new(false);
+static WM_TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
+
+fn set_tray_theme_mode(theme: &str) {
+    let mode = match theme.to_ascii_lowercase().as_str() {
+        "dark" => 1,
+        "light" => 2,
+        _ => 0, // auto
+    };
+    TRAY_THEME_MODE.store(mode, Ordering::Relaxed);
+}
+
+/// Query the Windows registry to determine if the system taskbar is in dark mode.
+/// Windows 10/11 stores this in `HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize`.
+/// `SystemUsesLightTheme = 0` means dark taskbar, `1` means light taskbar.
+/// If absent or unreadable, defaults to `true` (dark mode) as modern Windows defaults to dark taskbars.
+fn is_taskbar_dark_mode() -> bool {
+    unsafe {
+        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+        let mut hkey = HKEY::default();
+        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, 0, KEY_READ, &mut hkey).is_ok() {
+            let mut val: u32 = 0;
+            let mut size: u32 = std::mem::size_of::<u32>() as u32;
+            let val_name = w!("SystemUsesLightTheme");
+            let res = RegQueryValueExW(
+                hkey,
+                val_name,
+                None,
+                None,
+                Some(&mut val as *mut u32 as *mut u8),
+                Some(&mut size),
+            );
+            let _ = RegCloseKey(hkey);
+            if res.is_ok() {
+                return val == 0;
+            }
+        }
+        true
+    }
+}
+
+fn resolve_tray_dark_mode() -> bool {
+    match TRAY_THEME_MODE.load(Ordering::Relaxed) {
+        1 => true,  // Forced dark
+        2 => false, // Forced light
+        _ => is_taskbar_dark_mode(), // Auto-detect
+    }
+}
+
+unsafe fn create_hicon_from_png(png_bytes: &[u8]) -> HICON {
     CreateIconFromResourceEx(
-        TRAY_ICON_PNG,
+        png_bytes,
         BOOL(1),
         0x0003_0000,
         0,
@@ -4966,20 +5107,61 @@ unsafe fn tray_icon() -> HICON {
     .unwrap_or_else(|_| LoadIconW(None, IDI_APPLICATION).unwrap_or_default())
 }
 
+unsafe fn get_tray_icon(dark_mode: bool) -> HICON {
+    let slot = if dark_mode {
+        &TRAY_ICON_DARK
+    } else {
+        &TRAY_ICON_LIGHT
+    };
+    let mut h = slot.load(Ordering::Relaxed);
+    if h == 0 {
+        let icon = if dark_mode {
+            create_hicon_from_png(TRAY_ICON_DARK_PNG)
+        } else {
+            create_hicon_from_png(TRAY_ICON_LIGHT_PNG)
+        };
+        slot.store(icon.0 as isize, Ordering::Relaxed);
+        h = icon.0 as isize;
+    }
+    HICON(h as *mut c_void)
+}
+
 unsafe fn tray_add(hwnd: HWND) {
+    let is_dark = resolve_tray_dark_mode();
+    TRAY_IS_DARK.store(is_dark, Ordering::Relaxed);
     let mut nid = NOTIFYICONDATAW {
         cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
         hWnd: hwnd,
         uID: 1,
         uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
         uCallbackMessage: WM_TRAY,
-        hIcon: tray_icon(),
+        hIcon: get_tray_icon(is_dark),
         ..Default::default()
     };
     for (i, c) in "Astur".encode_utf16().enumerate().take(127) {
         nid.szTip[i] = c;
     }
     let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+}
+
+unsafe fn tray_update_icon(hwnd: HWND, force: bool) {
+    if hwnd.0.is_null() {
+        return;
+    }
+    let is_dark = resolve_tray_dark_mode();
+    let prev = TRAY_IS_DARK.swap(is_dark, Ordering::Relaxed);
+    if !force && prev == is_dark {
+        return;
+    }
+    let nid = NOTIFYICONDATAW {
+        cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uID: 1,
+        uFlags: NIF_ICON,
+        hIcon: get_tray_icon(is_dark),
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
 unsafe fn tray_remove(hwnd: HWND) {
@@ -5009,6 +5191,15 @@ fn open_config_directory() {
 }
 
 unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    let tb_msg = WM_TASKBAR_CREATED.load(Ordering::Relaxed);
+    if tb_msg != 0 && msg == tb_msg {
+        tray_add(h);
+        return LRESULT(0);
+    }
+    if msg == WM_SETTINGCHANGE || msg == WM_THEMECHANGED {
+        tray_update_icon(h, false);
+        return LRESULT(0);
+    }
     if msg == WM_TRAY {
         let event = (l.0 as u32) & 0xFFFF;
         if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
@@ -5053,6 +5244,9 @@ unsafe extern "system" fn tray_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) 
 
 /// Register + create the hidden tray window and add the tray icon. Returns its HWND.
 unsafe fn setup_tray(hinst: HINSTANCE) -> Option<HWND> {
+    let tb_msg = RegisterWindowMessageW(w!("TaskbarCreated"));
+    WM_TASKBAR_CREATED.store(tb_msg, Ordering::Relaxed);
+
     let wc = WNDCLASSW {
         lpfnWndProc: Some(tray_wndproc),
         hInstance: hinst,
@@ -5121,6 +5315,7 @@ fn main() {
         let cfg = load_config();
         FOLLOW_MOUSE.store(cfg.focus_follows_mouse, Ordering::Relaxed);
         MOD_WIN_ALT.store(cfg.modifier.eq_ignore_ascii_case("win_alt"), Ordering::Relaxed);
+        set_tray_theme_mode(&cfg.tray_icon_theme);
         *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
         *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
         *PASSTHROUGH_CLASSES.lock().unwrap() = cfg.passthrough_classes.clone();
@@ -5329,12 +5524,25 @@ mod tests {
 
     #[test]
     fn test_tray_icon_bytes_valid() {
-        assert!(!TRAY_ICON_PNG.is_empty());
-        assert_eq!(&TRAY_ICON_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        assert!(!TRAY_ICON_LIGHT_PNG.is_empty());
+        assert_eq!(&TRAY_ICON_LIGHT_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
+        assert!(!TRAY_ICON_DARK_PNG.is_empty());
+        assert_eq!(&TRAY_ICON_DARK_PNG[0..4], &[0x89, 0x50, 0x4E, 0x47]);
         unsafe {
-            let icon = tray_icon();
-            assert!(!icon.0.is_null());
+            let icon_light = get_tray_icon(false);
+            assert!(!icon_light.0.is_null());
+            let icon_dark = get_tray_icon(true);
+            assert!(!icon_dark.0.is_null());
+            let active = get_tray_icon(resolve_tray_dark_mode());
+            assert!(!active.0.is_null());
         }
+        // Test mode resolution
+        set_tray_theme_mode("dark");
+        assert!(resolve_tray_dark_mode());
+        set_tray_theme_mode("light");
+        assert!(!resolve_tray_dark_mode());
+        set_tray_theme_mode("auto");
+        assert_eq!(resolve_tray_dark_mode(), is_taskbar_dark_mode());
     }
 
     #[test]
@@ -5485,6 +5693,50 @@ mod tests {
         }
         assert!(!mgr.monitors[0].workspaces[0].floating.contains(&h));
         assert!(!mgr.is_window_floating(h));
+    }
+
+    #[test]
+    fn test_prune_dead_windows_and_tiled_filter() {
+        let cfg = Config::defaults();
+        let mon = Monitor::new(
+            1,
+            RECT {
+                left: 0,
+                top: 0,
+                right: 1920,
+                bottom: 1080,
+            },
+            1,
+        );
+        let mut mgr = Manager {
+            monitors: vec![mon],
+            focused_mon: 0,
+            primary: 0,
+            tiling: true,
+            cfg,
+            pending_launch_mon: 0,
+            floating_state: HashMap::new(),
+        };
+
+        // Fake HWNDs that do not exist (dead handles)
+        let dead_h1: isize = 0xDEAD01;
+        let dead_h2: isize = 0xDEAD02;
+
+        mgr.monitors[0].workspaces[0].windows.push(dead_h1);
+        mgr.monitors[0].workspaces[0].windows.push(dead_h2);
+        mgr.monitors[0].workspaces[0].focused = dead_h1;
+
+        unsafe {
+            // Verify tiled_windows excludes dead windows
+            let tiled = mgr.monitors[0].workspaces[0].tiled_windows(true);
+            assert!(tiled.is_empty());
+
+            // Pruning removes them from the workspace
+            prune_dead_windows(&mut mgr);
+            assert!(!mgr.monitors[0].workspaces[0].windows.contains(&dead_h1));
+            assert!(!mgr.monitors[0].workspaces[0].windows.contains(&dead_h2));
+            assert_eq!(mgr.monitors[0].workspaces[0].focused, 0);
+        }
     }
 }
 

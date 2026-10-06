@@ -59,6 +59,7 @@ pub(crate) struct Config {
     pub(crate) key_toggle_tiling: u32,     // Alt+<key> toggle tiling on/off (default T)
     pub(crate) key_toggle_float: u32,      // Alt+<key> toggle floating for focused window (default F)
     pub(crate) key_close_window: u32,      // Alt+<key> close the focused window (default W)
+    pub(crate) tray_icon_theme: String,    // "auto" (default), "dark", "light"
 }
 
 impl Config {
@@ -119,6 +120,7 @@ impl Config {
             key_toggle_tiling: 0x54,  // T
             key_toggle_float: 0x46,   // F
             key_close_window: 0x57,   // W
+            tray_icon_theme: "auto".to_string(),
         }
     }
 }
@@ -244,6 +246,14 @@ border_enabled = true
 focused_border = #66AAFF
 # Border colour of unfocused windows.     colour
 unfocused_border = #223A5E
+
+# System tray icon mode: auto | dark | light (default: auto).
+#   auto  = automatically match Windows taskbar theme (white icon on dark taskbar,
+#           black icon on light taskbar). Switches dynamically when theme changes.
+#   dark  = force dark-mode icon (white silhouette)
+#   light = force light-mode icon (black silhouette)
+# values: auto | dark | light
+tray_icon_theme = auto
 
 # ---------------------------------------------------------------------------
 # Window rules
@@ -571,6 +581,12 @@ fn parse_into(c: &mut Config, text: &str) {
             "float_classes" => c.float_classes = parse_list(v),
             "passthrough_classes" => c.passthrough_classes = parse_list(v),
             "modifier" => c.modifier = v.to_ascii_lowercase(),
+            "tray_icon_theme" | "tray_icon" => {
+                let mode = v.to_ascii_lowercase();
+                if matches!(mode.as_str(), "auto" | "dark" | "light") {
+                    c.tray_icon_theme = mode;
+                }
+            }
             "key_focus_next" => {
                 if let Some(k) = key_to_vk(v) {
                     c.key_focus_next = k;
@@ -806,5 +822,17 @@ mod tests {
         assert_eq!(vk_to_key(0x31), "1");
         assert_eq!(vk_to_key(0x70), "F1");
         assert_eq!(vk_to_key(0x87), "F24");
+    }
+
+    #[test]
+    fn parse_into_tray_icon_theme() {
+        let mut c = Config::defaults();
+        assert_eq!(c.tray_icon_theme, "auto");
+        parse_into(&mut c, "tray_icon_theme = dark");
+        assert_eq!(c.tray_icon_theme, "dark");
+        parse_into(&mut c, "tray_icon = LIGHT");
+        assert_eq!(c.tray_icon_theme, "light");
+        parse_into(&mut c, "tray_icon_theme = invalid");
+        assert_eq!(c.tray_icon_theme, "light");
     }
 }
