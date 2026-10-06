@@ -19,6 +19,15 @@ keyboard-driven, i3-style window management on Windows 10 and 11.
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 [![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Astur/releases/latest)
 
+## contributors
+<table>
+  <tbody>
+    <tr>
+      <td align="center" valign="top" width="14.28%"><a href="https://github.com/azumafuji"><img src="https://avatars.githubusercontent.com/u/393782?v=4?s=100" width="100px;" alt="Dean Sellis"/><br /><sub><b>Dean Sellis</b></sub></a><br />
+    </tr>
+  </tbody>
+</table>
+
 > **Keywords:** tiling window manager Windows · komorebi
 > alternative · GlazeWM alternative · FancyZones alternative · i3 for Windows ·
 > Alt-drag windows · master-stack layout · Rust window manager
