@@ -53,7 +53,13 @@ pub struct Config {
     pub workspace_keys: Vec<u32>, // VK code per workspace; Alt+key switches, +Shift moves
     pub workspace_names: Vec<String>, // optional display names, in workspace order
     pub workspace_icons: Vec<String>, // optional short labels/icons, in workspace order
-    pub layout: String,           // dwindle | master | columns | grid | monocle
+    pub layout: String,           // default layout: one of LAYOUTS
+    pub monitor_layouts: Vec<String>, // per monitor (1st entry = monitor 1); "" = `layout`
+    pub scroll_default_width: f32, // scrolling: new column width, fraction of the view
+    pub scroll_width_presets: Vec<f32>, // scrolling: column widths Alt+R cycles
+    pub scroll_height_presets: Vec<f32>, // scrolling: tile heights Alt+Shift+R cycles
+    pub scroll_center: String,    // scrolling viewport: never | always | on-overflow
+    pub tab_bar_height: i32,      // tabbed-column tab bar, logical px
     pub terminal: String,         // command launched by Alt+Enter
     pub browser: String,          // Alt+Shift+Enter; empty = default browser
     pub unfocused_opacity: f32,   // 0.0-1.0 alpha for unfocused windows (1.0 = off)
@@ -198,6 +204,10 @@ pub struct Config {
     pub key_toggle_tiling: u32,  // Alt+<key> toggle tiling on/off (default T)
     pub key_toggle_float: u32,   // Alt+<key> toggle floating for focused window (default F)
     pub key_close_window: u32,   // Alt+<key> close the focused window (default W)
+    pub key_cycle_width: u32,    // Alt+<key> scrolling: cycle width, +Shift height (default R)
+    pub key_center_column: u32,  // Alt+<key> scrolling: centre focused column (default C)
+    pub key_consume_left: u32,   // Alt+<key> scrolling: consume/expel left (default [)
+    pub key_consume_right: u32,  // Alt+<key> scrolling: consume/expel right (default ])
     pub theme: String,           // popup palette: dark | light | auto (follows Windows)
     pub acrylic: bool,           // experimental acrylic blur behind the popups
     pub bar_floating: bool,      // detached rounded bar (margins from the screen edges)
@@ -231,6 +241,23 @@ pub const BAR_WIDGETS: &[&str] = &[
     "separator",
     "spacer",
 ];
+
+/// The one list of valid layout names. The parser, IPC, extra hotkeys and the
+/// WM's layout commands all check against it, so a new layout cannot be
+/// accepted in one place and rejected in another.
+pub const LAYOUTS: &[&str] = &[
+    "dwindle",
+    "master",
+    "columns",
+    "grid",
+    "monocle",
+    "scrolling",
+];
+
+/// Built-in scrolling preset cycles. Shared by `defaults()` and the parser,
+/// which falls back to them when a list has nothing valid in it.
+const SCROLL_WIDTHS: [f32; 4] = [0.333, 0.5, 0.667, 1.0];
+const SCROLL_HEIGHTS: [f32; 3] = [0.333, 0.5, 0.667];
 
 /// Built-in bar palettes that `auto` colours resolve to: [bg, fg, accent,
 /// inactive] as COLORREFs. Single source for the WM and the settings GUI.
@@ -266,6 +293,12 @@ impl Config {
             ],
             workspace_icons: Vec::new(),
             layout: "dwindle".to_string(),
+            monitor_layouts: Vec::new(),
+            scroll_default_width: 0.5,
+            scroll_width_presets: SCROLL_WIDTHS.to_vec(),
+            scroll_height_presets: SCROLL_HEIGHTS.to_vec(),
+            scroll_center: "never".to_string(),
+            tab_bar_height: 26,
             terminal: "wt.exe".to_string(),
             browser: String::new(),
             unfocused_opacity: 0.8,
@@ -408,6 +441,10 @@ impl Config {
             key_toggle_tiling: 0x54,  // T
             key_toggle_float: 0x46,   // F
             key_close_window: 0x57,   // W
+            key_cycle_width: 0x52,    // R
+            key_center_column: 0x43,  // C
+            key_consume_left: 0xDB,   // [ (VK_OEM_4)
+            key_consume_right: 0xDD,  // ] (VK_OEM_6)
             theme: "dark".to_string(),
             acrylic: false,
             bar_floating: false,
@@ -431,6 +468,15 @@ impl Config {
                 "date".into(),
                 "clock".into(),
             ],
+        }
+    }
+
+    /// The layout monitor `index` uses (0-based: monitor 1 is index 0): its
+    /// `monitor_layouts` entry when set, else the default `layout`.
+    pub fn layout_for_monitor(&self, index: usize) -> &str {
+        match self.monitor_layouts.get(index) {
+            Some(l) if !l.is_empty() => l,
+            _ => &self.layout,
         }
     }
 }
@@ -468,9 +514,10 @@ const DEFAULT_CONFIG: &str = "\
 #            counts as false)
 #   int    : whole number; clamped to the stated range
 #   float  : decimal; clamped to the stated range
+#   floats : space/comma list of decimals, each clamped; none valid = default
 #   colour : #RRGGBB hex (e.g. #66AAFF). Malformed values keep the default.
 #   text   : literal string (program name / command line)
-#   keys   : space/comma list of key names: 0-9, A-Z, F1-F24.
+#   keys   : space/comma list of key names: 0-9, A-Z, F1-F24, [ ].
 #
 # Every key below is shown set to its built-in DEFAULT.
 # ============================================================================
@@ -499,8 +546,9 @@ workspaces = 10
 
 # Keys (with LEFT ALT) that select workspaces 1, 2, 3, ... in order. Add Shift
 # to MOVE the focused window to that workspace instead. Avoid the fixed binds
-# (J K H L M T F W and arrows/Enter). Example for Alt+Q/W/E = ws 1/2/3:
-#   workspace_keys = Q W E R T Y
+# (J K H L M T F W R C [ ], arrows, Enter, Space, Home, End): a fixed bind wins
+# and that workspace gets no key. Example for Alt+Q/E/Y = ws 1/2/3:
+#   workspace_keys = Q E Y U I O
 # keys
 workspace_keys = 1 2 3 4 5 6 7 8 9 0
 # Optional display labels. Missing positions fall back to workspace number.
@@ -519,12 +567,36 @@ start_tiled = true
 #   columns = equal-width columns
 #   grid    = balanced rows and columns
 #   monocle = every tiled window fills work area; focused window sits on top
-# values: dwindle | master | columns | grid | monocle
+#   scrolling = Niri-style: windows sit in columns on an endless horizontal
+#             strip; columns past the screen edge are a scroll away.
+# values: dwindle | master | columns | grid | monocle | scrolling
 layout = dwindle
+
+# Per-monitor layout, by monitor number (1 = leftmost, as in window_rules).
+# Empty or 'default' = use layout above. Example: scrolling on monitor 1 and
+# master on monitor 3:  monitor_layouts = scrolling, , master
+monitor_layouts =
 
 # Fraction of the width given to the master window (master layout, and the
 # master split that Alt+H / Alt+L adjust).  float 0.10 - 0.90
 master_ratio = 0.55
+
+# Scrolling layout: width of a new column, as a fraction of the screen
+# (0.5 = two columns side by side).  float 0.10 - 1.00
+scroll_default_width = 0.5
+# Column widths Alt+R cycles through, smallest to largest.  floats 0.10 - 1.00
+scroll_width_presets = 0.333, 0.5, 0.667, 1.0
+# Window heights within a column Alt+Shift+R cycles through, smallest to
+# largest.  floats 0.10 - 0.90
+scroll_height_presets = 0.333, 0.5, 0.667
+# When focus moves to a column, the view:
+#   never       = scrolls only as far as needed to show it fully
+#   always      = keeps the focused column centred
+#   on-overflow = stays put if the column fits, otherwise centres it
+# values: never | always | on-overflow
+scroll_center = never
+# Height of the tab bar on a tabbed column (Alt+Shift+T).  int 16 - 64
+tab_bar_height = 26
 
 # ---------------------------------------------------------------------------
 # Gaps
@@ -554,7 +626,7 @@ focus_follows_mouse = false
 # Animations apply to the WORKSPACE SWITCH. The switch itself is always instant
 # and correct underneath; the animation is a cosmetic overlay composited on top,
 # so it is smooth even with heavy apps (the apps themselves aren't moved).
-# Window glide applies only to size-preserving moves; resized layouts land directly.
+# Window glide moves and resizes windows to their new slots (window_anim below).
 
 # Enable animations.  bool
 animations = true
@@ -576,8 +648,8 @@ workspace_anim = slide
 workspace_slide = true
 # Window move / open / close / re-tile animation:
 #   off   - instant placement
-#   glide - windows glide to equal-sized tile slots with pixels kept 1:1.
-#           Layouts that resize windows land directly, without stretched text.
+#   glide - windows glide to their new slots, moving and resizing together
+#           (the live window image is scaled in between, 1:1 at both ends).
 #           New layouts or keyboard/mouse input cancel obsolete glides.
 #           Composited on a brief overlay (real windows are placed instantly
 #           underneath). Drawn over a
@@ -783,9 +855,33 @@ extra_hotkeys = ALT+GRAVE|scratchpad|
 #   Alt+Tab              normal task switcher (still works)
 #   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by Astur)
 #
-# The letter keys above (J K H L M T F W) are rebindable. Each takes a single
-# key name (see the 'keys' type at the top of this file). Arrows and Enter
-# are fixed.  key
+# Scrolling layout only (elsewhere these do nothing or keep the meaning above):
+#   Alt+Left / Right     focus column left / right (scrolls the view; at the
+#                        strip end: next monitor)
+#   Alt+Up / Down        focus window up / down in the column (tabbed: tab)
+#   Alt+Shift+arrows     move column left / right (at the strip end: the window
+#                        to the next monitor); window up / down in column
+#   Alt+Shift+J / K      move column right / left
+#   Alt+H / Alt+L        column width - / + 0.1
+#   Alt+Shift+H / L      window height - / + 0.1 within its column
+#   Alt+R / Alt+Shift+R  cycle column width / window height (presets above)
+#   Alt+M                toggle full-width column
+#   Alt+C                centre the focused column
+#   Alt+[ / Alt+]        pull the window into the column left / right; if it
+#                        shares a column, push it out into its own on that side
+#   Alt+Shift+T          toggle the column between stacked and tabbed
+#   Alt+Home / End       focus first / last column (+Shift: move column there)
+#   Alt+wheel            focus column, wheel down = right (+Shift: move column);
+#                        acts on the monitor under the cursor
+#   Alt+touchpad swipe   focus column left / right, one per swipe (also
+#                        horizontal wheel)
+#   Alt + left-drag      drop on a window's left / right quarter = new column
+#                        beside it, middle = stack into its column
+#   Alt + right-drag     side edge = column width, top/bottom = window height
+#
+# The letter keys above (J K H L M T F W, and R C [ ] for scrolling) are
+# rebindable. Each takes a single key name (see the 'keys' type at the top of
+# this file). Arrows and Enter are fixed.  key
 key_focus_next = J
 key_focus_prev = K
 key_shrink_master = H
@@ -794,6 +890,10 @@ key_promote_master = M
 key_toggle_tiling = T
 key_toggle_float = F
 key_close_window = W
+key_cycle_width = R
+key_center_column = C
+key_consume_left = [
+key_consume_right = ]
 # ============================================================================
 ";
 
@@ -1179,7 +1279,13 @@ pub fn key_to_vk(name: &str) -> Option<u32> {
             }
         }
     }
-    None
+    // VK_OEM_4/6 name the physical key that is '[' / ']' on a US layout; other
+    // layouts print other glyphs on it, hence the layout-neutral aliases.
+    match n.as_str() {
+        "[" | "LBRACKET" | "OEM_4" => Some(0xDB),
+        "]" | "RBRACKET" | "OEM_6" => Some(0xDD),
+        _ => None,
+    }
 }
 
 /// Parse a space/comma-separated navbar zone list, keeping only known widget
@@ -1189,6 +1295,23 @@ fn parse_widgets(v: &str) -> Vec<String> {
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| BAR_WIDGETS.contains(&s.as_str()))
         .collect()
+}
+
+/// Parse a space/comma-separated list of fractions, each clamped to `lo..=hi`.
+/// Invalid tokens are dropped, and a list with nothing valid gives `default`:
+/// an empty preset cycle would leave the cycle keys with nothing to step to.
+fn parse_fractions(v: &str, lo: f32, hi: f32, default: &[f32]) -> Vec<f32> {
+    let l: Vec<f32> = v
+        .split([',', ' ', '\t'])
+        .filter_map(|s| s.trim().parse::<f32>().ok())
+        .filter(|n| !n.is_nan())
+        .map(|n| n.clamp(lo, hi))
+        .collect();
+    if l.is_empty() {
+        default.to_vec()
+    } else {
+        l
+    }
 }
 
 /// Parse a space/comma-separated list of key names into VK codes.
@@ -1371,11 +1494,55 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "workspace_wallpapers" => c.workspace_wallpapers = parse_slots(v),
             "layout" => {
                 let m = v.trim().to_ascii_lowercase();
-                if matches!(
-                    m.as_str(),
-                    "dwindle" | "master" | "columns" | "grid" | "monocle"
-                ) {
+                if LAYOUTS.contains(&m.as_str()) {
                     c.layout = m;
+                }
+            }
+            "monitor_layouts" => {
+                // Positional: blanks must survive so "scrolling, , master"
+                // still means monitor 3. `default` and typos read as blank
+                // (inherit `layout`) rather than shifting later entries.
+                let l: Vec<String> = v
+                    .split(',')
+                    .map(|s| {
+                        let s = s.trim().to_ascii_lowercase();
+                        if LAYOUTS.contains(&s.as_str()) {
+                            s
+                        } else {
+                            String::new()
+                        }
+                    })
+                    .collect();
+                c.monitor_layouts = if l.iter().all(String::is_empty) {
+                    Vec::new()
+                } else {
+                    l
+                };
+            }
+            "scroll_default_width" => {
+                if let Ok(n) = v.parse::<f32>() {
+                    if !n.is_nan() {
+                        c.scroll_default_width = n.clamp(0.1, 1.0);
+                    }
+                }
+            }
+            "scroll_width_presets" => {
+                c.scroll_width_presets = parse_fractions(v, 0.1, 1.0, &SCROLL_WIDTHS)
+            }
+            "scroll_height_presets" => {
+                c.scroll_height_presets = parse_fractions(v, 0.1, 0.9, &SCROLL_HEIGHTS)
+            }
+            "scroll_center" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "never" | "always" | "on-overflow") {
+                    c.scroll_center = m;
+                } else if m == "on_overflow" {
+                    c.scroll_center = "on-overflow".to_string(); // underscore spelling
+                }
+            }
+            "tab_bar_height" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.tab_bar_height = n.clamp(16, 64);
                 }
             }
             "terminal" => c.terminal = v.to_string(),
@@ -1614,6 +1781,26 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "key_close_window" => {
                 if let Some(k) = key_to_vk(v) {
                     c.key_close_window = k;
+                }
+            }
+            "key_cycle_width" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_cycle_width = k;
+                }
+            }
+            "key_center_column" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_center_column = k;
+                }
+            }
+            "key_consume_left" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_consume_left = k;
+                }
+            }
+            "key_consume_right" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_consume_right = k;
                 }
             }
             // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
@@ -1871,6 +2058,12 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         workspace_names,
         workspace_icons,
         layout,
+        monitor_layouts,
+        scroll_default_width,
+        scroll_width_presets,
+        scroll_height_presets,
+        scroll_center,
+        tab_bar_height,
         terminal,
         browser,
         unfocused_opacity,
@@ -1995,6 +2188,10 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         key_toggle_tiling,
         key_toggle_float,
         key_close_window,
+        key_cycle_width,
+        key_center_column,
+        key_consume_left,
+        key_consume_right,
         theme,
         acrylic,
         bar_floating,
@@ -2021,6 +2218,8 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     // Workspace model and tile geometry. The bar keys here feed reserve_bar
     // (the work area the tiles fill), so they re-tile as well as rebuild.
     diff!(wm: per_monitor, workspaces, outer_gap, inner_gap, master_ratio, layout);
+    diff!(wm: monitor_layouts, scroll_default_width, scroll_width_presets);
+    diff!(wm: scroll_height_presets, scroll_center, tab_bar_height);
     diff!(wm: bar_enabled, bar_height, bar_bottom, bar_floating, bar_margin, bar_autohide);
     diff!(style: unfocused_opacity, border_enabled, focused_border, unfocused_border);
     // wp_publish: whether any animation reads the wallpaper cache.
@@ -2065,6 +2264,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(live: ignore_classes, float_classes, key_focus_next, key_focus_prev);
     diff!(live: key_shrink_master, key_grow_master, key_promote_master);
     diff!(live: key_toggle_tiling, key_toggle_float, key_close_window);
+    diff!(live: key_cycle_width, key_center_column, key_consume_left, key_consume_right);
     // Fail-safe: a difference none of the above caught (a field compared in
     // the wrong place, a PartialEq quirk) must still apply, so do it all.
     if g.is_empty() && old != new {
@@ -2081,11 +2281,15 @@ pub fn color_to_hex(c: u32) -> String {
     format!("#{r:02X}{g:02X}{b:02X}")
 }
 
-/// Map a VK code back to its config key name ("A".."Z", "0".."9", "F1".."F24").
+/// Map a VK code back to its config key name ("A".."Z", "0".."9", "F1".."F24",
+/// "[", "]"). The inverse of `key_to_vk`, so the settings GUI can save any key
+/// the parser accepts as a `key_*` default.
 pub fn vk_to_key(vk: u32) -> String {
     match vk {
         0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk).unwrap_or('?').to_string(),
         0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
+        0xDB => "[".to_string(),
+        0xDD => "]".to_string(),
         _ => String::new(),
     }
 }
@@ -2182,6 +2386,18 @@ outer_gap = 4
     }
 
     #[test]
+    fn key_to_vk_brackets_and_aliases() {
+        for name in ["[", " lbracket ", "LBRACKET", "oem_4", "OEM_4"] {
+            assert_eq!(key_to_vk(name), Some(0xDB), "{name}");
+        }
+        for name in ["]", "rbracket", "RBRACKET", "oem_6", "OEM_6"] {
+            assert_eq!(key_to_vk(name), Some(0xDD), "{name}");
+        }
+        assert_eq!(key_to_vk("OEM_5"), None);
+        assert_eq!(parse_keys("[ , ]"), vec![0xDB, 0xDD]);
+    }
+
+    #[test]
     fn parse_keys_splits_and_skips_invalid() {
         assert_eq!(parse_keys("1 2 3"), vec![0x31, 0x32, 0x33]);
         assert_eq!(parse_keys("Q, W,  E"), vec![0x51, 0x57, 0x45]);
@@ -2260,6 +2476,140 @@ outer_gap = 4
         parse_into(&mut c, "workspace_mode = per_monitor\nlayout = MASTER");
         assert!(c.per_monitor);
         assert_eq!(c.layout, "master"); // lowercased
+        parse_into(&mut c, "layout = Scrolling");
+        assert_eq!(c.layout, "scrolling");
+        parse_into(&mut c, "layout = spiral"); // invalid -> keeps previous
+        assert_eq!(c.layout, "scrolling");
+    }
+
+    #[test]
+    fn layouts_lists_all_six() {
+        for name in [
+            "dwindle",
+            "master",
+            "columns",
+            "grid",
+            "monocle",
+            "scrolling",
+        ] {
+            assert!(LAYOUTS.contains(&name), "{name}");
+        }
+        assert_eq!(LAYOUTS.len(), 6);
+    }
+
+    #[test]
+    fn monitor_layouts_are_positional() {
+        let c = parse_text("monitor_layouts = scrolling, , master");
+        assert_eq!(c.monitor_layouts, vec!["scrolling", "", "master"]);
+        // default and typos inherit without shifting later monitors.
+        let c = parse_text("monitor_layouts = Default, spiral, GRID");
+        assert_eq!(c.monitor_layouts, vec!["", "", "grid"]);
+        // Trailing blanks are kept as written.
+        let c = parse_text("monitor_layouts = scrolling, ");
+        assert_eq!(c.monitor_layouts, vec!["scrolling", ""]);
+        // Nothing set anywhere is the same as the key being absent.
+        for v in ["", "default", " , , ", "bogus"] {
+            let c = parse_text(&format!("monitor_layouts = {v}"));
+            assert!(c.monitor_layouts.is_empty(), "{v:?}");
+        }
+    }
+
+    #[test]
+    fn layout_for_monitor_falls_back_to_layout() {
+        let mut c = parse_text("layout = columns\nmonitor_layouts = scrolling, , master");
+        assert_eq!(c.layout_for_monitor(0), "scrolling");
+        assert_eq!(c.layout_for_monitor(1), "columns"); // blank entry
+        assert_eq!(c.layout_for_monitor(2), "master");
+        assert_eq!(c.layout_for_monitor(3), "columns"); // past the list
+        assert_eq!(c.layout_for_monitor(usize::MAX), "columns");
+        c.monitor_layouts.clear();
+        assert_eq!(c.layout_for_monitor(0), "columns");
+    }
+
+    #[test]
+    fn scrolling_keys_parse_clamp_and_fall_back() {
+        let d = Config::defaults();
+        assert_eq!(d.scroll_default_width, 0.5);
+        assert_eq!(d.scroll_width_presets, vec![0.333, 0.5, 0.667, 1.0]);
+        assert_eq!(d.scroll_height_presets, vec![0.333, 0.5, 0.667]);
+        assert_eq!(d.scroll_center, "never");
+        assert_eq!(d.tab_bar_height, 26);
+
+        let mut c = Config::defaults();
+        parse_into(&mut c, "scroll_default_width = 0.75");
+        assert_eq!(c.scroll_default_width, 0.75);
+        parse_into(&mut c, "scroll_default_width = 2");
+        assert_eq!(c.scroll_default_width, 1.0);
+        parse_into(&mut c, "scroll_default_width = 0");
+        assert_eq!(c.scroll_default_width, 0.1);
+        for bad in ["wide", "NaN", ""] {
+            parse_into(&mut c, &format!("scroll_default_width = {bad}"));
+            assert_eq!(
+                c.scroll_default_width, 0.1,
+                "{bad:?} keeps the previous value"
+            );
+        }
+
+        parse_into(&mut c, "scroll_width_presets = 0.25 0.5, 2,x");
+        assert_eq!(c.scroll_width_presets, vec![0.25, 0.5, 1.0]);
+        for bad in ["", "x y", "NaN, -"] {
+            parse_into(&mut c, &format!("scroll_width_presets = {bad}"));
+            assert_eq!(c.scroll_width_presets, d.scroll_width_presets, "{bad:?}");
+        }
+        parse_into(&mut c, "scroll_height_presets = 0.05, 0.95");
+        assert_eq!(c.scroll_height_presets, vec![0.1, 0.9]);
+        parse_into(&mut c, "scroll_height_presets =");
+        assert_eq!(c.scroll_height_presets, d.scroll_height_presets);
+
+        parse_into(&mut c, "scroll_center = ALWAYS");
+        assert_eq!(c.scroll_center, "always");
+        parse_into(&mut c, "scroll_center = on_overflow");
+        assert_eq!(c.scroll_center, "on-overflow");
+        parse_into(&mut c, "scroll_center = sometimes"); // invalid -> keeps previous
+        assert_eq!(c.scroll_center, "on-overflow");
+        parse_into(&mut c, "scroll_center = never");
+        assert_eq!(c.scroll_center, "never");
+
+        parse_into(&mut c, "tab_bar_height = 5");
+        assert_eq!(c.tab_bar_height, 16);
+        parse_into(&mut c, "tab_bar_height = 100");
+        assert_eq!(c.tab_bar_height, 64);
+        parse_into(&mut c, "tab_bar_height = tall");
+        assert_eq!(c.tab_bar_height, 64);
+    }
+
+    #[test]
+    fn scrolling_key_bindings_parse() {
+        let d = Config::defaults();
+        assert_eq!(
+            (d.key_cycle_width, d.key_center_column),
+            (0x52, 0x43) // R, C
+        );
+        assert_eq!((d.key_consume_left, d.key_consume_right), (0xDB, 0xDD));
+        let c = parse_text(
+            "key_cycle_width = q\nkey_center_column = F2\nkey_consume_left = OEM_6\nkey_consume_right = ??",
+        );
+        assert_eq!(c.key_cycle_width, 0x51);
+        assert_eq!(c.key_center_column, 0x71);
+        assert_eq!(c.key_consume_left, 0xDD);
+        assert_eq!(c.key_consume_right, 0xDD, "invalid name keeps the default");
+    }
+
+    #[test]
+    fn template_states_the_scrolling_defaults() {
+        let t = parse_pair(default_config_text(), "");
+        let d = Config::defaults();
+        assert_eq!(t.layout, d.layout);
+        assert_eq!(t.monitor_layouts, d.monitor_layouts);
+        assert_eq!(t.scroll_default_width, d.scroll_default_width);
+        assert_eq!(t.scroll_width_presets, d.scroll_width_presets);
+        assert_eq!(t.scroll_height_presets, d.scroll_height_presets);
+        assert_eq!(t.scroll_center, d.scroll_center);
+        assert_eq!(t.tab_bar_height, d.tab_bar_height);
+        assert_eq!(t.key_cycle_width, d.key_cycle_width);
+        assert_eq!(t.key_center_column, d.key_center_column);
+        assert_eq!(t.key_consume_left, d.key_consume_left);
+        assert_eq!(t.key_consume_right, d.key_consume_right);
     }
 
     #[test]
@@ -2348,7 +2698,7 @@ outer_gap = 4
 
     #[test]
     fn vk_roundtrip() {
-        for name in ["A", "Z", "0", "9", "F1", "F24"] {
+        for name in ["A", "Z", "0", "9", "F1", "F24", "[", "]"] {
             let vk = key_to_vk(name).unwrap();
             assert_eq!(vk_to_key(vk), name);
         }
@@ -2390,6 +2740,7 @@ outer_gap = 4
             "float|x.exe||||",
             "ALT+Q|launch|x",
             "https://x/?q={query}",
+            "always",
         ];
         let base = parse_pair(DEFAULT_CONFIG, DEFAULT_NAVBAR);
         assert!(reload_groups(&base, &base).is_empty());
@@ -2454,6 +2805,43 @@ outer_gap = 4
             icon: String::new(),
         });
         assert!(reload_groups(&base, &c).launcher);
+    }
+
+    #[test]
+    fn scrolling_fields_re_tile_and_keys_are_live() {
+        let base = Config::defaults();
+        let wm_only = ReloadGroups {
+            wm: true,
+            ..ReloadGroups::default()
+        };
+        let edits: [fn(&mut Config); 6] = [
+            |c| c.monitor_layouts = vec!["scrolling".into()],
+            |c| c.scroll_default_width = 0.3,
+            |c| c.scroll_width_presets = vec![0.5],
+            |c| c.scroll_height_presets = vec![0.5],
+            |c| c.scroll_center = "always".into(),
+            |c| c.tab_bar_height = 30,
+        ];
+        for edit in edits {
+            let mut c = base.clone();
+            edit(&mut c);
+            assert_eq!(reload_groups(&base, &c), wm_only);
+        }
+        let live_only = ReloadGroups {
+            live: true,
+            ..ReloadGroups::default()
+        };
+        let keys: [fn(&mut Config); 4] = [
+            |c| c.key_cycle_width = 0x51,
+            |c| c.key_center_column = 0x51,
+            |c| c.key_consume_left = 0x51,
+            |c| c.key_consume_right = 0x51,
+        ];
+        for edit in keys {
+            let mut c = base.clone();
+            edit(&mut c);
+            assert_eq!(reload_groups(&base, &c), live_only);
+        }
     }
 
     /// A fresh directory under the system temp dir, unique per test and run.
