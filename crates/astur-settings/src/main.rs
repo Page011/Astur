@@ -13,8 +13,8 @@
 use astur_config::{
     apply_updates, color_to_hex, config_path, default_config_text, default_navbar_text,
     format_hotkeys, format_launcher_entries, format_system_actions, format_window_rules, key_to_vk,
-    parse_hotkeys, parse_launcher_entries, parse_pair, parse_system_actions, parse_window_rules,
-    vk_to_key, Config, BAR_DARK, BAR_WIDGETS,
+    parse_hotkeys, parse_launcher_entries, parse_pair, parse_system_actions, parse_text,
+    parse_window_rules, vk_to_key, Config, BAR_DARK, BAR_WIDGETS, LAYOUTS,
 };
 use eframe::egui;
 
@@ -78,7 +78,11 @@ const SECTIONS: &[(Section, &str)] = &[
 #[derive(Clone, PartialEq)]
 struct Mirrors {
     ws_keys: String,
-    keys: [String; 8], // focus_next, focus_prev, shrink, grow, promote, tiling, float, close
+    // focus_next, focus_prev, shrink, grow, promote, tiling, float, close,
+    // cycle_width, center_column, consume_left, consume_right
+    keys: [String; 12],
+    scroll_widths: String,
+    scroll_heights: String,
     workspace_names: String,
     workspace_icons: String,
     workspace_wallpapers: String,
@@ -114,7 +118,13 @@ impl Mirrors {
                 vk_to_key(cfg.key_toggle_tiling),
                 vk_to_key(cfg.key_toggle_float),
                 vk_to_key(cfg.key_close_window),
+                vk_to_key(cfg.key_cycle_width),
+                vk_to_key(cfg.key_center_column),
+                vk_to_key(cfg.key_consume_left),
+                vk_to_key(cfg.key_consume_right),
             ],
+            scroll_widths: fractions(&cfg.scroll_width_presets),
+            scroll_heights: fractions(&cfg.scroll_height_presets),
             workspace_names: cfg.workspace_names.join(", "),
             workspace_icons: cfg.workspace_icons.join(", "),
             workspace_wallpapers: cfg.workspace_wallpapers.join("\n"),
@@ -185,6 +195,10 @@ impl App {
             &mut self.cfg.key_toggle_tiling,
             &mut self.cfg.key_toggle_float,
             &mut self.cfg.key_close_window,
+            &mut self.cfg.key_cycle_width,
+            &mut self.cfg.key_center_column,
+            &mut self.cfg.key_consume_left,
+            &mut self.cfg.key_consume_right,
         ];
         for (slot, text) in binds.into_iter().zip(&self.mir.keys) {
             if let Some(vk) = key_to_vk(text.trim()) {
@@ -215,6 +229,19 @@ impl App {
         self.cfg.system_setup_items = list(&self.mir.system_setup);
         self.cfg.system_actions = parse_system_actions(&self.mir.system_actions);
         self.cfg.extra_hotkeys = parse_hotkeys(&self.mir.extra_hotkeys);
+        // The preset parser (clamps, empty -> built-in cycle) is private to the
+        // config crate; running the one line through it keeps the rules single.
+        self.cfg.scroll_width_presets = parse_text(&format!(
+            "scroll_width_presets = {}",
+            self.mir.scroll_widths
+        ))
+        .scroll_width_presets;
+        self.cfg.scroll_height_presets = parse_text(&format!(
+            "scroll_height_presets = {}",
+            self.mir.scroll_heights
+        ))
+        .scroll_height_presets;
+        trim_defaults(&mut self.cfg.monitor_layouts);
         let zone = |s: &str| -> Vec<String> {
             s.split([' ', ','])
                 .map(|t| t.trim().to_ascii_lowercase())
@@ -249,7 +276,16 @@ impl App {
             ("workspace_wallpapers", c.workspace_wallpapers.join(" ;; ")),
             ("start_tiled", b(c.start_tiled)),
             ("layout", c.layout.clone()),
+            ("monitor_layouts", c.monitor_layouts.join(", ")),
             ("master_ratio", format!("{:.2}", c.master_ratio)),
+            (
+                "scroll_default_width",
+                format!("{:.2}", c.scroll_default_width),
+            ),
+            ("scroll_width_presets", self.mir.scroll_widths.clone()),
+            ("scroll_height_presets", self.mir.scroll_heights.clone()),
+            ("scroll_center", c.scroll_center.clone()),
+            ("tab_bar_height", c.tab_bar_height.to_string()),
             ("outer_gap", c.outer_gap.to_string()),
             ("inner_gap", c.inner_gap.to_string()),
             ("cursor_follows_focus", b(c.cursor_follows_focus)),
@@ -341,6 +377,10 @@ impl App {
             ("key_toggle_tiling", vk_to_key(c.key_toggle_tiling)),
             ("key_toggle_float", vk_to_key(c.key_toggle_float)),
             ("key_close_window", vk_to_key(c.key_close_window)),
+            ("key_cycle_width", vk_to_key(c.key_cycle_width)),
+            ("key_center_column", vk_to_key(c.key_center_column)),
+            ("key_consume_left", vk_to_key(c.key_consume_left)),
+            ("key_consume_right", vk_to_key(c.key_consume_right)),
         ];
         let nav_updates: Vec<(&str, String)> = vec![
             ("enabled", b(c.bar_enabled)),
@@ -412,6 +452,31 @@ impl App {
             self.saved_mir = self.mir.clone();
             self.saved_at = Some(std::time::Instant::now());
         }
+    }
+}
+
+/// Scrolling preset list to conf text, in the template's `0.5, 1` style.
+fn fractions(v: &[f32]) -> String {
+    v.iter().map(f32::to_string).collect::<Vec<_>>().join(", ")
+}
+
+/// Drop trailing "(default)" monitor entries: `scrolling, ,` means the same as
+/// `scrolling`, and keeping the canonical form stops a no-op edit reading dirty.
+fn trim_defaults(v: &mut Vec<String>) {
+    while v.last().is_some_and(String::is_empty) {
+        v.pop();
+    }
+}
+
+/// Combo label for a layout name from `LAYOUTS`.
+fn layout_label(name: &str) -> &str {
+    match name {
+        "dwindle" => "dwindle (spiral)",
+        "master" => "master (column + stack)",
+        "columns" => "equal columns",
+        "grid" => "balanced grid",
+        "scrolling" => "scrolling (Niri-style strip)",
+        _ => name,
     }
 }
 
@@ -658,24 +723,81 @@ impl App {
         egui::ComboBox::from_label("Layout")
             .selected_text(&self.cfg.layout)
             .show_ui(ui, |ui| {
-                ui.selectable_value(
-                    &mut self.cfg.layout,
-                    "dwindle".to_string(),
-                    "dwindle (spiral)",
-                );
-                ui.selectable_value(
-                    &mut self.cfg.layout,
-                    "master".to_string(),
-                    "master (column + stack)",
-                );
-                ui.selectable_value(&mut self.cfg.layout, "columns".to_string(), "equal columns");
-                ui.selectable_value(&mut self.cfg.layout, "grid".to_string(), "balanced grid");
-                ui.selectable_value(&mut self.cfg.layout, "monocle".to_string(), "monocle");
+                for &l in LAYOUTS {
+                    ui.selectable_value(&mut self.cfg.layout, l.to_string(), layout_label(l));
+                }
             });
         ui.add(
             egui::Slider::new(&mut self.cfg.master_ratio, 0.10..=0.90)
                 .text("Master ratio")
                 .fixed_decimals(2),
+        );
+
+        heading(ui, "Per-monitor layouts");
+        ui.label(
+            egui::RichText::new(
+                "Monitor 1 is the leftmost (same numbering as window rules). (default) uses the layout above. Layout hotkeys change only the focused monitor.",
+            )
+            .weak(),
+        );
+        // Always offer three rows so a second or third monitor can be set up
+        // before it is plugged in; more appear once the config names them.
+        for i in 0..self.cfg.monitor_layouts.len().max(3) {
+            let before = self.cfg.monitor_layouts.get(i).cloned().unwrap_or_default();
+            let mut cur = before.clone();
+            egui::ComboBox::from_label(format!("Monitor {}", i + 1))
+                .selected_text(if cur.is_empty() {
+                    "(default)"
+                } else {
+                    cur.as_str()
+                })
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut cur, String::new(), "(default)");
+                    for &l in LAYOUTS {
+                        ui.selectable_value(&mut cur, l.to_string(), layout_label(l));
+                    }
+                });
+            if cur != before {
+                // Positional list: pad with defaults so the entry lands on
+                // monitor i + 1, not the next free slot.
+                let ml = &mut self.cfg.monitor_layouts;
+                if ml.len() <= i {
+                    ml.resize(i + 1, String::new());
+                }
+                ml[i] = cur;
+                trim_defaults(ml);
+            }
+        }
+
+        heading(ui, "Scrolling layout");
+        ui.add(
+            egui::Slider::new(&mut self.cfg.scroll_default_width, 0.10..=1.00)
+                .text("New column width (fraction of screen)")
+                .fixed_decimals(2),
+        );
+        ui.horizontal(|ui| {
+            ui.label("Width presets (Alt+R)");
+            ui.text_edit_singleline(&mut self.mir.scroll_widths)
+                .on_hover_text("Comma-separated fractions 0.10 - 1.00, cycled smallest to largest");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Height presets (Alt+Shift+R)");
+            ui.text_edit_singleline(&mut self.mir.scroll_heights)
+                .on_hover_text("Comma-separated fractions 0.10 - 0.90, cycled smallest to largest");
+        });
+        egui::ComboBox::from_label("Centre focused column")
+            .selected_text(&self.cfg.scroll_center)
+            .show_ui(ui, |ui| {
+                for (m, label) in [
+                    ("never", "never (scroll only as far as needed)"),
+                    ("always", "always"),
+                    ("on-overflow", "on-overflow (only if it does not fit)"),
+                ] {
+                    ui.selectable_value(&mut self.cfg.scroll_center, m.to_string(), label);
+                }
+            });
+        ui.add(
+            egui::Slider::new(&mut self.cfg.tab_bar_height, 16..=64).text("Tab bar height (px)"),
         );
 
         heading(ui, "Gaps");
@@ -1191,7 +1313,7 @@ impl App {
         heading(ui, "Rebindable keys (with Left Alt)");
         ui.label(
             egui::RichText::new(
-                "Single key name each: 0-9, A-Z or F1-F24. Arrows, Enter, Space and Tab are fixed.",
+                "Single key name each: 0-9, A-Z, F1-F24, [ or ]. Arrows, Enter, Space and Tab are fixed.",
             )
             .weak(),
         );
@@ -1205,6 +1327,10 @@ impl App {
             "Toggle tiling",
             "Toggle float",
             "Close window",
+            "Scrolling: cycle column width (+Shift: height)",
+            "Scrolling: centre column",
+            "Scrolling: consume/expel left",
+            "Scrolling: consume/expel right",
         ];
         for (label, key) in labels.iter().zip(self.mir.keys.iter_mut()) {
             ui.horizontal(|ui| {
@@ -1219,7 +1345,7 @@ impl App {
         heading(ui, "Extra hotkeys");
         ui.label(
             egui::RichText::new(
-                "Records: ALT+SHIFT+Q|action|argument ;; ... Actions include launch, layout, switch_workspace, move_to_workspace, scratchpad, launcher, system_menu, reload. Escape separators with a leading backslash.",
+                "Records: ALT+SHIFT+Q|action|argument ;; ... Actions include launch, layout (focused monitor), switch_workspace, move_to_workspace, scratchpad, launcher, system_menu, reload. Scrolling layout: focus_column_left/right, move_column_left/right, cycle_width, cycle_height, center_column, consume_left/right, toggle_tabbed, maximize_column, first_column, last_column. Escape separators with a leading backslash.",
             )
             .weak(),
         );

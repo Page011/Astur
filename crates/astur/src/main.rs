@@ -31,8 +31,9 @@ mod yasb;
 use astur_config as config;
 use config::{config_path, load_config, Config, HotkeyDef, WindowRule};
 use layout::{
-    columns_layout, dwindle_layout, grid_layout, master_stack, monocle_layout, resize_dwindle,
-    split_ratio,
+    clamp_offset, classify, col_width, columns_layout, dwindle_layout, grid_layout, master_stack,
+    monocle_layout, next_preset, park_spot, resize_dwindle, scroll_to_show, split_ratio,
+    strip_layout, strip_spans, Center, StripCol, StripOut, Vis,
 };
 
 use windows::core::{w, PCWSTR};
@@ -43,16 +44,17 @@ use windows::Win32::Foundation::{
 };
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CombineRgn, CreateBitmap, CreateCompatibleBitmap,
-    CreateCompatibleDC, CreateFontW, CreatePen, CreateRectRgn, CreateRoundRectRgn,
-    CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint, EnumDisplayMonitors,
-    ExtCreatePen, FillRect, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject, InvalidateRect,
-    LineTo, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, MoveToEx, PolyBezier, ReleaseDC,
-    RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, UpdateWindow, BLENDFUNCTION,
-    BS_SOLID, CAPTUREBLT, CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET,
-    DEFAULT_GUI_FONT, DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX,
-    DT_RIGHT, DT_SINGLELINE, DT_VCENTER, HDC, HGDIOBJ, HMONITOR, LOGBRUSH, MONITORINFO,
-    MONITOR_DEFAULTTONEAREST, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT, PS_GEOMETRIC, PS_SOLID,
-    RGN_OR, SRCCOPY, TRANSPARENT,
+    CreateCompatibleDC, CreateDIBSection, CreateFontW, CreatePen, CreateRectRgn,
+    CreateRoundRectRgn, CreateSolidBrush, DeleteDC, DeleteObject, DrawTextW, Ellipse, EndPaint,
+    EnumDisplayMonitors, ExtCreatePen, FillRect, GdiFlush, GetDC, GetMonitorInfoW, GetStockObject,
+    InvalidateRect, LineTo, MonitorFromPoint, MonitorFromRect, MonitorFromWindow, MoveToEx,
+    PolyBezier, ReleaseDC, RoundRect, SelectObject, SetBkMode, SetTextColor, SetWindowRgn,
+    UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, BS_SOLID, CAPTUREBLT,
+    CLEARTYPE_QUALITY, CLIP_DEFAULT_PRECIS, DEFAULT_CHARSET, DEFAULT_GUI_FONT, DIB_RGB_COLORS,
+    DRAW_TEXT_FORMAT, DT_CALCRECT, DT_CENTER, DT_END_ELLIPSIS, DT_NOPREFIX, DT_RIGHT,
+    DT_SINGLELINE, DT_VCENTER, HBITMAP, HDC, HGDIOBJ, HMONITOR, LOGBRUSH, MONITORINFO,
+    MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTONULL, NULL_BRUSH, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+    PS_GEOMETRIC, PS_SOLID, RGN_OR, SRCCOPY, TRANSPARENT,
 };
 use windows::Win32::Media::Audio::{
     eConsole, eRender, Endpoints::IAudioEndpointVolume, IMMDeviceEnumerator, MMDeviceEnumerator,
@@ -132,9 +134,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
     SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
     SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN,
-    WM_SYSKEYUP, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_EX_TRANSPARENT, WS_POPUP,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
+    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WNDCLASSW, WS_EX_LAYERED,
+    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -142,8 +144,10 @@ use core::ffi::c_void;
 use std::collections::{HashMap, VecDeque};
 use windows::core::s;
 use windows::Win32::Graphics::Dwm::{
-    DwmFlush, DwmGetWindowAttribute, DwmSetWindowAttribute, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
+    DwmFlush, DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute,
+    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
     DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
+    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
@@ -163,22 +167,22 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ChangeWindowMessageFilterEx, EnumWindows, FindWindowExW, FindWindowW,
-    GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics, GetWindow,
-    GetWindowLongPtrW, GetWindowLongW, GetWindowPlacement, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsHungAppWindow, IsIconic, IsWindow, IsWindowVisible, KillTimer,
-    MessageBoxW, PeekMessageW, PostMessageW, RegisterWindowMessageW, SendMessageTimeoutW,
-    SetForegroundWindow, SetTimer, SetWindowLongPtrW, SetWindowLongW, SetWindowPlacement,
-    SystemParametersInfoW, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE,
-    EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
-    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
-    GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, GW_OWNER, MB_ICONERROR, MB_OK, MSGFLT_ALLOW,
-    OBJID_CURSOR, PM_REMOVE, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN,
-    SPIF_SENDCHANGE, SPIF_UPDATEINIFILE, SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA,
-    SPI_SETDESKWALLPAPER, SPI_SETFOREGROUNDLOCKTIMEOUT, SPI_SETWORKAREA, SW_SHOW, SW_SHOWNORMAL,
+    GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
+    GetTopWindow, GetWindow, GetWindowLongPtrW, GetWindowLongW, GetWindowPlacement,
+    GetWindowTextLengthW, GetWindowTextW, GetWindowThreadProcessId, IsHungAppWindow, IsIconic,
+    IsWindow, IsWindowVisible, KillTimer, MessageBoxW, PeekMessageW, PostMessageW,
+    RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
+    SetWindowLongW, SetWindowPlacement, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
+    EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW,
+    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
+    EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
+    GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, HWND_TOP, MB_ICONERROR, MB_OK, MSGFLT_ALLOW, OBJID_CURSOR,
+    PM_REMOVE, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE,
+    SPIF_UPDATEINIFILE, SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA, SPI_SETDESKWALLPAPER,
+    SPI_SETFOREGROUNDLOCKTIMEOUT, SPI_SETWORKAREA, SW_SHOW, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_QUERYENDSESSION, WM_SETTINGCHANGE, WM_TIMER,
-    WM_USER, WS_CHILD,
+    WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_SETTINGCHANGE, WM_TIMER, WM_USER, WS_CHILD,
 };
 
 // =========================================================================
@@ -488,8 +492,9 @@ fn counters_line() -> String {
     // anywhere (BAR-10), so it is shown next to the queue it gates.
     let _ = write!(
         s,
-        "swp={} gdi={gdi} cmdq={} bar_refresh_queued={} focus_refused={} focus_missed={} winevent_failed={:#x} {}",
+        "swp={} swp_skipped={} gdi={gdi} cmdq={} bar_refresh_queued={} focus_refused={} focus_missed={} winevent_failed={:#x} {}",
         SWP_CALLS.load(Ordering::Relaxed),
+        SWP_SKIPPED.load(Ordering::Relaxed),
         CMDQ.lock().unwrap().len(),
         BAR_REFRESH_QUEUED.load(Ordering::Relaxed),
         FOCUS_REFUSED.load(Ordering::Relaxed),
@@ -710,11 +715,13 @@ const CLICK_THROUGH_MAX_MS: i32 = 250;
 /// final place underneath; before, the overlay ate every work-area click for
 /// the whole animation (140-245 ms at the defaults), and an Alt+drag started
 /// in that window grabbed the overlay itself (WindowFromPoint skips only
-/// layered + transparent windows). The trade-off, accepted: during the
-/// animation a click acts on the final layout while old or in-between frames
-/// still show. At the default 140 ms that is under reaction time, like the
-/// animations-off path; the config allows up to 2000 ms, where a misdirected
-/// click would be noticeable, so longer animations keep blocking input.
+/// layered + transparent windows; drag_root_at now refuses an overlay, so
+/// such a drag is lost rather than misdirected). The trade-off, accepted:
+/// during the animation a click acts on the final layout while old or
+/// in-between frames still show. At the default 140 ms that is under
+/// reaction time, like the animations-off path; the config allows up to
+/// 2000 ms, where a misdirected click would be noticeable, so longer
+/// animations keep blocking input.
 fn overlay_ex_style(animation_ms: i32) -> WINDOW_EX_STYLE {
     let base = WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE;
     if animation_ms <= CLICK_THROUGH_MAX_MS {
@@ -851,6 +858,7 @@ unsafe fn place_drag(frame: DragFrame) -> bool {
     if !frame.resize {
         flags |= SWP_NOSIZE;
     }
+    last_sent_forget(frame.hwnd);
     SWP_CALLS.fetch_add(1, Ordering::Relaxed);
     SetWindowPos(
         hwnd_from(frame.hwnd),
@@ -910,6 +918,7 @@ fn begin_drag(src: isize, generation: u64) {
 /// hook. Handles floating windows (which keep this dropped rect) and tiled ones
 /// (which retile over it) alike.
 unsafe fn commit_rect(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+    last_sent_forget(hwnd);
     SWP_CALLS.fetch_add(1, Ordering::Relaxed);
     let _ = SetWindowPos(
         hwnd_from(hwnd),
@@ -1018,9 +1027,9 @@ unsafe fn unmaximize_to(hwnd: HWND, r: RECT) -> bool {
 // window pixels (DWM does), so the only positional "animation" possible was
 // interpolating SetWindowPos over time — it landed windows unreliably across
 // apps and cost a per-frame cross-process DWM round-trip, so it was removed in
-// favour of going straight to the target. The workspace-switch slide (DWM
-// thumbnails, see run_transition) is a separate GPU-composited effect and is
-// kept; ease_in_out_cubic below paces it.
+// favour of going straight to the target. The workspace-switch slide (a GDI
+// compositor over screen captures in its own overlay, see run_transition) is a
+// separate cosmetic effect and is kept; ease_in_out_cubic below paces it.
 // =========================================================================
 /// Symmetric ease: slow start, fast middle, slow stop. Avoids the big first-frame
 /// leap an ease-OUT gives a slide (which read as "jumpy").
@@ -1091,9 +1100,59 @@ impl WsAnim {
     }
 }
 
+/// The rect set_pos_raw last sent each window, for skip-unchanged placement.
+/// Every caller is the manager thread (tests aside); the mutex is the guard
+/// for anything else, never contended. Any other path that queues a move on a
+/// foreign window (commit_rect, place_drag) forgets the window here, so a
+/// skip can never strand a move of theirs still in flight. sync_managed
+/// prunes untracked windows; a recycled HWND is caught by the live-rect half.
+static LAST_SENT: Mutex<Option<HashMap<isize, RECT>>> = Mutex::new(None);
+
+/// Placements set_pos_raw skipped as already in place. Diagnostics, next to
+/// SWP_CALLS in the counters line.
+static SWP_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// Can a placement to `target` be skipped? Only when the window is there now
+/// (`live`, GetWindowRect) AND the last rect Astur sent it is `target`. Live
+/// alone is not enough with posted placement: a read can predate an earlier
+/// move still queued in the app, which would then land after the skip. Sent
+/// alone misses the app or the user moving the window since.
+fn placement_unchanged(live: Option<RECT>, sent: Option<RECT>, target: RECT) -> bool {
+    live == Some(target) && sent == Some(target)
+}
+
+fn last_sent_forget(h: isize) {
+    if let Some(m) = LAST_SENT.lock().unwrap().as_mut() {
+        m.remove(&h);
+    }
+}
+
 /// Move a window with no activation/zorder side effects (instant tile placement
-/// and the workspace-slide reveal). Posted when async placement is on.
+/// and the workspace-slide reveal). Posted when async placement is on. Skipped
+/// when the window is already at `r` (placement_unchanged): each move wakes
+/// the app's UI thread for a relayout, and a switch re-places every incoming
+/// window that is usually already there.
 unsafe fn set_pos_raw(h: isize, r: RECT) {
+    // Exit restore under way or done: a placement now would re-park a window
+    // it brought back (backstop for a command that outlived its wait).
+    if EXITING.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut live = RECT::default();
+    let live = GetWindowRect(hwnd_from(h), &mut live)
+        .is_ok()
+        .then_some(live);
+    {
+        let mut sent = LAST_SENT.lock().unwrap();
+        let sent = sent.get_or_insert_with(HashMap::new);
+        if placement_unchanged(live, sent.get(&h).copied(), r) {
+            SWP_SKIPPED.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        // Recorded before the call. If it fails the window is elsewhere, and
+        // the live half keeps the next placement from being skipped.
+        sent.insert(h, r);
+    }
     SWP_CALLS.fetch_add(1, Ordering::Relaxed);
     let _ = SetWindowPos(
         hwnd_from(h),
@@ -1160,20 +1219,26 @@ fn drag_active() -> bool {
     ANY_DRAG.load(Ordering::Relaxed)
 }
 
+/// Does this marker-window message end Astur (exit restore, then quit)?
+/// WM_CLOSE, or WM_ENDSESSION with wParam TRUE (the session really ends).
+/// Never WM_QUERYENDSESSION or WM_ENDSESSION(FALSE): the shutdown can still
+/// be cancelled there (an app refuses, the user cancels) and Astur keeps
+/// running. DefWindowProc answers WM_QUERYENDSESSION TRUE.
+fn exit_restore_msg(msg: u32, wparam: usize) -> bool {
+    msg == WM_CLOSE || (msg == WM_ENDSESSION && wparam != 0)
+}
+
 /// WndProc for the marker window: nothing custom, the class brush paints it red.
 unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
-    if msg == WM_CLOSE || msg == WM_QUERYENDSESSION || msg == WM_ENDSESSION {
+    if exit_restore_msg(msg, w.0) {
         // Graceful teardown paths for the no-console (windows-subsystem) build:
-        // Task Manager "End task" sends WM_CLOSE; logoff/shutdown sends
-        // WM_QUERYENDSESSION/WM_ENDSESSION. Reveal every managed window before
-        // the process dies so none stay hidden. (Hard kills skip all of this —
-        // the crash-rescue file covers those on the next launch.)
+        // Task Manager "End task" sends WM_CLOSE; a logoff/shutdown that goes
+        // ahead ends in WM_ENDSESSION(TRUE). Reveal every managed window and
+        // leave: the restore is one-way (EXITING). (Hard kills skip all of
+        // this; the crash-rescue file covers those on the next launch.)
         restore_all_windows();
-        if msg == WM_CLOSE {
-            PostQuitMessage(0);
-            return LRESULT(0);
-        }
-        return DefWindowProcW(h, msg, w, l);
+        PostQuitMessage(0);
+        return LRESULT(0);
     }
     if msg == WM_DISPLAYCHANGE || msg == WM_DPICHANGED {
         // Do NOTHING synchronously here. Resolution, monitor add/remove and
@@ -1216,10 +1281,14 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         seed_fullscreen_windows();
         // Snapshots and per-DPI fonts were sized for the old scale.
         bar_fonts_clear();
+        tab_bars_repaint();
         bar_icons_retire();
         bar_icons_sweep();
         ensure_bars();
         push_cmd(Cmd::RefreshMonitors);
+        return LRESULT(0);
+    } else if msg == WM_TAB_BARS {
+        tab_bars_sync();
         return LRESULT(0);
     } else if msg == WM_RELOAD {
         // Config changed: drop the per-DPI fonts and rebuild bars (must happen
@@ -1228,6 +1297,7 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         // reload used to re-extract every one, LAUNCH-13): only a size no bar
         // uses now is retired, and freed once no snapshot can hold it.
         bar_fonts_clear();
+        tab_bars_repaint();
         bar_icons_retire();
         bar_icons_sweep();
         if BAR_HEIGHT.load(Ordering::Relaxed) > 0 {
@@ -1260,6 +1330,8 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         // A maximized/fullscreen app entered or left one monitor. Rebuild only
         // bar runtime geometry; manager/window layout must not disturb the app.
         ensure_bars();
+        // Tab bars hide over a fullscreen shown tab (see tab_bars_sync).
+        tab_bars_sync();
     }
     DefWindowProcW(h, msg, w, l)
 }
@@ -1304,9 +1376,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             let msg = wparam.0 as u32;
             let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
             let up = matches!(msg, WM_KEYUP | WM_SYSKEYUP);
-            if down && GLIDE_BUSY.load(Ordering::Acquire) {
-                cancel_glide();
-            }
+            // A keydown reveals a running motion (typing must reach the real
+            // windows now), on whichever return this hook takes. Not a bare
+            // modifier (it moves nothing and starts the next chord), and not
+            // an Astur hotkey: its queued command re-aims the motion, so the
+            // hotkey block below disarms this.
+            let mut reveal = MotionReveal(
+                down && !is_modifier_vk(kb.vkCode) && GLIDE_BUSY.load(Ordering::Acquire),
+            );
 
             // Clear the auto-repeat guard on release.
             if up && (kb.vkCode as usize) < 256 {
@@ -1496,6 +1573,7 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             if down && ALT_DOWN.load(Ordering::Relaxed) {
                 let shift = vk_down(VK_SHIFT);
                 if let Some(cmd) = resolve_hotkey(kb.vkCode, shift, vk_down(VK_CONTROL)) {
+                    reveal.0 = false;
                     let vk = kb.vkCode as usize;
                     // swap(true): push only on the first down (debounce auto-repeat),
                     // re-armed by the key-up store above. Lockless on the hot path.
@@ -1532,7 +1610,12 @@ unsafe fn set_marker_shape(left: bool, top: bool) {
 }
 
 /// Position the L-bracket so its corner sits exactly on the dragged corner.
-unsafe fn show_marker(corner_x: i32, corner_y: i32, left: bool, top: bool) {
+/// Hook thread; Astur's own window (created on this thread), never a foreign
+/// one. `first` = the drag's first placement: only that one raises it topmost
+/// and shows it. Every later move is a plain move: the size depends only on
+/// DRAG_DPI, sampled once per drag, and re-asserting TOPMOST + SHOWWINDOW on
+/// every mouse move re-ran the z-order and show work for nothing.
+unsafe fn show_marker(corner_x: i32, corner_y: i32, left: bool, top: bool, first: bool) {
     let raw = MARKER_HWND.load(Ordering::Relaxed);
     if raw == 0 {
         return;
@@ -1544,15 +1627,12 @@ unsafe fn show_marker(corner_x: i32, corner_y: i32, left: bool, top: bool) {
     } else {
         corner_y - len
     };
-    let _ = SetWindowPos(
-        hwnd_from(raw),
-        HWND_TOPMOST,
-        x,
-        y,
-        len,
-        len,
-        SWP_NOACTIVATE | SWP_SHOWWINDOW,
-    );
+    let (after, flags) = if first {
+        (HWND_TOPMOST, SWP_NOACTIVATE | SWP_SHOWWINDOW)
+    } else {
+        (HWND::default(), SWP_NOACTIVATE | SWP_NOZORDER | SWP_NOSIZE)
+    };
+    let _ = SetWindowPos(hwnd_from(raw), after, x, y, len, len, flags);
 }
 
 unsafe fn hide_marker() {
@@ -1578,6 +1658,28 @@ unsafe fn root_window_at(pt: POINT) -> Option<HWND> {
         return None;
     }
     Some(root)
+}
+
+/// root_window_at for an Alt-drag: a tab bar stands for its column's shown
+/// tab (GWLP_USERDATA, written by tab_bars_sync on this same thread), so
+/// Alt-dragging a tabbed column by its bar drags the column, and the bar
+/// itself is never dragged off its column. A slide or motion overlay still
+/// up (one longer than CLICK_THROUGH_MAX_MS takes clicks) is never dragged:
+/// None, the click only reveals it. Hook-legal: user32 reads into a stack
+/// buffer, no lock, no allocation; and only on an Alt+click.
+unsafe fn drag_root_at(pt: POINT) -> Option<HWND> {
+    let h = root_window_at(pt)?;
+    let mut buf = [0u16; 16];
+    let n = (GetClassNameW(h, &mut buf).max(0) as usize).min(buf.len());
+    let class = &buf[..n];
+    if class.iter().copied().eq("astur_tabs".encode_utf16()) {
+        let shown = GetWindowLongPtrW(h, GWLP_USERDATA);
+        return (shown != 0).then(|| hwnd_from(shown));
+    }
+    if class.iter().copied().eq("astur_slide".encode_utf16()) {
+        return None;
+    }
+    Some(h)
 }
 
 /// Work area (excludes taskbar) of the monitor under a screen point.
@@ -1615,6 +1717,18 @@ unsafe fn work_area_at(pt: POINT) -> RECT {
     }
 }
 
+/// Does a wheel event at `pt` scroll a strip (Alt+wheel over a scrolling
+/// monitor)? The gates in cost order, all lock-free: one atomic load (no
+/// scrolling monitor = done), no Alt-drag in progress, the Alt state, the
+/// published rects. Hook-legal.
+#[inline]
+unsafe fn alt_wheel_scrolls(pt: POINT) -> bool {
+    SCROLLMON_N.load(Ordering::Relaxed) != 0
+        && !drag_active()
+        && left_alt_down()
+        && scrollmon_at(pt)
+}
+
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     // Proof of life for the watchdog. One relaxed store; hook-legal.
     hook_alive_stamp();
@@ -1629,8 +1743,14 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     let pt = info.pt;
     let msg = wparam.0 as u32;
     let suppress = LRESULT(1);
-    if matches!(msg, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MOUSEWHEEL)
-        && GLIDE_BUSY.load(Ordering::Acquire)
+    // A click (any button) or the wheel (either axis) reveals a running motion
+    // now, except an Alt+wheel that scrolls a strip: the command it queues
+    // re-aims the motion.
+    if GLIDE_BUSY.load(Ordering::Acquire)
+        && (matches!(
+            msg,
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN
+        ) || (matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) && !alt_wheel_scrolls(pt)))
     {
         cancel_glide();
     }
@@ -1709,12 +1829,48 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
             }
         }
     }
+    // Alt+wheel / Alt+horizontal wheel over a scrolling monitor: scroll the
+    // strip under the cursor one column per whole notch, or per swipe (a
+    // touchpad's partial deltas add up to one, see scroll_wheel_steps).
+    // Gates in cost order, all lock-free: the message, then
+    // alt_wheel_scrolls. Only then the push, like a hotkey (and, like one, it
+    // re-aims a running motion instead of cancelling it, see the top of this
+    // hook). Eaten so the app underneath doesn't also
+    // scroll. Not mid Alt-drag: retiles wait for the drop then, so the view
+    // would not move and the drop zones would be judged on the old one.
+    if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) && alt_wheel_scrolls(pt) {
+        let raw = ((info.mouseData >> 16) as u16 as i16) as i32;
+        // Wheel down is negative and means right; a tilt or swipe right is
+        // positive.
+        let delta = if msg == WM_MOUSEHWHEEL { raw } else { -raw };
+        let mut acc = SCROLL_WHEEL_ACC.load(Ordering::Relaxed);
+        let mut latch = SCROLL_WHEEL_LATCH.load(Ordering::Relaxed);
+        let steps = scroll_wheel_steps(
+            &mut acc,
+            &mut latch,
+            SCROLL_WHEEL_T.load(Ordering::Relaxed),
+            info.time,
+            delta,
+        );
+        SCROLL_WHEEL_ACC.store(acc, Ordering::Relaxed);
+        SCROLL_WHEEL_LATCH.store(latch, Ordering::Relaxed);
+        SCROLL_WHEEL_T.store(info.time, Ordering::Relaxed);
+        if steps != 0 {
+            push_cmd(Cmd::ScrollWheel {
+                steps,
+                carry: vk_down(VK_SHIFT),
+                x: pt.x,
+                y: pt.y,
+            });
+        }
+        return suppress;
+    }
 
     match msg {
         WM_LBUTTONDOWN if left_alt_down() && !drag_active() => {
             // Sample the scale once per drag; the overlay sizes below read it.
             DRAG_DPI.store(dpi_at(pt), Ordering::Relaxed);
-            if let Some(hwnd) = root_window_at(pt) {
+            if let Some(hwnd) = drag_root_at(pt) {
                 let mut rect = RECT::default();
                 if IsZoomed(hwnd).as_bool() {
                     // Un-maximize + place is the MANAGER's job. ShowWindow on a
@@ -1786,7 +1942,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         }
         WM_RBUTTONDOWN if left_alt_down() && !drag_active() => {
             DRAG_DPI.store(dpi_at(pt), Ordering::Relaxed);
-            if let Some(hwnd) = root_window_at(pt) {
+            if let Some(hwnd) = drag_root_at(pt) {
                 let mut rect = RECT::default();
                 if GetWindowRect(hwnd, &mut rect).is_ok() {
                     let cx = (rect.left + rect.right) / 2;
@@ -1796,7 +1952,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     let corner_x = if left { rect.left } else { rect.right };
                     let corner_y = if top { rect.top } else { rect.bottom };
                     set_marker_shape(left, top);
-                    show_marker(corner_x, corner_y, left, top);
+                    show_marker(corner_x, corner_y, left, top, true);
                     let mut s = STATE.lock().unwrap();
                     s.mode = Mode::Resize;
                     s.generation = s.generation.wrapping_add(1);
@@ -1880,7 +2036,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     s.cur_h = h;
                     let corner_x = if s.left { x } else { x + w };
                     let corner_y = if s.top { y } else { y + h };
-                    show_marker(corner_x, corner_y, s.left, s.top);
+                    show_marker(corner_x, corner_y, s.left, s.top, false);
                 }
                 Mode::None => {}
             }
@@ -2020,6 +2176,35 @@ enum Cmd {
     /// normal title rates the queue never grows; it bounds kHz title spam and
     /// renames piling up behind a long command (BAR-10).
     BarRefresh,
+    // Scrolling-layout keys (plan/scrolling.md "Keys"). No-ops off scrolling
+    // monitors, except ResizeTile, which is Alt+Shift+H/L's old ResizeMaster
+    // there. Signed counts and directions: < 0 left/up, > 0 right/down.
+    ScrollFocus(i32), // focus the column n columns over (extra hotkeys)
+    ScrollMove(i32),  // move the focused column n columns over (extra hotkeys)
+    /// Alt+wheel at (x, y), which the hook found over a scrolling monitor:
+    /// ScrollFocus(steps), or ScrollMove(steps) with `carry` (Shift), on the
+    /// strip under the cursor rather than the focused monitor's.
+    ScrollWheel {
+        steps: i32,
+        carry: bool,
+        x: i32,
+        y: i32,
+    },
+    CycleWidth,          // Alt+R
+    CycleHeight,         // Alt+Shift+R
+    CenterColumn,        // Alt+C
+    ConsumeOrExpel(i32), // Alt+[ / Alt+]
+    ToggleTabbed,        // Alt+Shift+T
+    MaximizeColumn,      // full-width toggle (Alt+M is PromoteMaster, which maps here)
+    /// Alt+Home / End: focus the first / last column; `carry` (Shift) moves
+    /// the focused column there instead.
+    ColumnEdge {
+        last: bool,
+        carry: bool,
+    },
+    ResizeTile(f32), // Alt+Shift+H / L: the focused tile's share of its column
+    /// A tab-bar click: (any window of the column, tab index).
+    TabClick(isize, usize),
 }
 
 impl Cmd {
@@ -2061,6 +2246,18 @@ impl Cmd {
             Cmd::ToggleScratchpad => "ToggleScratchpad",
             Cmd::Reload(..) => "Reload",
             Cmd::BarRefresh => "BarRefresh",
+            Cmd::ScrollFocus(_) => "ScrollFocus",
+            Cmd::ScrollMove(_) => "ScrollMove",
+            Cmd::ScrollWheel { .. } => "ScrollWheel",
+            Cmd::CycleWidth => "CycleWidth",
+            Cmd::CycleHeight => "CycleHeight",
+            Cmd::CenterColumn => "CenterColumn",
+            Cmd::ConsumeOrExpel(_) => "ConsumeOrExpel",
+            Cmd::ToggleTabbed => "ToggleTabbed",
+            Cmd::MaximizeColumn => "MaximizeColumn",
+            Cmd::ColumnEdge { .. } => "ColumnEdge",
+            Cmd::ResizeTile(_) => "ResizeTile",
+            Cmd::TabClick(..) => "TabClick",
         }
     }
 }
@@ -2077,7 +2274,10 @@ static SUPPRESS: AtomicBool = AtomicBool::new(false);
 // was ours — ignore it". Not touched by the LL input hooks, so a lock is fine.
 static HIDDEN_BY_US: Mutex<Option<std::collections::HashSet<isize>>> = Mutex::new(None);
 
+/// Every programmatic hide marks here first, so this is also where a hidden
+/// window turns cold: SW_HIDE drops its DWM surface (WARM).
 fn mark_hidden_by_us(h: isize) {
+    warm_forget(h);
     HIDDEN_BY_US
         .lock()
         .unwrap()
@@ -2144,6 +2344,11 @@ struct HotkeyBinds {
     toggle_tiling: u32,
     toggle_float: u32,
     close_window: u32,
+    // Scrolling layout (R, C, [, ]); no-ops on other layouts.
+    cycle_width: u32,
+    center_column: u32,
+    consume_left: u32,
+    consume_right: u32,
 }
 static HOTKEYS: Mutex<HotkeyBinds> = Mutex::new(HotkeyBinds {
     focus_next: 0x4A,
@@ -2154,6 +2359,10 @@ static HOTKEYS: Mutex<HotkeyBinds> = Mutex::new(HotkeyBinds {
     toggle_tiling: 0x54,
     toggle_float: 0x46,
     close_window: 0x57,
+    cycle_width: 0x52,
+    center_column: 0x43,
+    consume_left: 0xDB,
+    consume_right: 0xDD,
 });
 
 #[derive(Clone, Copy)]
@@ -2235,6 +2444,21 @@ fn apply_hook_config(cfg: &Config) {
     hk.toggle_tiling = cfg.key_toggle_tiling;
     hk.toggle_float = cfg.key_toggle_float;
     hk.close_window = cfg.key_close_window;
+    hk.cycle_width = cfg.key_cycle_width;
+    hk.center_column = cfg.key_center_column;
+    hk.consume_left = cfg.key_consume_left;
+    hk.consume_right = cfg.key_consume_right;
+    drop(hk);
+    // A built-in bind wins over a workspace key (resolve_hotkey), leaving that
+    // workspace without one: say so rather than swallow the key silently.
+    for (i, &k) in cfg.workspace_keys.iter().enumerate() {
+        if map_hotkey(k, false).is_some() {
+            log_error!(
+                "workspace_keys: key 0x{k:02X} of workspace {} is a built-in Astur bind; that workspace has no key",
+                i + 1
+            );
+        }
+    }
 }
 
 // ---- status bar (one per monitor) ----
@@ -2361,6 +2585,127 @@ fn wheel_steps(acc: &mut i32, delta: i32) -> i32 {
     steps
 }
 
+// Hook-visible full rects (rcMonitor) of the scrolling monitors: Alt+wheel
+// scrolls a strip only over one, and the mouse hook may not lock to ask the
+// manager (the BARHIT pattern). The manager republishes after every command
+// and writes only on a change (scrollmon_publish). SCROLLMON_N = 0 is the
+// idle short-circuit: one atomic load per wheel event.
+const MAX_SCROLLMONS: usize = 8;
+static SCROLLMON_N: AtomicU32 = AtomicU32::new(0);
+static SCROLLMON_L: [AtomicI32; MAX_SCROLLMONS] = [const { AtomicI32::new(0) }; MAX_SCROLLMONS];
+static SCROLLMON_T: [AtomicI32; MAX_SCROLLMONS] = [const { AtomicI32::new(0) }; MAX_SCROLLMONS];
+static SCROLLMON_R: [AtomicI32; MAX_SCROLLMONS] = [const { AtomicI32::new(0) }; MAX_SCROLLMONS];
+static SCROLLMON_B: [AtomicI32; MAX_SCROLLMONS] = [const { AtomicI32::new(0) }; MAX_SCROLLMONS];
+// Alt+wheel partial delta towards the next whole column (> 0 = right) and the
+// hook timestamp of the last Alt+wheel event. Mouse-hook thread only.
+static SCROLL_WHEEL_ACC: AtomicI32 = AtomicI32::new(0);
+static SCROLL_WHEEL_T: AtomicU32 = AtomicU32::new(0);
+// Direction of the swipe that already stepped (scroll_wheel_steps), 0 = none.
+static SCROLL_WHEEL_LATCH: AtomicI32 = AtomicI32::new(0);
+/// A pause this long between Alt+wheel events starts a fresh count, so the
+/// leftover of one touchpad swipe never counts towards the next.
+const SCROLL_WHEEL_GAP_MS: u32 = 300;
+
+/// Publish the scrolling monitors' full rects for the mouse hook. A no-op
+/// when they did not change, which is nearly always. While they change the
+/// count reads 0, so a hook reading after that store skips the slots. Not a
+/// seqlock: a hook that loaded the old count just before can still mix old
+/// and new edges of one slot. That misroutes at most that one wheel event (to
+/// the app, or a ScrollWheel the manager drops when no scrolling monitor is
+/// under the point), only at a republish, so it is left at that.
+fn scrollmon_publish(rects: &[RECT]) {
+    let n = rects.len().min(MAX_SCROLLMONS);
+    let same = SCROLLMON_N.load(Ordering::Relaxed) as usize == n
+        && rects.iter().take(n).enumerate().all(|(i, r)| {
+            SCROLLMON_L[i].load(Ordering::Relaxed) == r.left
+                && SCROLLMON_T[i].load(Ordering::Relaxed) == r.top
+                && SCROLLMON_R[i].load(Ordering::Relaxed) == r.right
+                && SCROLLMON_B[i].load(Ordering::Relaxed) == r.bottom
+        });
+    if same {
+        return;
+    }
+    SCROLLMON_N.store(0, Ordering::Release);
+    for (i, r) in rects.iter().take(n).enumerate() {
+        SCROLLMON_L[i].store(r.left, Ordering::Relaxed);
+        SCROLLMON_T[i].store(r.top, Ordering::Relaxed);
+        SCROLLMON_R[i].store(r.right, Ordering::Relaxed);
+        SCROLLMON_B[i].store(r.bottom, Ordering::Relaxed);
+    }
+    SCROLLMON_N.store(n as u32, Ordering::Release);
+}
+
+/// Is `pt` on a published scrolling monitor? Hook-legal: atomic loads only.
+#[inline]
+fn scrollmon_at(pt: POINT) -> bool {
+    let n = (SCROLLMON_N.load(Ordering::Acquire) as usize).min(MAX_SCROLLMONS);
+    (0..n).any(|i| {
+        pt.x >= SCROLLMON_L[i].load(Ordering::Relaxed)
+            && pt.x < SCROLLMON_R[i].load(Ordering::Relaxed)
+            && pt.y >= SCROLLMON_T[i].load(Ordering::Relaxed)
+            && pt.y < SCROLLMON_B[i].load(Ordering::Relaxed)
+    })
+}
+
+/// Whole columns in one Alt+wheel event (`delta` > 0 = right), carrying
+/// partial deltas in `acc` like the bar's wheel_steps. `last` and `now` are
+/// hook timestamps (ms, wrapping): a pause over SCROLL_WHEEL_GAP_MS drops the
+/// carried remainder first. A notched wheel steps per notch; a swipe (partial
+/// deltas: a touchpad, a smooth wheel) steps one column, then `latch` (the
+/// direction it stepped, 0 = none) swallows the rest of it until a pause or a
+/// reversal. Pure, so the hook's arithmetic is testable.
+fn scroll_wheel_steps(acc: &mut i32, latch: &mut i32, last: u32, now: u32, delta: i32) -> i32 {
+    if now.wrapping_sub(last) > SCROLL_WHEEL_GAP_MS {
+        *acc = 0;
+        *latch = 0;
+    }
+    if *latch != 0 {
+        if delta.signum() == *latch {
+            return 0;
+        }
+        *latch = 0; // a reversal; wheel_steps drops the remainder
+    }
+    let steps = wheel_steps(acc, delta);
+    if steps != 0 && delta % 120 != 0 {
+        *acc = 0;
+        *latch = steps.signum();
+        return steps.signum();
+    }
+    steps
+}
+
+/// Fold the Alt+wheel scrolls queued right behind `c` into it: a flick
+/// queues one per notch, each otherwise a full retile, re-aim and tail. Only
+/// the same kind (carry), direction and strip (`mon_of` the point) fold, so
+/// the sum lands where the steps one by one would (moves and focus both stop
+/// at the strip end). Returns how many were folded.
+fn fold_scrolls(
+    c: &mut Cmd,
+    q: &mut VecDeque<Cmd>,
+    mon_of: impl Fn(i32, i32) -> Option<usize>,
+) -> usize {
+    let Cmd::ScrollWheel { steps, carry, x, y } = c else {
+        return 0;
+    };
+    let mon = mon_of(*x, *y);
+    let mut n = 0;
+    while let Some(&Cmd::ScrollWheel {
+        steps: s,
+        carry: k,
+        x: nx,
+        y: ny,
+    }) = q.front()
+    {
+        if k != *carry || s.signum() != steps.signum() || mon_of(nx, ny) != mon {
+            break;
+        }
+        *steps += s;
+        q.pop_front();
+        n += 1;
+    }
+    n
+}
+
 /// Auto-hide runtime state per bar window (bar/main thread only). `y_cur` eases
 /// toward shown/hidden each AH_TIMER tick, so the bar slides rather than pops.
 /// `strip` is the reveal band on the bar's docked screen edge.
@@ -2463,6 +2808,7 @@ struct MonBar {
     occupied: u64,
     title: String,
     apps: Vec<BarApp>,
+    layout: String, // this monitor's own layout (layouts are per monitor)
 }
 
 /// One bar widget slot; the navbar zone lists resolve to these at update time.
@@ -2557,7 +2903,6 @@ struct BarData {
     icon_battery: String,
     icon_net: String,
     icon_volume: String,
-    layout: String,
     tiling: bool,
     left: Vec<BarWidget>,
     center: Vec<BarWidget>,
@@ -2588,7 +2933,6 @@ impl BarData {
             icon_battery: String::new(),
             icon_net: String::new(),
             icon_volume: String::new(),
-            layout: String::new(),
             tiling: true,
             left: Vec::new(),
             center: Vec::new(),
@@ -2620,6 +2964,9 @@ const WM_REARM_HOOKS: u32 = WM_USER + 6;
 // Custom message (to the marker window): rebuild bar geometry, once, OUTSIDE
 // the message that asked for it. See `request_bar_rebuild`.
 const WM_REBUILD_BARS: u32 = WM_USER + 7;
+// Custom message (to the marker window): the manager published new tab bars
+// (TAB_SNAPSHOT); create, move, repaint and destroy them on the main thread.
+const WM_TAB_BARS: u32 = WM_USER + 8;
 // SetTimer id for the bar clock tick.
 const BAR_TIMER_ID: usize = 1;
 
@@ -2911,6 +3258,18 @@ fn push_cmd(c: Cmd) {
     CMDCV.notify_one();
 }
 
+/// Where a window joining a workspace lands (Manager::insert_window). Index is
+/// for the other layouts; the rest are scrolling drop zones (drop_zone).
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum DropAt {
+    Index(usize),  // before this `windows` index (a drop onto a window)
+    Before(isize), // a new column left of this window's column
+    After(isize),  // a new column right of this window's column
+    Below(isize),  // into this window's column, right under it
+    First,         // a new column at the strip's start
+    Last,          // a new column at the strip's end
+}
+
 struct Workspace {
     windows: Vec<isize>,  // all managed windows in this workspace (tiled order)
     floating: Vec<isize>, // subset of `windows` excluded from tiling
@@ -2919,6 +3278,9 @@ struct Workspace {
     // tiled-window index). Each is the fraction the window at that level takes of
     // its split; missing/extra entries default to 0.5. Edited by resizing.
     splits: Vec<f32>,
+    // Scrolling-layout columns, widths and scroll position. Only the
+    // scrolling layout reads it; `windows` stays the membership and order.
+    strip: Strip,
 }
 
 impl Workspace {
@@ -2928,17 +3290,694 @@ impl Workspace {
             floating: Vec::new(),
             focused: 0,
             splits: Vec::new(),
+            strip: Strip::default(),
         }
     }
+
+    /// The strip's columns over `tiled`, tidied first, so a column op never
+    /// acts on a column that a reorder elsewhere split in two.
+    fn tidy_columns(&mut self, tiled: &[isize]) -> Vec<Vec<isize>> {
+        self.strip.tidy(&self.windows, tiled);
+        self.strip.columns(tiled)
+    }
+
+    /// Write a new column order back into `windows` (see write_tiled_order).
+    fn set_columns(&mut self, cols: &[Vec<isize>]) {
+        write_tiled_order(&mut self.windows, &cols.concat());
+    }
+
+    /// Put `h` into `windows` as a new column of its own right after the
+    /// column holding `after`, or at the end when `after` is not in the strip
+    /// (`tiled`, which does not hold `h` yet). It goes after that column's
+    /// LAST window, so it can never split a column. No id: a column of its
+    /// own at `scroll_default_width`, and a stale id from an earlier stay here
+    /// cannot glue it to a neighbour.
+    fn insert_column(&mut self, tiled: &[isize], after: isize, h: isize) {
+        let cols = self.tidy_columns(tiled);
+        self.windows.retain(|&w| w != h);
+        self.strip.forget(h);
+        let pos = locate_tile(&cols, after)
+            .and_then(|(ci, _)| cols[ci].last())
+            .and_then(|last| self.windows.iter().position(|w| w == last))
+            .map_or(self.windows.len(), |p| p + 1);
+        self.windows.insert(pos, h);
+    }
+
+    /// Put `h` (in no column; `tiled` does not hold it) into the strip where
+    /// `at` says: a drop zone (drop_zone), or by default (None, or an index,
+    /// which only other layouts read) a new column right of the focused one.
+    /// A new column has no id; Below joins the target's column right under
+    /// it, and that column's heights go back to equal shares, as a consume.
+    fn insert_in_strip(&mut self, tiled: &[isize], h: isize, at: Option<DropAt>) {
+        let cols = self.tidy_columns(tiled);
+        self.windows.retain(|&w| w != h);
+        self.strip.forget(h);
+        let first_of = |t: isize| locate_tile(&cols, t).map(|(ci, _)| cols[ci][0]);
+        let before = match at {
+            Some(DropAt::Before(t)) => first_of(t),
+            Some(DropAt::First) => cols.first().map(|c| c[0]),
+            Some(DropAt::Last) => None,
+            Some(DropAt::After(t)) => return self.insert_column(tiled, t, h),
+            Some(DropAt::Below(t)) => {
+                let Some((ci, _)) = locate_tile(&cols, t) else {
+                    return self.insert_column(tiled, 0, h);
+                };
+                let id = self.strip.col_id(t);
+                for w in &cols[ci] {
+                    self.strip.weights.remove(w);
+                }
+                let pos = self
+                    .windows
+                    .iter()
+                    .position(|&w| w == t)
+                    .map_or(0, |p| p + 1);
+                self.windows.insert(pos, h);
+                self.strip.col_of.insert(h, id);
+                return;
+            }
+            None | Some(DropAt::Index(_)) => {
+                let after = self.focused;
+                return self.insert_column(tiled, after, h);
+            }
+        };
+        match before.and_then(|b| self.windows.iter().position(|&w| w == b)) {
+            Some(p) => self.windows.insert(p, h),
+            None => self.windows.push(h),
+        }
+    }
+
+    /// Where focus goes when `h` leaves the strip: the next tile of its column
+    /// (the previous one when it was the bottom tile), else the column to the
+    /// left, else the one to the right, each at its last-focused tile.
+    /// `tiled` must still hold `h`.
+    fn focus_after_removal(&self, tiled: &[isize], h: isize) -> Option<isize> {
+        let cols = self.strip.columns(tiled);
+        let (ci, ti) = locate_tile(&cols, h)?;
+        let col = &cols[ci];
+        if col.len() > 1 {
+            return col
+                .get(ti + 1)
+                .or_else(|| ti.checked_sub(1).and_then(|i| col.get(i)))
+                .copied();
+        }
+        ci.checked_sub(1)
+            .and_then(|i| cols.get(i))
+            .or_else(|| cols.get(ci + 1))
+            .map(|c| column_entry(&self.strip, c))
+    }
+}
+
+// Column ops for the scrolling keys. Each takes `tiled` (tiled_windows) and
+// the window the key acts on, edits `windows` order and column ids together,
+// and returns whether anything changed; the caller then runs ensure_visible
+// and a retile.
+impl Workspace {
+    /// Alt+[ / Alt+]: `h` alone in its column joins the neighbour column on
+    /// the `dir` side (<0 left, >0 right) at the edge nearest it (bottom of
+    /// the left one, top of the right one), so no window jumps over another.
+    /// `h` sharing a column leaves it for a new column of its own on that
+    /// side. Heights in the columns it touches go back to equal shares.
+    fn consume_or_expel(&mut self, tiled: &[isize], h: isize, dir: i32) -> bool {
+        let mut cols = self.tidy_columns(tiled);
+        let Some((ci, _)) = locate_tile(&cols, h) else {
+            return false;
+        };
+        if dir == 0 {
+            return false;
+        }
+        if cols[ci].len() > 1 {
+            for w in &cols[ci] {
+                self.strip.weights.remove(w);
+            }
+            self.strip.forget(h);
+            cols[ci].retain(|&w| w != h);
+            cols.insert(if dir < 0 { ci } else { ci + 1 }, vec![h]);
+            self.set_columns(&cols);
+            return true;
+        }
+        let Some(ni) = step(ci, dir, cols.len()) else {
+            return false;
+        };
+        // Already adjacent in `windows`: sharing the neighbour's id is the
+        // whole move.
+        let id = self.strip.col_id(cols[ni][0]);
+        self.strip.col_of.insert(h, id);
+        for w in cols[ni].iter().chain([&h]) {
+            self.strip.weights.remove(w);
+        }
+        true
+    }
+
+    /// Swap `h`'s column with its neighbour on the `dir` side.
+    fn move_column(&mut self, tiled: &[isize], h: isize, dir: i32) -> bool {
+        let mut cols = self.tidy_columns(tiled);
+        let Some((ci, _)) = locate_tile(&cols, h) else {
+            return false;
+        };
+        let Some(ni) = step(ci, dir, cols.len()) else {
+            return false;
+        };
+        cols.swap(ci, ni);
+        self.set_columns(&cols);
+        true
+    }
+
+    /// Move `h`'s column to the first or the last place of the strip.
+    fn move_column_to_edge(&mut self, tiled: &[isize], h: isize, last: bool) -> bool {
+        let mut cols = self.tidy_columns(tiled);
+        let Some((ci, _)) = locate_tile(&cols, h) else {
+            return false;
+        };
+        let to = if last { cols.len() - 1 } else { 0 };
+        if ci == to {
+            return false;
+        }
+        let col = cols.remove(ci);
+        cols.insert(to, col);
+        self.set_columns(&cols);
+        true
+    }
+
+    /// Swap `h` with the tile above (`dir` < 0) or below it in its column;
+    /// in a tabbed column that reorders the tabs. Heights stay with their
+    /// windows.
+    fn move_tile(&mut self, tiled: &[isize], h: isize, dir: i32) -> bool {
+        let mut cols = self.tidy_columns(tiled);
+        let Some((ci, ti)) = locate_tile(&cols, h) else {
+            return false;
+        };
+        let Some(nt) = step(ti, dir, cols[ci].len()) else {
+            return false;
+        };
+        cols[ci].swap(ti, nt);
+        self.set_columns(&cols);
+        true
+    }
+}
+
+/// Scrolling-layout state of one workspace (plan/scrolling.md "WM contract").
+/// A column is a maximal run of consecutive TILED windows (`tiled_windows`)
+/// sharing a column id; a window with no id is a column of its own at
+/// `scroll_default_width`. Keyed by window and column id, never by position,
+/// so the other layouts and every feature that reads `windows` are untouched
+/// and switching layouts loses nothing. Stale entries are harmless: the
+/// column ops prune them (`tidy`), and a window leaving the workspace takes
+/// its own with it (`forget`, from detach_window).
+#[derive(Default)]
+struct Strip {
+    offset: i32,                  // viewport left edge in strip px; clamped at layout time
+    col_of: HashMap<isize, u32>,  // window -> column id (missing = own column)
+    cols: HashMap<u32, ColMeta>,  // column id -> metadata (missing = defaults)
+    weights: HashMap<isize, f32>, // window -> height weight in its column (missing = 1.0)
+    next_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ColMeta {
+    width: f32, // fraction of the view (layout::col_px)
+    tabbed: bool,
+    // Last-focused tile: the tab a tabbed column shows while focus is
+    // elsewhere, and where focus lands when it comes back to the column.
+    active: isize,
+    restore_width: Option<f32>, // width before Alt+M made it full width
+}
+
+impl Strip {
+    /// The columns of `tiled`, left to right, each top to bottom.
+    fn columns(&self, tiled: &[isize]) -> Vec<Vec<isize>> {
+        let mut cols: Vec<Vec<isize>> = Vec::new();
+        let mut prev = None;
+        for &h in tiled {
+            let id = self.col_of.get(&h).copied();
+            match cols.last_mut() {
+                Some(col) if id.is_some() && id == prev => col.push(h),
+                _ => cols.push(vec![h]),
+            }
+            prev = id;
+        }
+        cols
+    }
+
+    fn col_meta(&self, col: &[isize]) -> Option<&ColMeta> {
+        col.first()
+            .and_then(|h| self.col_of.get(h))
+            .and_then(|id| self.cols.get(id))
+    }
+
+    /// Index of the tile a tabbed column shows: the focused window when it is
+    /// in the column (a focused window is never parked), else the column's
+    /// last-focused tile, else the top one.
+    fn active_tab(&self, col: &[isize], focused: isize) -> usize {
+        col.iter()
+            .position(|&w| w == focused)
+            .or_else(|| {
+                self.col_meta(col)
+                    .and_then(|m| col.iter().position(|&w| w == m.active))
+            })
+            .unwrap_or(0)
+    }
+
+    /// The geometry's view of `cols` (layout::strip_layout).
+    fn strip_cols(&self, cols: &[Vec<isize>], focused: isize, default: f32) -> Vec<StripCol> {
+        cols.iter()
+            .map(|col| {
+                let meta = self.col_meta(col);
+                StripCol {
+                    width: meta.map_or(default, |m| m.width),
+                    weights: col
+                        .iter()
+                        .map(|w| self.weights.get(w).copied().unwrap_or(1.0))
+                        .collect(),
+                    tabbed: meta.is_some_and(|m| m.tabbed),
+                    active: self.active_tab(col, focused),
+                }
+            })
+            .collect()
+    }
+
+    /// The inactive tabs of every tabbed column. They get the active tab's
+    /// rect from the layout and are parked by the placement whatever that
+    /// rect is (PlaceMap): stacked behind it they would show through a
+    /// semi-transparent unfocused window.
+    fn hidden_tabs(&self, tiled: &[isize], focused: isize) -> Vec<isize> {
+        let cols = self.columns(tiled);
+        let mut out = Vec::new();
+        for (col, sc) in cols.iter().zip(self.strip_cols(&cols, focused, 1.0)) {
+            if sc.tabbed {
+                out.extend(
+                    col.iter()
+                        .enumerate()
+                        .filter(|&(i, _)| i != sc.active)
+                        .map(|(_, &w)| w),
+                );
+            }
+        }
+        out
+    }
+
+    /// Drop `h`'s column id and height: it left this workspace.
+    fn forget(&mut self, h: isize) {
+        self.col_of.remove(&h);
+        self.weights.remove(&h);
+    }
+
+    /// Prune entries of windows no longer in `windows`, give a column id
+    /// back its uniqueness, and drop columns nobody uses. A reorder outside
+    /// the strip ops (SwapDir, a drag swap) can split one column into two
+    /// runs sharing an id; the later run gets a fresh id with a copy of the
+    /// metadata, so it stays the column it looks like.
+    fn tidy(&mut self, windows: &[isize], tiled: &[isize]) {
+        self.col_of.retain(|h, _| windows.contains(h));
+        self.weights.retain(|h, _| windows.contains(h));
+        let mut seen: Vec<u32> = Vec::new();
+        for col in self.columns(tiled) {
+            let Some(&id) = self.col_of.get(&col[0]) else {
+                continue;
+            };
+            if !seen.contains(&id) {
+                seen.push(id);
+                continue;
+            }
+            let fresh = self.new_id();
+            if let Some(m) = self.cols.get(&id).copied() {
+                self.cols.insert(fresh, m);
+            }
+            for h in col {
+                self.col_of.insert(h, fresh);
+            }
+        }
+        let used: Vec<u32> = self.col_of.values().copied().collect();
+        self.cols.retain(|id, _| used.contains(id));
+    }
+
+    fn new_id(&mut self) -> u32 {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    /// The id of `h`'s column, giving an id-less window (a column of its
+    /// own) a fresh one.
+    fn col_id(&mut self, h: isize) -> u32 {
+        if let Some(&id) = self.col_of.get(&h) {
+            return id;
+        }
+        let id = self.new_id();
+        self.col_of.insert(h, id);
+        id
+    }
+}
+
+// Width, height and tab edits for the scrolling keys: metadata only, no
+// reorder. The caller retiles (and runs ensure_visible after a width change).
+impl Strip {
+    /// `h`'s column metadata, created at `default` width if it has none.
+    fn col_mut(&mut self, h: isize, default: f32) -> &mut ColMeta {
+        let id = self.col_id(h);
+        self.cols.entry(id).or_insert(ColMeta {
+            width: default,
+            tabbed: false,
+            active: h,
+            restore_width: None,
+        })
+    }
+
+    /// Any explicit width ends a full-width toggle: Alt+M after it must not
+    /// "restore" a width from before it.
+    fn set_width(&mut self, h: isize, width: f32, default: f32) {
+        let m = self.col_mut(h, default);
+        m.width = width.clamp(0.1, 1.0);
+        m.restore_width = None;
+    }
+
+    /// Alt+H / Alt+L.
+    fn adjust_width(&mut self, h: isize, delta: f32, default: f32) {
+        let cur = self.col_mut(h, default).width;
+        self.set_width(h, cur + delta, default);
+    }
+
+    /// Alt+R: the next `scroll_width_presets` entry.
+    fn cycle_width(&mut self, h: isize, presets: &[f32], default: f32) {
+        let cur = self.col_mut(h, default).width;
+        self.set_width(h, next_preset(presets, cur), default);
+    }
+
+    /// Alt+M: full width, and back to the width it had.
+    fn toggle_maximize(&mut self, h: isize, default: f32) {
+        let m = self.col_mut(h, default);
+        match m.restore_width.take() {
+            Some(w) => m.width = w,
+            None => {
+                m.restore_width = Some(m.width);
+                m.width = 1.0;
+            }
+        }
+    }
+
+    /// Alt+Shift+T. The tile it was pressed on becomes the shown tab.
+    fn toggle_tabbed(&mut self, h: isize, default: f32) {
+        let m = self.col_mut(h, default);
+        m.tabbed = !m.tabbed;
+        m.active = h;
+    }
+
+    /// Remember `h` as its column's last-focused tile (ColMeta::active).
+    fn note_focus(&mut self, h: isize) {
+        if let Some(m) = self.col_of.get(&h).and_then(|id| self.cols.get_mut(id)) {
+            m.active = h;
+        }
+    }
+
+    fn tile_weight(&self, h: isize) -> f32 {
+        self.weights
+            .get(&h)
+            .copied()
+            .filter(|w| *w > 0.0 && w.is_finite())
+            .unwrap_or(1.0)
+    }
+
+    /// `h`'s column and its share of that column's height; None when `h` is
+    /// not in the strip or alone in its column (nothing to share).
+    fn tile_share(&self, tiled: &[isize], h: isize) -> Option<(Vec<isize>, f32)> {
+        let mut cols = self.columns(tiled);
+        let (ci, _) = locate_tile(&cols, h)?;
+        let col = cols.swap_remove(ci);
+        if col.len() < 2 {
+            return None;
+        }
+        let total: f32 = col.iter().map(|&w| self.tile_weight(w)).sum();
+        let share = self.tile_weight(h) / total;
+        Some((col, share))
+    }
+
+    /// `h` takes `share` of its column (clamped 0.1..=0.9), the others split
+    /// the rest equally (Alt+Shift+R).
+    fn set_tile_height(&mut self, tiled: &[isize], h: isize, share: f32) -> bool {
+        let Some((col, _)) = self.tile_share(tiled, h) else {
+            return false;
+        };
+        let p = share.clamp(0.1, 0.9);
+        let rest = (1.0 - p) / (col.len() - 1) as f32;
+        for w in col {
+            self.weights.insert(w, if w == h { p } else { rest });
+        }
+        true
+    }
+
+    /// Alt+Shift+H / L: `h`'s share by `delta` (clamped 0.1..=0.9); the
+    /// others keep their proportions among themselves.
+    fn adjust_tile_height(&mut self, tiled: &[isize], h: isize, delta: f32) -> bool {
+        let Some((col, cur)) = self.tile_share(tiled, h) else {
+            return false;
+        };
+        let new = (cur + delta).clamp(0.1, 0.9);
+        let total: f32 = col.iter().map(|&w| self.tile_weight(w)).sum();
+        // cur < 1: at least two tiles, every weight positive.
+        let scale = (1.0 - new) / (1.0 - cur);
+        let shares: Vec<(isize, f32)> = col
+            .iter()
+            .map(|&w| {
+                let s = if w == h {
+                    new
+                } else {
+                    self.tile_weight(w) / total * scale
+                };
+                (w, s)
+            })
+            .collect();
+        self.weights.extend(shares);
+        true
+    }
+
+    /// Alt+Shift+R: the next `scroll_height_presets` entry for `h`.
+    fn cycle_tile_height(&mut self, tiled: &[isize], h: isize, presets: &[f32]) -> bool {
+        let Some((_, cur)) = self.tile_share(tiled, h) else {
+            return false;
+        };
+        self.set_tile_height(tiled, h, next_preset(presets, cur))
+    }
+}
+
+/// (column, tile) of `h` in `cols`.
+fn locate_tile(cols: &[Vec<isize>], h: isize) -> Option<(usize, usize)> {
+    cols.iter()
+        .enumerate()
+        .find_map(|(ci, c)| c.iter().position(|&w| w == h).map(|ti| (ci, ti)))
+}
+
+/// The neighbour of index `i` one step in `dir`'s direction among `len`, or
+/// None past either end (or for a zero `dir`).
+fn step(i: usize, dir: i32, len: usize) -> Option<usize> {
+    match dir.signum() {
+        -1 => i.checked_sub(1),
+        1 => (i + 1 < len).then_some(i + 1),
+        _ => None,
+    }
+}
+
+/// Rewrite the tiled windows of `windows` into `order` (the same windows,
+/// reordered), leaving every other window (floating, minimised, dead) at its
+/// index, so a column op never moves a window it does not act on.
+fn write_tiled_order(windows: &mut [isize], order: &[isize]) {
+    let mut next = order.iter();
+    for w in windows.iter_mut() {
+        if order.contains(w) {
+            if let Some(&n) = next.next() {
+                *w = n;
+            }
+        }
+    }
+}
+
+/// `scroll_center` as the geometry's enum (the parser only lets these three
+/// through).
+fn center_mode(s: &str) -> Center {
+    match s {
+        "always" => Center::Always,
+        "on-overflow" => Center::OnOverflow,
+        _ => Center::Never,
+    }
+}
+
+/// The scrolling arm of workspace_layout (pure): a screen rect per window
+/// of `tiled`, column-major, which is `tiled` order since columns are runs
+/// of it. Rects may be off-screen (PlaceMap decides peek or park). Empty on
+/// a degenerate area, which leaves every window where it is.
+fn strip_rects(
+    strip: &Strip,
+    tiled: &[isize],
+    focused: isize,
+    area: RECT,
+    cfg: &Config,
+    tab_h: i32,
+) -> Vec<RECT> {
+    strip_out(strip, tiled, focused, area, cfg, tab_h).tiles
+}
+
+/// strip_rects with the tab-bar rects too (layout::StripOut), so the tab
+/// bars sit exactly where the placement left room for them.
+fn strip_out(
+    strip: &Strip,
+    tiled: &[isize],
+    focused: isize,
+    area: RECT,
+    cfg: &Config,
+    tab_h: i32,
+) -> StripOut {
+    let scs = strip.strip_cols(&strip.columns(tiled), focused, cfg.scroll_default_width);
+    let view_w = area.right - area.left;
+    let widths: Vec<f32> = scs.iter().map(|c| c.width).collect();
+    let spans = strip_spans(view_w, &widths, cfg.outer_gap, cfg.inner_gap);
+    let offset = clamp_offset(view_w, &spans, cfg.outer_gap, strip.offset);
+    strip_layout(area, &scs, offset, cfg.outer_gap, cfg.inner_gap, tab_h)
+}
+
+/// The offset that shows the column holding `focused`, per `mode`
+/// (ensure_visible passes `scroll_center`, Alt+C Center::Always; pure). None
+/// when `focused` is not in the strip.
+fn strip_show_offset(
+    strip: &Strip,
+    tiled: &[isize],
+    focused: isize,
+    view_w: i32,
+    cfg: &Config,
+    mode: Center,
+) -> Option<i32> {
+    let cols = strip.columns(tiled);
+    let (ci, _) = locate_tile(&cols, focused)?;
+    let widths: Vec<f32> = strip
+        .strip_cols(&cols, focused, cfg.scroll_default_width)
+        .iter()
+        .map(|c| c.width)
+        .collect();
+    let spans = strip_spans(view_w, &widths, cfg.outer_gap, cfg.inner_gap);
+    Some(scroll_to_show(
+        view_w,
+        &spans,
+        cfg.outer_gap,
+        ci,
+        strip.offset,
+        mode,
+    ))
+}
+
+/// The column `n` columns over from `from` among `len`, clamped to the strip
+/// (a fast wheel spin stops at the end). With the focus outside the strip
+/// (`from` None: floating, none) n > 0 starts at the first column and n < 0
+/// at the last. None when nothing would move: an empty strip, n = 0, or
+/// already at that end, which Alt+Left/Right turns into the adjacent monitor.
+fn column_target(from: Option<usize>, n: i32, len: usize) -> Option<usize> {
+    if len == 0 || n == 0 {
+        return None;
+    }
+    let to = match from {
+        Some(c) => (c as i64 + n as i64).clamp(0, len as i64 - 1) as usize,
+        None if n > 0 => 0,
+        None => len - 1,
+    };
+    (Some(to) != from).then_some(to)
+}
+
+/// The scrolling drop zone of an Alt+left-drag released at `pt`
+/// (plan/scrolling.md "Keys"). On window `t` (rect `r`): the left quarter is
+/// a new column before it, the right quarter one after it, the middle its own
+/// column right under it. On no window: None (stay put) inside the dragged
+/// window's own slot `own`, since a drag that went nowhere must not reorder;
+/// elsewhere a new column at the strip end on that side of `view`, the work
+/// area. ponytail: a drop in the gap between two columns also goes to an end;
+/// make it "between" if that ever bites.
+fn drop_zone(
+    pt: POINT,
+    target: Option<(isize, RECT)>,
+    own: Option<RECT>,
+    view: RECT,
+) -> Option<DropAt> {
+    if let Some((t, r)) = target {
+        let q = (r.right - r.left) / 4;
+        return Some(if pt.x < r.left + q {
+            DropAt::Before(t)
+        } else if pt.x >= r.right - q {
+            DropAt::After(t)
+        } else {
+            DropAt::Below(t)
+        });
+    }
+    let inside = |o: RECT| pt.x >= o.left && pt.x < o.right && pt.y >= o.top && pt.y < o.bottom;
+    if own.is_some_and(inside) {
+        return None;
+    }
+    Some(if pt.x < (view.left + view.right) / 2 {
+        DropAt::First
+    } else {
+        DropAt::Last
+    })
+}
+
+/// How far an Alt+right-drag edge must move to count: a vertical drag rarely
+/// keeps x exact, and a stray pixel would pin the column's width.
+const RESIZE_SLOP_PX: i32 = 2;
+
+/// What an Alt+right-drag release changed on a strip tile: its new visible
+/// width and height, each None when that size moved by RESIZE_SLOP_PX or
+/// less. `released` and `placed` are window rects (invisible resize borders
+/// included), `slot` the visible frame the layout gave the tile. Pure.
+fn strip_resize(released: RECT, placed: RECT, slot: RECT) -> (Option<i32>, Option<i32>) {
+    let dw = (released.right - released.left) - (placed.right - placed.left);
+    let dh = (released.bottom - released.top) - (placed.bottom - placed.top);
+    let pick = |d: i32, cur: i32| (d.abs() > RESIZE_SLOP_PX).then_some(cur + d);
+    (
+        pick(dw, slot.right - slot.left),
+        pick(dh, slot.bottom - slot.top),
+    )
+}
+
+/// The bar's layout text on a scrolling monitor: the focused column's
+/// position, `scrolling 2/5`; `-` when the focus is not in the strip.
+fn scroll_label(focus_col: Option<usize>, cols: usize) -> String {
+    match focus_col {
+        Some(ci) => format!("scrolling {}/{cols}", ci + 1),
+        None if cols > 0 => format!("scrolling -/{cols}"),
+        None => "scrolling".to_string(),
+    }
+}
+
+/// The scrolling actions of `extra_hotkeys` and the IPC (plan/scrolling.md
+/// "Keys"): one list for both.
+fn scroll_action(name: &str) -> Option<Cmd> {
+    Some(match name {
+        "focus_column_left" => Cmd::ScrollFocus(-1),
+        "focus_column_right" => Cmd::ScrollFocus(1),
+        "move_column_left" => Cmd::ScrollMove(-1),
+        "move_column_right" => Cmd::ScrollMove(1),
+        "cycle_width" => Cmd::CycleWidth,
+        "cycle_height" => Cmd::CycleHeight,
+        "center_column" => Cmd::CenterColumn,
+        "consume_left" => Cmd::ConsumeOrExpel(-1),
+        "consume_right" => Cmd::ConsumeOrExpel(1),
+        "toggle_tabbed" => Cmd::ToggleTabbed,
+        "maximize_column" => Cmd::MaximizeColumn,
+        "first_column" => Cmd::ColumnEdge {
+            last: false,
+            carry: false,
+        },
+        "last_column" => Cmd::ColumnEdge {
+            last: true,
+            carry: false,
+        },
+        _ => return None,
+    })
 }
 
 /// One physical display: its own workspaces, tiled on its own work area.
 struct Monitor {
     hmon: isize,     // HMONITOR (raw) — identity across enumerations
+    full: RECT,      // whole monitor (rcMonitor): off-screen tests need it, not the work area
     base_work: RECT, // taskbar-excluded area, before the bar is subtracted
     work_area: RECT, // tiling area (base_work minus the status bar)
     workspaces: Vec<Workspace>,
     active: usize, // index of the currently-shown workspace
+    // This monitor's layout (one of config::LAYOUTS), set by resolve_layouts
+    // and changed at runtime by Cmd::SetLayout.
+    layout: String,
 }
 
 impl Monitor {
@@ -2949,12 +3988,33 @@ impl Monitor {
         }
         Monitor {
             hmon,
+            full: work_area,
             base_work: work_area,
             work_area,
             workspaces,
             active: 0,
+            layout: String::new(),
         }
     }
+}
+
+/// Give every monitor its layout: a monitor whose HMONITOR is in `keep` keeps
+/// the layout it has there (a runtime switch survives a display change); any
+/// other resolves from config by position (index 0 = monitor 1 = leftmost,
+/// the window-rule numbering). True when any monitor's layout changed.
+fn resolve_layouts(monitors: &mut [Monitor], cfg: &Config, keep: &[Monitor]) -> bool {
+    let mut changed = false;
+    for (i, m) in monitors.iter_mut().enumerate() {
+        let layout = keep
+            .iter()
+            .find(|k| k.hmon == m.hmon)
+            .map_or_else(|| cfg.layout_for_monitor(i), |k| k.layout.as_str());
+        if m.layout != layout {
+            m.layout = layout.to_string();
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// One queued switch command, resolved against a burst's virtual state.
@@ -3131,26 +4191,50 @@ impl Manager {
     /// sites, and two of them forgot `floating` — so `Alt+Shift+3` on a floating
     /// window silently re-tiled it (review B-07). Membership changes go through
     /// here or through `move_window`; nothing else touches `windows`/`floating`.
+    ///
+    /// On a scrolling monitor focus passes to h's strip neighbour
+    /// (`Workspace::focus_after_removal`) and the strip scrolls to keep it in
+    /// view; the caller retiles.
     fn detach_window(&mut self, h: isize) -> Option<(usize, usize, bool)> {
         let (mi, wi) = self.locate(h)?;
+        let scrolling = self.monitors.get(mi)?.layout == "scrolling";
         let ws = self.monitors.get_mut(mi)?.workspaces.get_mut(wi)?;
         let was_floating = ws.floating.contains(&h);
+        // Read before h leaves. h counts as tiled even when it is already
+        // destroyed (Cmd::Remove runs after the fact).
+        let next = if scrolling && ws.focused == h && !was_floating {
+            let live = unsafe { tiled_windows(ws) };
+            let tiled: Vec<isize> = ws
+                .windows
+                .iter()
+                .copied()
+                .filter(|w| *w == h || live.contains(w))
+                .collect();
+            ws.focus_after_removal(&tiled, h)
+        } else {
+            None
+        };
         ws.windows.retain(|&x| x != h);
         ws.floating.retain(|&x| x != h);
+        ws.strip.forget(h);
         if ws.focused == h {
-            ws.focused = ws.windows.first().copied().unwrap_or(0);
+            ws.focused = next.unwrap_or_else(|| ws.windows.first().copied().unwrap_or(0));
+        }
+        if scrolling {
+            unsafe { ensure_visible(self, mi, wi) };
         }
         Some((mi, wi, was_floating))
     }
 
     /// Move `h` to (`to_mi`, `to_wi`), CARRYING its floating flag, and give it
-    /// that workspace's focus. `at` inserts before that tiled index (used when a
-    /// drag is dropped onto a specific window); `None` appends.
+    /// that workspace's focus. `at` is where it lands (a drag dropped onto a
+    /// window or a scrolling drop zone, see insert_window); `None` is the
+    /// default (the end, or right of the focused column on scrolling).
     ///
     /// Returns false when the window is untracked or the destination does not
     /// exist — in which case nothing is changed, so a caller can never lose a
     /// window by moving it somewhere invalid.
-    fn move_window(&mut self, h: isize, to_mi: usize, to_wi: usize, at: Option<usize>) -> bool {
+    fn move_window(&mut self, h: isize, to_mi: usize, to_wi: usize, at: Option<DropAt>) -> bool {
         if self
             .monitors
             .get(to_mi)
@@ -3162,16 +4246,43 @@ impl Manager {
         let Some((_, _, was_floating)) = self.detach_window(h) else {
             return false;
         };
-        let ws = &mut self.monitors[to_mi].workspaces[to_wi];
-        match at.filter(|&i| i <= ws.windows.len()) {
-            Some(i) => ws.windows.insert(i, h),
-            None => ws.windows.push(h),
+        self.insert_window(h, to_mi, to_wi, at, was_floating);
+        true
+    }
+
+    /// Add `h` (in no workspace) to (`mi`, `wi`), which must exist, and give
+    /// it that workspace's focus: the one way a window joins a workspace
+    /// (Cmd::Add, move_window). On a scrolling monitor a tiled window goes
+    /// where a drop zone in `at` says, else becomes a new column right of the
+    /// focused column (plan/scrolling.md "Defaults"), scrolled into view
+    /// either way; elsewhere it goes before `windows` index `at`, or at the
+    /// end.
+    fn insert_window(
+        &mut self,
+        h: isize,
+        mi: usize,
+        wi: usize,
+        at: Option<DropAt>,
+        floating: bool,
+    ) {
+        let scrolling = !floating && self.monitors[mi].layout == "scrolling";
+        let ws = &mut self.monitors[mi].workspaces[wi];
+        if scrolling {
+            let tiled = unsafe { tiled_windows(ws) };
+            ws.insert_in_strip(&tiled, h, at);
+        } else {
+            match at {
+                Some(DropAt::Index(i)) if i <= ws.windows.len() => ws.windows.insert(i, h),
+                _ => ws.windows.push(h),
+            }
         }
-        if was_floating {
+        if floating {
             ws.floating.push(h);
         }
         ws.focused = h;
-        true
+        if scrolling {
+            unsafe { ensure_visible(self, mi, wi) };
+        }
     }
 
     /// The focused window of the focused monitor's active workspace (0 = none),
@@ -3187,6 +4298,18 @@ impl Manager {
             .map(|ws| ws.focused)
             .unwrap_or(0);
         (mi, a, h)
+    }
+
+    /// The scrolling monitor whose full rect holds (x, y): the strip an
+    /// Alt+wheel there scrolls (Cmd::ScrollWheel).
+    fn scroll_mon_at(&self, x: i32, y: i32) -> Option<usize> {
+        self.monitors.iter().position(|m| {
+            m.layout == "scrolling"
+                && x >= m.full.left
+                && x < m.full.right
+                && y >= m.full.top
+                && y < m.full.bottom
+        })
     }
 }
 
@@ -3312,6 +4435,7 @@ const BLOCK_CLASSES: &[&str] = &[
     "astur_marker",
     "astur_bar",
     "astur_slide",
+    "astur_tabs",
 ];
 
 /// Is an already-tracked handle still worth re-homing on a display change?
@@ -3554,17 +4678,9 @@ unsafe fn adjust_for_border(hwnd: HWND, target: RECT) -> RECT {
         if GetWindowRect(hwnd, &mut wr).is_err() {
             return target;
         }
-        let mut fr = RECT::default();
-        let ok = DwmGetWindowAttribute(
-            hwnd,
-            DWMWA_EXTENDED_FRAME_BOUNDS,
-            &mut fr as *mut _ as *mut c_void,
-            core::mem::size_of::<RECT>() as u32,
-        )
-        .is_ok();
-        if !ok {
+        let Some(fr) = frame_bounds(hwnd) else {
             return target;
-        }
+        };
         if let Some((lp, tp, rp, bp)) = bounded_insets(
             fr.left - wr.left,
             fr.top - wr.top,
@@ -3603,6 +4719,21 @@ unsafe fn adjust_for_border(hwnd: HWND, target: RECT) -> RECT {
     target
 }
 
+/// The window's visible frame (DWMWA_EXTENDED_FRAME_BOUNDS): GetWindowRect
+/// without the invisible resize borders, and exactly what a DWM thumbnail
+/// shows. Valid while the window is hidden or parked too.
+unsafe fn frame_bounds(hwnd: HWND) -> Option<RECT> {
+    let mut fr = RECT::default();
+    DwmGetWindowAttribute(
+        hwnd,
+        DWMWA_EXTENDED_FRAME_BOUNDS,
+        &mut fr as *mut _ as *mut c_void,
+        core::mem::size_of::<RECT>() as u32,
+    )
+    .ok()?;
+    Some(fr)
+}
+
 /// Largest invisible-border inset (logical px) the border correction trusts.
 /// Real frames are about 7-8 px at 100% on Windows 10 and 11.
 const BORDER_INSET_MAX: i32 = 16;
@@ -3635,19 +4766,22 @@ unsafe extern "system" fn monitor_enum_proc(
     _rc: *mut RECT,
     lparam: LPARAM,
 ) -> BOOL {
-    let v = &mut *(lparam.0 as *mut Vec<(isize, i32, RECT)>);
+    let v = &mut *(lparam.0 as *mut Vec<(isize, RECT, RECT)>);
     let mut mi = MONITORINFO {
         cbSize: core::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-        v.push((hmon.0 as isize, mi.rcMonitor.left, mi.rcWork));
+        v.push((hmon.0 as isize, mi.rcMonitor, mi.rcWork));
     }
     BOOL(1)
 }
 
+/// Every monitor sorted left-to-right, each with one placeholder workspace
+/// (distribute_workspaces sets the real counts) and no layout yet
+/// (resolve_layouts).
 unsafe fn enumerate_monitors() -> Vec<Monitor> {
-    let mut raw: Vec<(isize, i32, RECT)> = Vec::new();
+    let mut raw: Vec<(isize, RECT, RECT)> = Vec::new();
     let _ = EnumDisplayMonitors(
         None,
         None,
@@ -3655,12 +4789,16 @@ unsafe fn enumerate_monitors() -> Vec<Monitor> {
         LPARAM(&mut raw as *mut _ as isize),
     );
     if raw.is_empty() {
-        raw.push((0, 0, work_area_at(POINT { x: 0, y: 0 })));
+        let wa = work_area_at(POINT { x: 0, y: 0 });
+        raw.push((0, wa, wa));
     }
-    raw.sort_by_key(|m| m.1); // left-to-right
-                              // One placeholder workspace each; distribute_workspaces sets the real counts.
+    raw.sort_by_key(|m| m.1.left); // left-to-right
     raw.into_iter()
-        .map(|(h, _, wa)| Monitor::new(h, wa, 1))
+        .map(|(h, full, wa)| {
+            let mut m = Monitor::new(h, wa, 1);
+            m.full = full;
+            m
+        })
         .collect()
 }
 
@@ -4164,12 +5302,7 @@ unsafe fn ipc_dispatch(line: &str) -> String {
         "toggle_tiling" => push_cmd(Cmd::ToggleTiling),
         "toggle_float" => push_cmd(Cmd::ToggleFloat),
         "close" => push_cmd(Cmd::CloseFocused),
-        "layout"
-            if matches!(
-                argument.as_str(),
-                "dwindle" | "master" | "columns" | "grid" | "monocle"
-            ) =>
-        {
+        "layout" if config::LAYOUTS.contains(&argument.as_str()) => {
             push_cmd(Cmd::SetLayout(argument));
         }
         "scratchpad" => push_cmd(Cmd::ToggleScratchpad),
@@ -4206,9 +5339,13 @@ unsafe fn ipc_dispatch(line: &str) -> String {
             );
         }
         "help" => {
-            return "ok switch move focus_next focus_prev toggle_tiling toggle_float close layout scratchpad terminal browser launcher system_menu reload launch status\n".to_string();
+            return "ok switch move focus_next focus_prev toggle_tiling toggle_float close layout scratchpad terminal browser launcher system_menu reload launch status focus_column_left focus_column_right move_column_left move_column_right cycle_width cycle_height center_column consume_left consume_right toggle_tabbed maximize_column first_column last_column\n".to_string();
         }
-        _ => return "error unknown command; send help\n".to_string(),
+        // The scrolling actions, the same list as extra_hotkeys.
+        other => match scroll_action(other) {
+            Some(cmd) => push_cmd(cmd),
+            None => return "error unknown command; send help\n".to_string(),
+        },
     }
     "ok\n".to_string()
 }
@@ -4322,7 +5459,32 @@ unsafe fn unstyle_window(hwnd: HWND) {
     );
 }
 
+/// Set by the first exit restore (`restore_windows`) and never cleared: every
+/// caller exits right after it (a cancellable WM_QUERYENDSESSION restores
+/// nothing, see `exit_restore_msg`). From then on the manager drops every
+/// command, and set_pos_raw / switch_plain refuse, so nothing re-parks or
+/// re-hides a window the restore just brought back.
+static EXITING: AtomicBool = AtomicBool::new(false);
+
+/// True while the manager runs a command. With EXITING a Dekker pair, both
+/// SeqCst: the manager sets this then reads EXITING, `restore_all_windows`
+/// sets EXITING then reads this, so either the command is dropped or the
+/// restore waits for it to finish.
+static MGR_BUSY: AtomicBool = AtomicBool::new(false);
+
 unsafe fn restore_windows(list: &[isize]) {
+    EXITING.store(true, Ordering::SeqCst);
+    // The panic path never blocks: it may have fired while this thread held
+    // the lock. A graceful exit does wait (briefly; nothing holds it across a
+    // window call), or a manager placing at that moment would leave the map
+    // empty and an in-flight park would read as on screen.
+    let sent = if std::thread::panicking() {
+        LAST_SENT.try_lock().ok()
+    } else {
+        LAST_SENT.lock().ok()
+    }
+    .and_then(|g| g.clone())
+    .unwrap_or_default();
     SUPPRESS.store(true, Ordering::Relaxed);
     for &h in list {
         let hwnd = hwnd_from(h);
@@ -4330,18 +5492,173 @@ unsafe fn restore_windows(list: &[isize]) {
             continue;
         }
         unmark_hidden_by_us(h);
-        let _ = ShowWindow(hwnd, SW_SHOW);
-        // Undo dimming, the layered style and the border. Positions untouched.
+        // SHOWNA, as switch_plain: SW_SHOW activated every hidden window it
+        // showed (SWITCH-4), one FOREGROUND event each, and the manager
+        // followed the last one to its workspace, hiding the rest again.
+        let _ = ShowWindow(hwnd, SW_SHOWNA);
+        // Undo dimming, the layered style and the border.
         unstyle_window(hwnd);
+        // Positions stay, except a parked scrolling tile's: it sits outside
+        // every monitor and comes back onto the nearest one.
+        unpark_window(h, sent.get(&h).copied());
     }
     SUPPRESS.store(false, Ordering::Relaxed);
 }
 
+/// `r` moved, and shrunk only where it does not fit, to lie inside `area`:
+/// a rescued window keeps its size and lands as near its old spot as it can.
+fn clamp_into(r: RECT, area: RECT) -> RECT {
+    let w = (r.right - r.left).min(area.right - area.left);
+    let h = (r.bottom - r.top).min(area.bottom - area.top);
+    // min then max, not clamp: no panic whatever the OS reports.
+    let left = r.left.min(area.right - w).max(area.left);
+    let top = r.top.min(area.bottom - h).max(area.top);
+    RECT {
+        left,
+        top,
+        right: left + w,
+        bottom: top + h,
+    }
+}
+
+/// GetMonitorInfoW of the monitor nearest `r`.
+unsafe fn nearest_monitor_info(r: &RECT) -> Option<MONITORINFO> {
+    let mut mi = MONITORINFO {
+        cbSize: core::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    GetMonitorInfoW(MonitorFromRect(r, MONITOR_DEFAULTTONEAREST), &mut mi)
+        .as_bool()
+        .then_some(mi)
+}
+
+/// Bring a window that sits on no monitor (a parked scrolling tile) back
+/// onto the nearest monitor's work area, size kept where it fits. Win32 only,
+/// no Astur lock or state, so every exit path can call it, the panic hook
+/// included. `sent` is the rect Astur last sent the window, when known: a
+/// posted park move still in flight reads as on screen until it lands, and
+/// the move made here is posted behind it (foreign_swp_flags) so it lands
+/// last. A minimised or maximised window keeps its state but gets an on-screen
+/// restore rect, or restoring it later would put it back off screen. True when it
+/// moved the window. Manager-thread callers use unpark_tracked: this move
+/// bypasses set_pos_raw.
+unsafe fn unpark_window(h: isize, sent: Option<RECT>) -> bool {
+    let hwnd = hwnd_from(h);
+    if !IsWindow(hwnd).as_bool() {
+        return false;
+    }
+    let off = |r: &RECT| MonitorFromRect(r, MONITOR_DEFAULTTONULL).0.is_null();
+    let iconic = IsIconic(hwnd).as_bool();
+    // A maximised window already sits on a monitor; moving it would leave
+    // WS_MAXIMIZE on a non-maximised rect and its restore rect parked.
+    if iconic || IsZoomed(hwnd).as_bool() {
+        let mut wp = WINDOWPLACEMENT {
+            length: core::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        // rcNormalPosition is in workspace coordinates, a taskbar's width
+        // off screen ones at most; a park spot clears every monitor by far
+        // more (layout::PARK_MARGIN), so the test holds in either.
+        if GetWindowPlacement(hwnd, &mut wp).is_err() || !off(&wp.rcNormalPosition) {
+            return false;
+        }
+        let Some(mi) = nearest_monitor_info(&wp.rcNormalPosition) else {
+            return false;
+        };
+        let tool = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_TOOLWINDOW.0 != 0;
+        let work_off = (
+            mi.rcWork.left - mi.rcMonitor.left,
+            mi.rcWork.top - mi.rcMonitor.top,
+        );
+        let screen = placement_to_workspace(wp.rcNormalPosition, (-work_off.0, -work_off.1), tool);
+        wp.rcNormalPosition = placement_to_workspace(clamp_into(screen, mi.rcWork), work_off, tool);
+        // Only the restore rect changes. SW_SHOWMINNOACTIVE would SHOW a hidden
+        // (inactive workspace, float mode, untracked) window onto the taskbar;
+        // SW_HIDE on a window already hidden is a no-op that keeps its state.
+        // SW_SHOWNA keeps a visible maximised one maximised and inactive.
+        wp.showCmd = if !IsWindowVisible(hwnd).as_bool() {
+            SW_HIDE.0
+        } else if iconic {
+            SW_SHOWMINNOACTIVE.0
+        } else {
+            SW_SHOWNA.0
+        } as u32;
+        return SetWindowPlacement(hwnd, &wp).is_ok();
+    }
+    let mut live = RECT::default();
+    if GetWindowRect(hwnd, &mut live).is_err() {
+        return false;
+    }
+    let from = match sent {
+        Some(s) if off(&s) => s,
+        _ if off(&live) => live,
+        _ => return false,
+    };
+    let Some(mi) = nearest_monitor_info(&from) else {
+        return false;
+    };
+    let to = clamp_into(from, mi.rcWork);
+    SetWindowPos(
+        hwnd,
+        None,
+        to.left,
+        to.top,
+        to.right - to.left,
+        to.bottom - to.top,
+        foreign_swp_flags(
+            SWP_NOACTIVATE | SWP_NOZORDER,
+            ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+        ),
+    )
+    .is_ok()
+}
+
+/// unpark_window from the manager thread: with the last-sent rect, which it
+/// forgets once the window moved (the move bypassed set_pos_raw, see
+/// LAST_SENT).
+unsafe fn unpark_tracked(h: isize) -> bool {
+    let sent = LAST_SENT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&h).copied());
+    let moved = unpark_window(h, sent);
+    if moved {
+        last_sent_forget(h);
+    }
+    moved
+}
+
+/// unpark_tracked for every tracked window, hidden ones included (moving a
+/// hidden window shows nothing).
+unsafe fn unpark_all(mgr: &Manager) {
+    for m in &mgr.monitors {
+        for ws in &m.workspaces {
+            for &h in &ws.windows {
+                unpark_tracked(h);
+            }
+        }
+    }
+}
+
 unsafe fn restore_all_windows() {
+    // Stop the manager first, then let a command already running finish: a
+    // retile or switch landing after the restore re-parked or re-hid what it
+    // brought back. Bounded, so a manager blocked on a hung app (or on this
+    // thread's windows) cannot hold the exit; set_pos_raw and switch_plain
+    // refuse once EXITING is set, which covers a command that outlives it.
+    EXITING.store(true, Ordering::SeqCst);
+    let deadline = Instant::now() + std::time::Duration::from_millis(500);
+    while MGR_BUSY.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
     let list = MANAGED.lock().unwrap().clone();
     restore_windows(&list);
     // Everything is visible again — nothing left for the crash-rescue pass.
-    let _ = std::fs::remove_file(rescue_file());
+    rescue_remove_now();
+    // A command that outlived the wait above may still persist: it must
+    // write the file again, not skip it as unchanged.
+    LAST_RESCUE_HASH.store(0, Ordering::Relaxed);
     // Every graceful exit route funnels through here (tray Quit, Ctrl+C, End
     // task, logoff, the panic hook), so it is also where the system-wide
     // foreground-lock setting goes back to what the user had.
@@ -4365,30 +5682,103 @@ unsafe extern "system" fn console_handler(_ctrl_type: u32) -> BOOL {
     BOOL(0) // not fully handled — let the default handler terminate us
 }
 
-/// Place a window at `target` immediately. Restores minimised/maximised windows
-/// first and border-corrects the resting rect so the visible edges sit flush.
+/// Place a window at `target` (a raw layout slot) immediately. Restores
+/// minimised/maximised windows first, then maps the slot through `map`
+/// (border correction, peek/park) so the visible edges sit flush.
 /// (Named `animate_to` for historical reasons; placement is now always instant.)
-unsafe fn animate_to(hwnd: HWND, target: RECT) {
+unsafe fn animate_to(hwnd: HWND, target: RECT, map: &PlaceMap) {
     if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
         let _ = ShowWindow(hwnd, SW_RESTORE);
     }
-    let to = adjust_for_border(hwnd, target);
-    set_pos_raw(hwnd.0 as isize, to);
+    place_slot(hwnd.0 as isize, target, map);
 }
 
-/// Compute the tiled (hwnd, screen-rect) targets for one workspace, in tiling
-/// order — shared by retiling and the slide compositor. Rects are raw layout
-/// rects (not yet border-corrected); callers adjust as needed.
-unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, RECT)> {
-    if mi >= mgr.monitors.len() {
-        return Vec::new();
+/// The raw layout slot of each tile's last placement: the visible frame
+/// Astur put it at, on a scrolling monitor a strip rect that may lie off
+/// screen. The motion compositor starts a PARKED tile from here, since its
+/// real rect is a park spot far from where it scrolls in. Manager thread
+/// only (the mutex is for the static); pruned with LAST_SENT in
+/// sync_managed.
+static LAST_SLOT: Mutex<Option<HashMap<isize, RECT>>> = Mutex::new(None);
+
+/// `h`'s slot is no longer what it shows (resized by a drag, floated): its
+/// next motion is judged on its frame alone. A kept slot would read as an app
+/// refusing its size (Static, motion_kind) and jump at the reveal instead of
+/// morphing.
+fn slot_forget(h: isize) {
+    if let Some(slots) = LAST_SLOT.lock().unwrap().as_mut() {
+        slots.remove(&h);
     }
-    let mon = &mgr.monitors[mi];
-    let Some(ws) = mon.workspaces.get(wi) else {
-        return Vec::new();
-    };
-    let tiled: Vec<isize> = ws
-        .windows
+}
+
+/// Windows whose DWM surface holds what they show ("warm"): placed on screen
+/// (Full or Peek) while shown since they were last hidden or minimised. DWM
+/// drops a window's surface on SW_HIDE and minimise, and a window shown or
+/// created at a park spot never repaints it, so a thumbnail of a COLD parked
+/// tile is blank white (plan/animations.md, measured). One parked by a move
+/// keeps its last frame and stays warm (an inactive tab, a column scrolled
+/// off). Absent = cold, so an unknown window is never thumbnailed blank: a
+/// false cold costs a snapshot, a false warm a white slide. Manager thread
+/// only (a static because placement takes `&Manager`, like LAST_SLOT);
+/// pruned in sync_managed.
+static WARM: Mutex<Option<std::collections::HashSet<isize>>> = Mutex::new(None);
+
+/// `h` was placed on screen while shown: it paints there, so its surface is
+/// current again and any snapshot of it is not needed any more.
+// ponytail: warm from the placement on, not from the first paint (~11 ms
+// later for a trivial app). A cold column placed on screen and parked again
+// before it painted reads warm and would slide in blank; mark warm from a
+// later look at its frame if that shows.
+fn warm_note(h: isize) {
+    let newly = WARM
+        .lock()
+        .unwrap()
+        .get_or_insert_with(Default::default)
+        .insert(h);
+    if newly {
+        cold_evict(h);
+    }
+}
+
+/// `h` is cold from now on (hidden, minimised). A snapshot of it predates
+/// that and goes too, whether or not it was warm.
+fn warm_forget(h: isize) {
+    if let Some(s) = WARM.lock().unwrap().as_mut() {
+        s.remove(&h);
+    }
+    cold_evict(h);
+}
+
+fn is_warm(h: isize) -> bool {
+    WARM.lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|s| s.contains(&h))
+}
+
+/// Send tile `h` to its layout slot `raw` through `map` (call it after any
+/// SW_RESTORE, see PlaceMap::target) and remember the slot (LAST_SLOT). The
+/// one placement step of every path that places tiles. Returns the rect sent.
+/// A visible tile it puts on screen becomes warm (WARM).
+unsafe fn place_slot(h: isize, raw: RECT, map: &PlaceMap) -> RECT {
+    let to = map.target(h, raw);
+    LAST_SLOT
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(h, raw);
+    set_pos_raw(h, to);
+    if !map.parks(h, raw) && IsWindowVisible(hwnd_from(h)).as_bool() {
+        warm_note(h);
+    }
+    to
+}
+
+/// The windows workspace_layout tiles, in order: alive, not floating, not
+/// minimised. A scrolling column is a run of these (Strip), so every strip
+/// op takes this list.
+unsafe fn tiled_windows(ws: &Workspace) -> Vec<isize> {
+    ws.windows
         .iter()
         .copied()
         // Skip dead HWNDs: if a window was destroyed but its EVENT_OBJECT_DESTROY was
@@ -4399,12 +5789,140 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
                 && !ws.floating.contains(h)
                 && !IsIconic(hwnd_from(*h)).as_bool()
         })
-        .collect();
+        .collect()
+}
+
+/// The peek/park step of placement (plan/scrolling.md "Placement"), built
+/// once per pass over one workspace so every path that places tiles (retile,
+/// workspace reveal, hidden layout, cursor warp) maps them the same way. Off
+/// a scrolling monitor it is the border correction alone.
+#[derive(Default)]
+struct PlaceMap {
+    own: Option<RECT>,  // the monitor's full rect; None = not scrolling
+    others: Vec<RECT>,  // every other monitor's full rect
+    all: Vec<RECT>,     // every monitor's full rect
+    hidden: Vec<isize>, // inactive tabs: parked whatever their rect
+}
+
+impl PlaceMap {
+    unsafe fn new(mgr: &Manager, mi: usize, wi: usize) -> Self {
+        let Some(mon) = mgr.monitors.get(mi).filter(|m| m.layout == "scrolling") else {
+            return PlaceMap::default();
+        };
+        let all: Vec<RECT> = mgr.monitors.iter().map(|m| m.full).collect();
+        PlaceMap {
+            own: Some(mon.full),
+            others: all
+                .iter()
+                .enumerate()
+                .filter(|&(i, _)| i != mi)
+                .map(|(_, &r)| r)
+                .collect(),
+            all,
+            hidden: mon
+                .workspaces
+                .get(wi)
+                .map(|ws| ws.strip.hidden_tabs(&tiled_windows(ws), ws.focused))
+                .unwrap_or_default(),
+        }
+    }
+
+    /// Does `h`'s layout slot `raw` go to a park spot? Judged on the raw
+    /// rect, the visible frame. The border-corrected rect is a few px wider,
+    /// and its invisible edge reaching a neighbour monitor is no bleed: with
+    /// outer_gap 0 it would park every edge column of a side-by-side pair.
+    fn parks(&self, h: isize, raw: RECT) -> bool {
+        self.vis(h, raw) == Vis::Park
+    }
+
+    /// Full, Peek or Park for `h`'s slot `raw` (an inactive tab parks). Off a
+    /// scrolling monitor every tile is Full.
+    fn vis(&self, h: isize, raw: RECT) -> Vis {
+        match self.own {
+            Some(_) if self.hidden.contains(&h) => Vis::Park,
+            Some(own) => classify(raw, own, &self.others),
+            None => Vis::Full,
+        }
+    }
+
+    /// The rect a placement sends `h` for its layout slot `raw`:
+    /// border-corrected, then moved to a park spot when it parks, size kept so
+    /// coming back is a pure move. Call it after any SW_RESTORE: a maximised
+    /// window's border insets differ from a restored one's.
+    unsafe fn target(&self, h: isize, raw: RECT) -> RECT {
+        let to = adjust_for_border(hwnd_from(h), raw);
+        match self.own {
+            Some(own) if self.parks(h, raw) => park_rect(to, own, &self.all),
+            _ => to,
+        }
+    }
+}
+
+/// `r` moved to its park spot outside every monitor in `all`, owned by `own`
+/// (layout::park_spot), size kept.
+fn park_rect(r: RECT, own: RECT, all: &[RECT]) -> RECT {
+    let (w, h) = (r.right - r.left, r.bottom - r.top);
+    let (x, y) = park_spot(w, h, own, all);
+    RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    }
+}
+
+/// Scroll (mi, wi)'s strip so its focused column shows, per `scroll_center`.
+/// Model only: the caller retiles. A no-op off scrolling monitors and when
+/// the focus is not in the strip (floating, minimised, none).
+unsafe fn ensure_visible(mgr: &mut Manager, mi: usize, wi: usize) {
+    let Some(mon) = mgr.monitors.get_mut(mi).filter(|m| m.layout == "scrolling") else {
+        return;
+    };
+    let view_w = mon.work_area.right - mon.work_area.left;
+    let Some(ws) = mon.workspaces.get_mut(wi) else {
+        return;
+    };
+    let mode = center_mode(&mgr.cfg.scroll_center);
+    if let Some(off) = strip_show_offset(
+        &ws.strip,
+        &tiled_windows(ws),
+        ws.focused,
+        view_w,
+        &mgr.cfg,
+        mode,
+    ) {
+        ws.strip.offset = off;
+    }
+}
+
+/// ensure_visible on every monitor's active workspace: after anything that
+/// changes the view width or the column widths under a strip (startup,
+/// reload, display and work-area changes).
+unsafe fn ensure_visible_all(mgr: &mut Manager) {
+    for mi in 0..mgr.monitors.len() {
+        let a = mgr.monitors[mi].active;
+        ensure_visible(mgr, mi, a);
+    }
+}
+
+/// Compute the tiled (hwnd, screen-rect) targets for one workspace, in tiling
+/// order — shared by retiling and the slide compositor. Rects are raw layout
+/// rects: not yet border-corrected and, on a scrolling monitor, strip rects
+/// that may lie off-screen. Every placement maps them through PlaceMap.
+unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, RECT)> {
+    if mi >= mgr.monitors.len() {
+        return Vec::new();
+    }
+    let mon = &mgr.monitors[mi];
+    let Some(ws) = mon.workspaces.get(wi) else {
+        return Vec::new();
+    };
+    let tiled = tiled_windows(ws);
     let n = tiled.len();
     if n == 0 {
         return Vec::new();
     }
-    let rects = match mgr.cfg.layout.as_str() {
+    let rects = match mon.layout.as_str() {
         "master" => master_stack(
             mon.work_area,
             n,
@@ -4415,6 +5933,14 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
         "columns" => columns_layout(mon.work_area, n, mgr.cfg.outer_gap, mgr.cfg.inner_gap),
         "grid" => grid_layout(mon.work_area, n, mgr.cfg.outer_gap, mgr.cfg.inner_gap),
         "monocle" => monocle_layout(mon.work_area, n, mgr.cfg.outer_gap),
+        "scrolling" => strip_rects(
+            &ws.strip,
+            &tiled,
+            ws.focused,
+            mon.work_area,
+            &mgr.cfg,
+            dpi_px(mgr.cfg.tab_bar_height, monitor_dpi(mon.hmon)),
+        ),
         _ => dwindle_layout(
             mon.work_area,
             n,
@@ -4430,176 +5956,440 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
 }
 
 /// Tile a single monitor's active workspace on that monitor's work area,
-/// animating windows to their targets (glide) when animations are on.
+/// animating windows to their targets (the motion compositor) when
+/// animations are on.
 unsafe fn retile_monitor(mgr: &Manager, mi: usize) {
     retile_monitor_opts(mgr, mi, false);
 }
 
-/// Shared placement entry. Drag drops force direct placement; capturing before
-/// their posted final position lands would animate stale pixels.
+/// A drop's animated retile of monitor `mi`. Layouts the drag deferred on the
+/// other monitors (RETILE_AFTER_DRAG) are placed first, instantly: the main
+/// loop's replay would otherwise cancel this motion right after its
+/// handshake. This retile lays out `mi`'s current state, deferred changes
+/// included.
+unsafe fn retile_drop(mgr: &Manager, mi: usize) {
+    if RETILE_AFTER_DRAG.swap(false, Ordering::Relaxed) {
+        for o in (0..mgr.monitors.len()).filter(|&o| o != mi) {
+            retile_monitor_opts(mgr, o, true);
+        }
+    }
+    retile_monitor(mgr, mi);
+}
+
+/// Shared placement entry. `force_instant` places without a motion: the
+/// source of a cross-monitor move (one motion runs at a time, and the
+/// destination's is the one that shows the window), every monitor but the
+/// focused one in retile_all, and the replay of layouts a drag deferred
+/// (retile_drop, the main loop). A drop itself animates: the motion starts from
+/// the live frames, so a posted drop rect still in flight costs at most one
+/// drag sample at frame 0.
 unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
-    // A new layout must never remain hidden beneath an obsolete glide.
-    let generation = cancel_glide();
+    // Every way out without a motion cancels the running one first: a new
+    // layout must never remain hidden beneath an obsolete overlay.
     if ANY_DRAG.load(Ordering::Relaxed) || NATIVE_DRAG.load(Ordering::Relaxed) != 0 {
+        cancel_glide();
         RETILE_AFTER_DRAG.store(true, Ordering::Relaxed);
         return;
     }
     if !mgr.tiling {
+        cancel_glide();
         return;
     }
-    let rects = workspace_layout(mgr, mi, mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0));
+    let Some(mon) = mgr.monitors.get(mi) else {
+        return;
+    };
+    let wi = mon.active;
+    let rects = workspace_layout(mgr, mi, wi);
     if rects.is_empty() {
+        cancel_glide();
         return;
     }
+    let animate = !force_instant
+        && glide_enabled(&mgr.cfg)
+        && !SLIDE_BUSY.load(Ordering::Acquire)
+        && !ANY_DRAG.load(Ordering::Relaxed);
+    // A motion still running on THIS monitor is re-aimed in place (its
+    // overlay is up, so this layout's windows land under it); any other is
+    // cancelled, and this one waits (bounded) for its teardown rather than
+    // stack a second overlay (GLIDE_BUSY stays set until that teardown).
+    let reaim = animate && motion_on(mon.hmon);
+    let generation = if reaim {
+        GLIDE_GENERATION.load(Ordering::Acquire)
+    } else {
+        cancel_glide()
+    };
+    let map = PlaceMap::new(mgr, mi, wi);
     let mut probe = Probe::start("retile");
     probe.note(format_args!("mon={mi} windows={}", rects.len()));
 
-    // Glide path: animate windows from their current position to the new tile
-    // slot via a cosmetic overlay (the real placement is still instant, done
-    // underneath). Only when enabled, idle, and the layout actually changed —
-    // a no-op retile (e.g. refocus) must not raise an overlay.
-    let want_glide = !force_instant
-        && glide_enabled(&mgr.cfg)
-        && !GLIDE_BUSY.load(Ordering::Acquire)
-        && !SLIDE_BUSY.load(Ordering::Acquire)
-        && !ANY_DRAG.load(Ordering::Relaxed);
-    // The glide composes over the capture thread's wallpaper crop and bails
-    // to instant without a current one. Check that lock-free BEFORE paying the
-    // ~18 ms capture_monitor and the worker round trip for nothing: no Explorer,
-    // a replacement shell, the warm-up not done yet, or a wallpaper that just
-    // changed and is still being re-rendered.
-    let wp_ok = want_glide && wp_ready();
-    if want_glide && !wp_ok {
+    // A new motion composes over the capture thread's wallpaper crop and
+    // bails to instant without a current one. Check that lock-free BEFORE
+    // reading every window's frame and the worker round trip for nothing: no
+    // Explorer, a replacement shell, the warm-up not done yet, or a wallpaper
+    // that just changed and is still being re-rendered. A re-aim has its crop
+    // already.
+    let fresh = animate && !reaim;
+    let wp_ok = fresh && wp_ready();
+    if fresh && !wp_ok {
         probe.note(format_args!("wp_not_ready=instant"));
         // A failed render has no pending retry of its own; this is it
         // (at most once per WP_TTL, never while Explorer is known absent).
         wp_ttl_hint();
     }
-    if wp_ok {
-        let full = mgr.monitors[mi].work_area;
-        let mut items = Vec::with_capacity(rects.len());
-        let mut changed = false;
-        let mut ok = true;
-        for (h, target) in &rects {
-            let hwnd = hwnd_from(*h);
-            let mut cur = RECT::default();
-            // Off-screen windows have no usable pixels in the monitor capture.
-            if GetWindowRect(hwnd, &mut cur).is_err() || rect_parked(&cur) {
-                ok = false;
-                break;
-            }
-            let to = adjust_for_border(hwnd, *target);
-            // Resizing a screenshot stretches glyphs/controls, then jumps to
-            // the application's new layout on reveal. Place such layouts
-            // directly, before paying for capture or the overlay handshake.
-            if !glide_can_translate(&cur, &to, &full) {
-                ok = false;
-                break;
-            }
-            let old = RECT {
-                left: cur.left - full.left,
-                top: cur.top - full.top,
-                right: cur.right - full.left,
-                bottom: cur.bottom - full.top,
-            };
-            let new = RECT {
-                left: to.left - full.left,
-                top: to.top - full.top,
-                right: to.right - full.left,
-                bottom: to.bottom - full.top,
-            };
-            // Treat a few-px difference as unchanged so DWM shadow/rounding jitter
-            // doesn't trigger a glide on an effectively-static window.
-            if !glide_still(&old, &new) {
-                changed = true;
-            }
-            items.push(GlideItem { old, new });
+    if reaim || wp_ok {
+        motion_start(mgr, mi, &rects, &map, generation, reaim, &mut probe);
+    }
+    // Under the overlay just raised or re-aimed, or the instant path
+    // (animations off, busy elsewhere, no crop, nothing moved).
+    place_tiles(rects, &map, &mut probe);
+    // The motion may reveal now (its loop holds a finished segment for this).
+    GLIDE_PLACED.store(generation, Ordering::Release);
+}
+
+/// Raise or re-aim the motion for this retile, BEFORE its windows are
+/// placed. Returns once they may be placed: at once for a re-aim (the
+/// overlay is up) or when nothing visibly moves, after the worker's
+/// overlay-up signal (bounded) for a new motion. For monitor `mi`'s active
+/// workspace, as retile_monitor_opts lays it out.
+unsafe fn motion_start(
+    mgr: &Manager,
+    mi: usize,
+    rects: &[(isize, RECT)],
+    map: &PlaceMap,
+    generation: u64,
+    reaim: bool,
+    probe: &mut Probe,
+) {
+    let mon = &mgr.monitors[mi];
+    let wi = mon.active;
+    let wa = mon.work_area;
+    let gf = global_focus(mgr);
+    let (mut items, cold) = motion_tiles(mon.workspaces[wi].focused, rects, map, wa, gf, &mgr.cfg);
+    // Nothing visibly moves: no overlay. A re-aim is sent anyway: the worker
+    // makes the same layout a no-op, and drops an item this list lacks (a
+    // window hidden, minimised or floated away), which it would otherwise
+    // keep drawing, shadow and all, to the end of the segment.
+    if !reaim && !items.iter().any(motion_changes) {
+        return;
+    }
+    let dpi = monitor_dpi(mon.hmon);
+    let need = motion_area(
+        map.own.is_some(),
+        &items,
+        wa,
+        dpi_px(GLIDE_SHADOW_PX, dpi),
+        !reaim,
+    );
+    let area = if reaim {
+        let running = *GLIDE_AREA.lock().unwrap();
+        // No damage (nothing moves, or only outside the work area): the
+        // running overlay covers it.
+        if need.is_some_and(|need| !rect_contains(&running, &need)) {
+            // The running overlay does not cover this change (off scrolling,
+            // a move outside its box; or a work-area change), and the
+            // windows are placed right after this returns: reveal now rather
+            // than show them jump beside it.
+            cancel_glide();
+            probe.note(format_args!("reaim_outside=instant"));
+            return;
         }
-        // Capture and cover only what moves (glide_damage), grown by the DWM
-        // shadow reach at this monitor's scale.
-        let hmon = mgr.monitors[mi].hmon;
-        let damage = if ok && changed {
-            let margin = dpi_px(GLIDE_SHADOW_PX, monitor_dpi(hmon));
-            glide_damage(
-                &items,
-                margin,
-                full.right - full.left,
-                full.bottom - full.top,
-            )
-        } else {
-            None
+        running
+    } else {
+        let Some(need) = need else {
+            return; // every move lies outside the work area
         };
-        if let Some(d) = damage {
-            let area = RECT {
-                left: full.left + d.left,
-                top: full.top + d.top,
-                right: full.left + d.right,
-                bottom: full.top + d.bottom,
-            };
-            // Into `area` coordinates, the capture's. An item entirely outside
-            // it is a live window that stays (<= GLIDE_STILL_PX), not drawn;
-            // one crossing its edge is drawn 1:1 from the capture, which
-            // matches the live part outside.
-            items.retain_mut(|it| {
-                if !rects_overlap(&it.old, &d) && !rects_overlap(&it.new, &d) {
-                    return false;
-                }
-                for r in [&mut it.old, &mut it.new] {
-                    r.left -= d.left;
-                    r.right -= d.left;
-                    r.top -= d.top;
-                    r.bottom -= d.top;
-                }
-                true
-            });
-            probe.note(format_args!(
-                "damage={}x{} of {}x{}",
-                d.right - d.left,
-                d.bottom - d.top,
-                full.right - full.left,
-                full.bottom - full.top
-            ));
-            let out = capture_monitor(area);
-            probe.mark("capture");
-            if out != 0 {
-                GLIDE_HMON.store(hmon, Ordering::Relaxed);
-                GLIDE_BUSY.store(true, Ordering::Release);
-                // `out` is selected on the glide thread next: flush this
-                // thread's GDI batch before the hand-off.
-                let _ = GdiFlush();
-                dispatch_glide(GlideReq {
-                    out_bmp: out,
-                    generation,
-                    hmon,
-                    rect: full,
-                    area,
-                    items,
-                    dur_ms: mgr.cfg.animation_ms.max(1) as u64,
-                    queued: probe_now(),
-                    ex_style: overlay_ex_style(mgr.cfg.animation_ms),
-                });
-                // Wait until the overlay covers the monitor, then place the real
-                // windows underneath it (hidden), exactly like the workspace slide.
-                let up = wait_glide_overlay_up();
-                if !up {
-                    cancel_glide(); // A delayed worker must not show stale frame 0.
-                }
-                probe.mark(if up { "glide_up" } else { "glide_TIMEOUT" });
-                place_tiles(rects, &mut probe);
+        // One motion at a time, and any running one was cancelled by this
+        // retile. It may still be tearing down (a frame or two: a
+        // cross-monitor move or drop right after a motion on the source):
+        // now that this one moves something, wait for that, bounded; still
+        // busy = instant.
+        if GLIDE_BUSY.load(Ordering::Acquire) {
+            let t = Instant::now();
+            while GLIDE_BUSY.load(Ordering::Acquire)
+                && t.elapsed() < std::time::Duration::from_millis(GLIDE_TEARDOWN_WAIT_MS)
+            {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            probe.mark("teardown_wait");
+            if GLIDE_BUSY.load(Ordering::Acquire) {
+                probe.note(format_args!("busy=instant"));
                 return;
             }
         }
+        need
+    };
+    // A new motion shows only what its overlay shows; anything else is a live
+    // window outside it. A re-aim lists every tile, shown or not: the worker
+    // reads a missing item as one that left the layout and drops it, and a
+    // column still half in view mid-slide, now headed further off screen,
+    // would vanish. The worker skips new items that never enter its overlay.
+    if !reaim {
+        items.retain(|it| rects_overlap(&motion_swept(it), &area));
     }
+    // Cold tiles: their snapshot, TAKEN out of the cache into the request
+    // (single-owner hand-off; the worker frees it), or None. A new motion
+    // leaves one without a snapshot out (it appears at the reveal rather than
+    // slide in white). A re-aim lists it anyway, so a cold tile the motion
+    // already draws keeps going; the worker never starts a thumbnail for it.
+    // Only tiles whose path enters the overlay: a re-aim lists every tile, and
+    // taking a far one's snapshot now would leave none for the key press that
+    // actually scrolls it in (the worker joins only items that enter).
+    let cold: Vec<isize> = cold
+        .into_iter()
+        .filter(|h| {
+            items
+                .iter()
+                .any(|it| it.hwnd == *h && rects_overlap(&motion_swept(it), &area))
+        })
+        .collect();
+    let cold = if reaim && !items.iter().any(motion_changes) {
+        // A re-aim that moves nothing joins nothing: the snapshots stay in
+        // the cache (the worker would free them unused); the windows are
+        // still listed cold, so none gets a blank thumbnail.
+        cold.into_iter().map(|h| (h, None)).collect()
+    } else {
+        cold_take(&cold)
+    };
+    if !reaim {
+        items.retain(|it| !cold.iter().any(|c| c.0 == it.hwnd && c.1.is_none()));
+        if !items.iter().any(motion_changes) {
+            return;
+        }
+    }
+    motion_extras(mgr, mi, map, &mut items, area, gf, dpi);
+    probe.note(format_args!(
+        "motion={} items={} area={}x{} cold={}/{}",
+        if reaim { "reaim" } else { "new" },
+        items.len(),
+        area.right - area.left,
+        area.bottom - area.top,
+        cold.iter().filter(|c| c.1.is_some()).count(),
+        cold.len()
+    ));
+    let req = GlideReq {
+        generation,
+        retarget: reaim,
+        hmon: mon.hmon,
+        rect: wa,
+        area,
+        items,
+        cold,
+        dur_ms: mgr.cfg.animation_ms.max(1) as u64,
+        dpi,
+        queued: probe_now(),
+        ex_style: overlay_ex_style(mgr.cfg.animation_ms),
+    };
+    GLIDE_GF.store(gf, Ordering::Relaxed);
+    if reaim {
+        retarget_glide(req);
+        return;
+    }
+    *GLIDE_AREA.lock().unwrap() = area;
+    dispatch_glide(req);
+    // Wait until the overlay covers the area, then the caller places the real
+    // windows underneath it (hidden), exactly like the workspace slide.
+    let up = wait_glide_overlay_up();
+    if !up {
+        cancel_glide(); // A delayed worker must not show a stale frame 0.
+    }
+    probe.mark(if up { "glide_up" } else { "glide_TIMEOUT" });
+}
 
-    // Instant path (glide off, busy, capture failed, or nothing moved).
-    place_tiles(rects, &mut probe);
+/// The tiles' motion items for a retile to `rects` (raw layout slots, each
+/// the visible frame its tile will show; on a scrolling monitor strip rects,
+/// maybe off screen). `from` is the live visible frame or, for a tile at a
+/// park spot, its last slot (LAST_SLOT): where it sat in the strip, not the
+/// park spot far away, so it scrolls in from where the strip had it. Left out (it
+/// appears at the reveal): a tile not visible, without a frame, or parked
+/// with no known slot. It ends at motion_end (its slot, or there at its real
+/// size when the slot kept its size); one whose slot did not change and that
+/// stands there is Static (motion_kind). The dim starts at the layered alpha
+/// the window shows now and ends at the one style_window leaves it at once
+/// `gf` (global_focus) is styled; with dimming off it keeps what it has. The
+/// focused tile (`focused`, this workspace's) is MotionRole::Focus and goes
+/// last (a re-aim joins items in list order; a new motion's worker sorts by
+/// z-order, motion_order). Also returns the COLD ones among them (parked and
+/// not WARM): their thumbnail would be blank, so the motion draws their
+/// snapshot or nothing.
+unsafe fn motion_tiles(
+    focused: isize,
+    rects: &[(isize, RECT)],
+    map: &PlaceMap,
+    wa: RECT,
+    gf: isize,
+    cfg: &Config,
+) -> (Vec<MotionItem>, Vec<isize>) {
+    // Copied out first: no lock is held across the Win32 reads below.
+    let slots: Vec<Option<RECT>> = {
+        let g = LAST_SLOT.lock().unwrap();
+        rects
+            .iter()
+            .map(|(h, _)| g.as_ref().and_then(|m| m.get(h).copied()))
+            .collect()
+    };
+    let mut items = Vec::with_capacity(rects.len());
+    let mut cold = Vec::new();
+    for (&(h, raw), slot) in rects.iter().zip(slots) {
+        let hwnd = hwnd_from(h);
+        if !IsWindowVisible(hwnd).as_bool() {
+            continue;
+        }
+        let Some(frame) = frame_bounds(hwnd) else {
+            continue;
+        };
+        // On no monitor at all = at its park spot (unpark_window's test).
+        let parked = MonitorFromRect(&frame, MONITOR_DEFAULTTONULL).0.is_null();
+        let from = match (parked, slot) {
+            (false, _) => frame,
+            (true, Some(s)) => s,
+            (true, None) => continue,
+        };
+        let tab_hidden = map.own.is_some() && map.hidden.contains(&h);
+        let Some((a0, a1)) = motion_alphas(parked, from, map.parks(h, raw), tab_hidden, raw, wa)
+        else {
+            continue;
+        };
+        // On screen it paints, whatever WARM says; only a parked one can be
+        // showing a dropped surface.
+        if parked && !is_warm(h) {
+            cold.push(h);
+        }
+        let slot_same = slot.is_some_and(|s| glide_still(&s, &raw));
+        // A maximized tile is restored into its slot (animate_to), whatever
+        // its frame now.
+        let to = if IsZoomed(hwnd).as_bool() {
+            raw
+        } else {
+            motion_end(raw, slot, frame)
+        };
+        let (d0, d1) = motion_dims(hwnd, h == gf, cfg);
+        items.push(MotionItem {
+            hwnd: h,
+            from,
+            to,
+            kind: motion_kind(from, to, slot_same),
+            a0,
+            a1,
+            d0,
+            d1,
+            role: if h == focused {
+                MotionRole::Focus
+            } else {
+                MotionRole::Tile
+            },
+            slot_same,
+        });
+    }
+    if let Some(i) = items.iter().position(|it| it.hwnd == focused) {
+        let f = items.remove(i);
+        items.push(f);
+    }
+    (items, cold)
+}
+
+/// What else shows inside the overlay `area` of monitor `mi`'s active
+/// workspace and must not vanish under it, appended after the tiles (the
+/// worker stacks a new motion by z-order): the tab bars (each morphs to the
+/// slot tab_bars_sync will give it), then the workspace's floating windows
+/// (Static, dimmed like tiles: `gf` as in motion_tiles). `dpi` is the
+/// monitor's.
+unsafe fn motion_extras(
+    mgr: &Manager,
+    mi: usize,
+    map: &PlaceMap,
+    items: &mut Vec<MotionItem>,
+    area: RECT,
+    gf: isize,
+    dpi: u32,
+) {
+    let mon = &mgr.monitors[mi];
+    let ws = &mon.workspaces[mon.active];
+    // Tab bars exist only on scrolling monitors. Found by class: they belong
+    // to the main thread (TAB_WINS), and reading another thread's window
+    // rect and GWLP_USERDATA sends it no message.
+    if map.own.is_some() {
+        // The bars' new slots, as tab_bars_build computes them after this
+        // command (its no-tabs check included): a bar's last frame is where
+        // (and how wide) it lands.
+        let (cols, slots) = if ws.strip.cols.values().any(|c| c.tabbed) {
+            let tiled = tiled_windows(ws);
+            let cols = ws.strip.columns(&tiled);
+            let tab_h = dpi_px(mgr.cfg.tab_bar_height, dpi);
+            let out = strip_out(
+                &ws.strip,
+                &tiled,
+                ws.focused,
+                mon.work_area,
+                &mgr.cfg,
+                tab_h,
+            );
+            let slots = tab_bar_slots(&ws.strip, &cols, ws.focused, &out, map);
+            (cols, slots)
+        } else {
+            Default::default()
+        };
+        let mut after = HWND::default();
+        while let Ok(b) = FindWindowExW(None, after, w!("astur_tabs"), PCWSTR::null()) {
+            after = b;
+            if !IsWindowVisible(b).as_bool() {
+                continue;
+            }
+            let from = window_rect_of(b.0 as isize);
+            if !rects_overlap(&from, &area) {
+                continue;
+            }
+            // tab_bars_sync keeps a bar window on the column holding the tab
+            // it last showed (tab_bar_pick): that column's bar slot. None:
+            // the column parks, is untabbed or the tab left it, and sync
+            // destroys the window (motion_step retires it then) or moves it
+            // to another monitor: it fades out where it is.
+            let shown = GetWindowLongPtrW(b, GWLP_USERDATA);
+            let (to, a1) = match slots.iter().find(|s| cols[s.0].contains(&shown)) {
+                Some(s) => (s.1, 255),
+                None => (from, 0),
+            };
+            items.push(MotionItem {
+                hwnd: b.0 as isize,
+                from,
+                to,
+                kind: motion_kind(from, to, false),
+                a0: 255,
+                a1,
+                d0: 255, // never styled
+                d1: 255,
+                role: MotionRole::Bar,
+                slot_same: false,
+            });
+        }
+    }
+    for &h in ws.windows.iter().filter(|h| ws.floating.contains(h)) {
+        let hwnd = hwnd_from(h);
+        if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+            continue;
+        }
+        if let Some(fr) = frame_bounds(hwnd).filter(|fr| rects_overlap(fr, &area)) {
+            let (d0, d1) = motion_dims(hwnd, h == gf, &mgr.cfg);
+            items.push(MotionItem {
+                hwnd: h,
+                from: fr,
+                to: fr,
+                kind: MotionKind::Static,
+                a0: 255,
+                a1: 255,
+                d0,
+                d1,
+                role: MotionRole::Float,
+                slot_same: false,
+            });
+        }
+    }
 }
 
 /// The placement loop of `retile_monitor`: every window straight to its tile
 /// under SUPPRESS. With probes on it also times each window, because one slow
 /// app's synchronous SetWindowPos is what stretches a whole retile.
-unsafe fn place_tiles(rects: Vec<(isize, RECT)>, probe: &mut Probe) {
-    // A drag can start while capture/overlay setup is in flight. Re-check at
+unsafe fn place_tiles(rects: Vec<(isize, RECT)>, map: &PlaceMap, probe: &mut Probe) {
+    // A drag can start while the overlay setup is in flight. Re-check at
     // placement too, so that older layout cannot pull the window off the cursor.
     if ANY_DRAG.load(Ordering::Relaxed) || NATIVE_DRAG.load(Ordering::Relaxed) != 0 {
         RETILE_AFTER_DRAG.store(true, Ordering::Relaxed);
@@ -4610,7 +6400,7 @@ unsafe fn place_tiles(rects: Vec<(isize, RECT)>, probe: &mut Probe) {
     SUPPRESS.store(true, Ordering::Relaxed);
     for (h, target) in rects {
         let t = timed.then(Instant::now);
-        animate_to(hwnd_from(h), target);
+        animate_to(hwnd_from(h), target, map);
         if let Some(t) = t {
             slowest = slowest.max((t.elapsed().as_micros(), h));
         }
@@ -4620,13 +6410,11 @@ unsafe fn place_tiles(rects: Vec<(isize, RECT)>, probe: &mut Probe) {
     probe.note(format_args!("slowest={}us@{:#x}", slowest.0, slowest.1));
 }
 
-/// Glide translates pixels; resizing uses the real application surface.
+/// The window motion animation is on. It shows live thumbnails scaled into
+/// each window's moving rect: a resized window morphs, its content stretched
+/// between the ends and 1:1 at both.
 fn glide_enabled(cfg: &Config) -> bool {
     cfg.animations && cfg.animation_ms > 0 && cfg.window_anim == "glide"
-}
-
-fn rect_parked(r: &RECT) -> bool {
-    r.left <= -30000
 }
 
 /// GetWindowRect, or an empty rect when the window is gone.
@@ -4643,7 +6431,10 @@ unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
     if !mgr.tiling {
         return;
     }
-    let rects = workspace_layout(mgr, mi, mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0));
+    let wi = mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0);
+    let rects = workspace_layout(mgr, mi, wi);
+    // A scrolling workspace's parked windows land parked again.
+    let map = PlaceMap::new(mgr, mi, wi);
     // Debug only: a window that did not land where it was put. Windows are
     // also laid out while hidden (place_hidden_workspace), and a placement
     // that silently failed there would otherwise only show as a wrong tile.
@@ -4656,8 +6447,7 @@ unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
         if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
-        let to = adjust_for_border(hwnd, target);
-        set_pos_raw(h, to);
+        let to = place_slot(h, target, &map);
         let mut got = RECT::default();
         if check && GetWindowRect(hwnd, &mut got).is_ok() && got != to {
             log_debug!(
@@ -4695,20 +6485,25 @@ unsafe fn place_hidden_workspace(mgr: &Manager, mi: usize, wi: usize) {
     if !mgr.tiling || mgr.monitors.get(mi).is_none_or(|m| m.active == wi) {
         return;
     }
+    let map = PlaceMap::new(mgr, mi, wi);
     for (h, target) in workspace_layout(mgr, mi, wi) {
         let hwnd = hwnd_from(h);
         if IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
             continue;
         }
-        set_pos_raw(h, adjust_for_border(hwnd, target));
+        place_slot(h, target, &map);
     }
 }
 
-/// Tile every monitor's active workspace.
+/// Tile every monitor's active workspace. One motion runs at a time, so only
+/// the focused monitor's animates, retiled last; the others place instantly
+/// rather than raise an overlay the next retile cancels (and waits out).
 unsafe fn retile_all(mgr: &Manager) {
-    for mi in 0..mgr.monitors.len() {
-        retile_monitor(mgr, mi);
+    let f = mgr.focused_mon;
+    for mi in (0..mgr.monitors.len()).filter(|&mi| mi != f) {
+        retile_monitor_opts(mgr, mi, true);
     }
+    retile_monitor(mgr, f);
 }
 
 /// Does a layered window's alpha still need setting? `read_ok`, `flags` and
@@ -4720,19 +6515,66 @@ fn alpha_set_needed(read_ok: bool, flags: u32, cur: u8, target: u8) -> bool {
     !read_ok || flags != LWA_ALPHA.0 || cur != target
 }
 
+/// The layered alpha style_window gives a window: 255 focused, the
+/// `unfocused_opacity` share of 255 otherwise. None when dimming is off
+/// (>= 0.999): style_window then leaves the window's alpha alone. The motion
+/// compositor ends each window's dim here, so its last frame is what the
+/// reveal uncovers.
+fn styled_alpha(focused: bool, unfocused_opacity: f32) -> Option<u8> {
+    let alpha = if focused {
+        255
+    } else {
+        (unfocused_opacity * 255.0) as u8
+    };
+    (unfocused_opacity < 0.999).then_some(alpha)
+}
+
+/// The layered alpha `hwnd` is composited at now (styled or the app's own),
+/// 255 when it has none: a DWM thumbnail leaves it out (measured), so the
+/// motion draws it in. Reads window attributes only, no message to the app.
+unsafe fn shown_alpha(hwnd: HWND) -> u8 {
+    if GetWindowLongW(hwnd, GWL_EXSTYLE) as u32 & WS_EX_LAYERED.0 == 0 {
+        return 255;
+    }
+    let mut cur = 255u8;
+    let mut flags = LAYERED_WINDOW_ATTRIBUTES_FLAGS(0);
+    let ok = GetLayeredWindowAttributes(
+        hwnd,
+        None,
+        Some(&mut cur as *mut u8),
+        Some(&mut flags as *mut _),
+    )
+    .is_ok();
+    if ok && flags.0 & LWA_ALPHA.0 != 0 {
+        cur
+    } else {
+        255
+    }
+}
+
+/// A managed window's dim across a motion: (what it shows now, what
+/// style_window leaves it at when it ends `focused` or not).
+unsafe fn motion_dims(hwnd: HWND, focused: bool, cfg: &Config) -> (u8, u8) {
+    let now = shown_alpha(hwnd);
+    (
+        now,
+        styled_alpha(focused, cfg.unfocused_opacity).unwrap_or(now),
+    )
+}
+
 /// Apply opacity + border colour to a single window based on focus state.
 unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
-    if cfg.unfocused_opacity < 0.999 {
+    // Exit restore under way or done: a command that outlived its wait must
+    // not re-dim or re-border what restore_windows just unstyled.
+    if EXITING.load(Ordering::Relaxed) {
+        return;
+    }
+    if let Some(alpha) = styled_alpha(focused, cfg.unfocused_opacity) {
         let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
         let was_layered = ex & WS_EX_LAYERED.0 != 0;
         if !was_layered {
             SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
         }
-        let alpha = if focused {
-            255
-        } else {
-            (cfg.unfocused_opacity * 255.0) as u8
-        };
         // Skip a SetLayeredWindowAttributes that would re-send the alpha the
         // window already has (SWITCH-18): every switch restyles each incoming
         // window, and hidden windows keep their alpha, so nearly all of those
@@ -4863,32 +6705,90 @@ unsafe fn apply_styles(mgr: &Manager) {
 /// on the tile it was just given, not on its live rect: placement is posted
 /// (TILE-1), so straight after a retile the live rect can still be the old one,
 /// or a neighbour can still sit under the new centre. Floating and untiled
-/// windows use their live rect.
+/// windows use their live rect. A parked tile gets no warp: nothing of it is
+/// on screen to point at (focus scrolls it into view first, slice 5).
 unsafe fn center_cursor_on(mgr: &Manager, h: isize) {
     let mut r = RECT::default();
-    let r = match tile_target(mgr, h) {
-        Some(t) => t,
+    let r = match tile_slot(mgr, h) {
+        Some((_, Vis::Park)) => return,
+        Some((t, _)) => t,
         None if GetWindowRect(hwnd_from(h), &mut r).is_ok() => r,
         None => return,
     };
     let _ = SetCursorPos((r.left + r.right) / 2, (r.top + r.bottom) / 2);
 }
 
-/// The tile a retile of h's monitor puts h in (raw layout rect), or None when
-/// that retile would not place it: tiling off, untracked, on a hidden
-/// workspace, floating, minimised, dead, or a layout that came up short. The
-/// same `workspace_layout` the retile itself runs.
-unsafe fn tile_target(mgr: &Manager, h: isize) -> Option<RECT> {
+/// The tile a retile of h's monitor puts h in (raw layout rect) and how much
+/// of that slot is on screen (PlaceMap::vis: always Full off scrolling), or
+/// None when that retile would not place it: tiling off, untracked, on a
+/// hidden workspace, floating, minimised, dead, or a layout that came up
+/// short. The same `workspace_layout` and PlaceMap the retile itself runs.
+unsafe fn tile_slot(mgr: &Manager, h: isize) -> Option<(RECT, Vis)> {
     if !mgr.tiling {
         return None;
     }
     let (mi, wi) = mgr
         .locate(h)
         .filter(|&(mi, wi)| wi == mgr.monitors[mi].active)?;
-    workspace_layout(mgr, mi, wi)
+    let raw = workspace_layout(mgr, mi, wi)
         .into_iter()
-        .find(|&(w, _)| w == h)
-        .map(|(_, r)| r)
+        .find(|&(w, _)| w == h)?
+        .1;
+    Some((raw, PlaceMap::new(mgr, mi, wi).vis(h, raw)))
+}
+
+/// Scroll `h`'s tile fully into view when it sits on an ACTIVE scrolling
+/// workspace and is not Full: a click on a peeking window, a parked one
+/// picked from the taskbar or Alt+Tab, an app activating itself
+/// (plan/scrolling.md "Focus"). `h` becomes that workspace's focus first, so
+/// the strip scrolls to it and a hidden tab shows. The retile is the
+/// animated one. A cheap no-op on every other layout.
+unsafe fn strip_reveal(mgr: &mut Manager, h: isize) {
+    let Some((mi, wi)) = mgr.locate(h).filter(|&(mi, wi)| {
+        mgr.monitors[mi].layout == "scrolling" && wi == mgr.monitors[mi].active
+    }) else {
+        return;
+    };
+    if tile_slot(mgr, h).is_none_or(|(_, v)| v == Vis::Full) {
+        return;
+    }
+    mgr.monitors[mi].workspaces[wi].focused = h;
+    // Before the retile: the motion ends each window's dim at global_focus
+    // (BarFocus arrives here without it).
+    mgr.focused_mon = mi;
+    ensure_visible(mgr, mi, wi);
+    retile_monitor(mgr, mi);
+}
+
+/// The end of every scrolling key on (mi, wi): scroll to the focused column
+/// (model), one retile (the animated path; skip-unchanged makes a focus move
+/// inside the view free), then with `focus` the real focus, then the cursor
+/// to the tile's new on-screen slot, so it always follows the scroll.
+unsafe fn strip_settle(mgr: &mut Manager, mi: usize, wi: usize, focus: bool) {
+    ensure_visible(mgr, mi, wi);
+    retile_monitor(mgr, mi);
+    let f = mgr.monitors[mi].workspaces[wi].focused;
+    if focus {
+        focus_window(f);
+    }
+    if mgr.cfg.cursor_follows_focus && f != 0 {
+        center_cursor_on(mgr, f);
+    }
+    // The retile is posted: the old occupant can still be under the cursor
+    // for a moment, and the hover poll would focus it.
+    bump_follow_settle();
+}
+
+/// Focus `target` on scrolling (mi, wi) and show it (strip_settle).
+unsafe fn strip_focus(mgr: &mut Manager, mi: usize, wi: usize, target: isize) {
+    mgr.monitors[mi].workspaces[wi].focused = target;
+    strip_settle(mgr, mi, wi, true);
+}
+
+/// Where focus lands entering a column: its last-focused tile (the tab it
+/// shows).
+fn column_entry(strip: &Strip, col: &[isize]) -> isize {
+    col[strip.active_tab(col, 0)]
 }
 
 #[inline]
@@ -5535,8 +7435,9 @@ unsafe fn snap_clear() {
 //
 // This reverses the old "captured fresh every slide, no cache to go stale"
 // choice, and these rules are why that is safe:
-//   * Only `wallpaper_capture_worker` calls `wallpaper_window` or PrintWindow.
-//     Never a compositor: with its overlay up, a PrintWindow blocked on a busy
+//   * Only `wallpaper_capture_worker` calls `wallpaper_window` or PrintWindow
+//     on the wallpaper (the cold-snapshot worker prints app windows, nothing
+//     else). Never a compositor: with its overlay up, a PrintWindow blocked on a busy
 //     Explorer would pin a frozen, click-eating topmost frame over windows that
 //     are already placed underneath it.
 //   * WALLPAPER_GEN says which crops are current. Bump sites only fetch_add
@@ -5545,7 +7446,8 @@ unsafe fn snap_clear() {
 //     wallpapers change on nearly every switch; on a sparse workspace the gaps
 //     are most of the screen) or a different monitor geometry, not a sub-pixel
 //     gap difference. A miss costs a flat slide or an instant glide, nothing
-//     worse, and frame 0 still comes from the exact capture_monitor grab.
+//     worse: a slide's frame 0 still comes from the exact capture_monitor
+//     grab, a motion's from the windows' own live thumbnails.
 //   * Crops are keyed by hmon AND the exact work-area RECT, so a wrong-size
 //     bitmap can never be blitted after a display or bar change.
 //   * Each compositor gets its own copy through its WP_SLOTS slot (a bitmap is
@@ -5996,8 +7898,9 @@ unsafe fn wp_render() -> WpOutcome {
     WpOutcome::Published
 }
 
-/// The wallpaper capture thread: the only caller of `wallpaper_window` and
-/// PrintWindow. Normal priority; sleeps on WP_SCHED_CV between renders.
+/// The wallpaper capture thread: the only caller of `wallpaper_window` and of
+/// PrintWindow on the wallpaper (app windows: `cold_worker`). Normal
+/// priority; sleeps on WP_SCHED_CV between renders.
 fn wallpaper_capture_worker() {
     // Last render attempt, successful or not, for the TTL backstop: a failing
     // render retries at most once per WP_TTL rather than after every animation.
@@ -6095,46 +7998,78 @@ fn slide_cancel_pending() -> bool {
 }
 
 // =========================================================================
-// Per-window glide: window move / open / close / re-tile animation.
+// Window motion: window move / open / close / re-tile / scroll animation.
 //
 // Reuses the workspace-overlay trick instead of the (removed, jittery)
-// per-frame real-window SetWindowPos. On a layout change the manager freezes
-// the work area to one bitmap, the worker raises a topmost overlay showing
-// frame 0 (== current screen, no flash) and signals back; the manager then
-// places the REAL windows at their targets instantly UNDER the overlay; the
-// worker glides each window's frozen image from its old rect to its new rect
-// over a wallpaper backdrop, then tears the overlay down to reveal the already
-// correct windows. No current wallpaper crop (see the wallpaper cache) degrades
-// to instant.
+// per-frame real-window SetWindowPos. On a layout change the manager lists
+// what shows in the animated area (each window's visible frame now and at
+// the end) and hands it to the glide worker, which raises a topmost overlay:
+// the wallpaper crop plus a drawn shadow per item as its backdrop, and a live
+// DWM thumbnail of every item on top at its start rect (frame 0 == the
+// screen, no flash), then signals back. The manager places the REAL windows
+// at their targets instantly UNDER the overlay; the worker morphs the
+// thumbnails (position and size, at each window's layered dim, which a
+// thumbnail leaves out) to their ends and tears the overlay down to reveal
+// the already correct windows. A retile of the same monitor while it runs re-aims it in
+// place: no second handshake, the windows are placed at once. No screen
+// capture on this path (it was the manager's biggest wait before placement,
+// and frozen pixels cannot show a window scrolling in from off screen). No
+// current wallpaper crop degrades to instant. A cold window (blank DWM
+// surface) is drawn from its snapshot instead, or left out ("Cold-window
+// snapshots" below). plan/animations.md "Motion compositor" has the design
+// and its measurements.
 // =========================================================================
 
-/// One window's travel for a glide, in work-area-local coordinates.
-struct GlideItem {
-    old: RECT,
-    new: RECT,
+/// How a motion item travels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MotionKind {
+    /// Moved and/or resized: all four edges lerp from -> to (a morph), the
+    /// live thumbnail scaled into the rect between. Exact at both ends.
+    Move,
+    /// Does not move (an unchanged slot, floating windows, tab bars): drawn
+    /// 1:1 at `from`'s top-left at its window's live size, so it does not
+    /// vanish under the overlay.
+    Static,
 }
 
-/// A screenshot is safe only for a full, size-preserving translation. Even a
-/// one-pixel resize shimmers text; a clipped source captures missing pixels.
-fn glide_can_translate(old: &RECT, new: &RECT, bounds: &RECT) -> bool {
-    let width = old.right - old.left;
-    let height = old.bottom - old.top;
-    let inside = |r: &RECT| {
-        r.left >= bounds.left
-            && r.top >= bounds.top
-            && r.right <= bounds.right
-            && r.bottom <= bounds.bottom
-    };
-    width > 0
-        && height > 0
-        && width == new.right - new.left
-        && height == new.bottom - new.top
-        && inside(old)
-        && inside(new)
+/// What a motion item is, for its draw order (motion_order) and shadow.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum MotionRole {
+    Tile,
+    /// The workspace's focused tile: drawn above the tiles it passes.
+    Focus,
+    /// An astur_tabs bar: no drawn shadow (the real bar has none).
+    Bar,
+    Float,
+}
+
+/// One window in a motion: its visible frame (DWMWA_EXTENDED_FRAME_BOUNDS,
+/// what a thumbnail shows) now and at the end, in screen coordinates. Either
+/// may lie outside the overlay: a column scrolling in or out is clipped by
+/// its edge. `a0` / `a1` = visibility at the start / end, 0 for an end that
+/// is hidden although its rect is inside the overlay (an inactive tab, a
+/// column parked for bleeding onto another monitor), so it fades instead of
+/// popping. `d0` / `d1` = its layered dim (unfocused_opacity) at the start /
+/// end: a thumbnail leaves its source's layered alpha out (measured), so the
+/// motion applies it. Kept apart from a0/a1: a dim change alone is no
+/// motion (motion_changes). `slot_same` = a tile whose slot (LAST_SLOT) is
+/// this layout's: a re-aim keeps the end it already morphs to (reaim_keep).
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MotionItem {
+    hwnd: isize,
+    from: RECT,
+    to: RECT,
+    kind: MotionKind,
+    a0: u8,
+    a1: u8,
+    d0: u8,
+    d1: u8,
+    role: MotionRole,
+    slot_same: bool,
 }
 
 /// Edge jitter (px) under which a window counts as not moving: DWM shadow and
-/// rounding noise. Shared by the "did the layout change?" test and the 1:1 draw.
+/// rounding noise. Shared by the "did the layout change?" tests.
 const GLIDE_STILL_PX: i32 = 2;
 
 /// Is every edge of `new` within GLIDE_STILL_PX of `old`?
@@ -6145,50 +8080,65 @@ fn glide_still(old: &RECT, new: &RECT) -> bool {
         && (old.bottom - new.bottom).abs() <= GLIDE_STILL_PX
 }
 
-/// DWM shadow reach (logical px) past a window's rect. The glide's damage box
-/// grows by this much: cut tighter, the moved windows' live shadows would show
-/// at the overlay's edge from frame 0, and the old positions' shadows would
-/// vanish outside it.
+/// Reach (logical px) of the shadow the motion draws past an item's frame.
+/// The damage box grows by this much (cut tighter, a moved window's shadow
+/// would be cut at the overlay's edge).
 const GLIDE_SHADOW_PX: i32 = 32;
 
-/// Damage covering at least this share (percent) of the work area glides the
-/// whole work area, as before: a near-full capture saves nothing, and the
-/// full path has fewer edge cases.
+/// Opacity of the drawn shadow right at an item's edge; it eases to nothing
+/// at GLIDE_SHADOW_PX. Close to a Windows 11 window shadow, not measured.
+const SHADOW_ALPHA: f64 = 80.0;
+
+/// Damage covering at least this share (percent) of the work area animates
+/// the whole work area: a near-full box saves nothing, and the full path has
+/// fewer edge cases.
 const GLIDE_DAMAGE_FULL_PCT: i64 = 90;
 
-/// The work-area-local rect a glide has to cover (ANIM-10): the union of the
-/// old and new rects of every item that actually moves (not glide_still),
-/// grown by `margin` and clamped to the `w` x `h` work area; the whole work
-/// area when that is GLIDE_DAMAGE_FULL_PCT or more of it. None = nothing
-/// visibly moves. Everything outside it is a live window that stays put (or
-/// moves <= GLIDE_STILL_PX and is placed live), so the capture, the overlay
-/// and every frame shrink to it: capture cost is ~5 ms fixed plus area
-/// (re-measured in review: 960x540 10.1 ms, 1920x1080 25.0 ms), and it runs on
-/// the manager before placement.
-fn glide_damage(items: &[GlideItem], margin: i32, w: i32, h: i32) -> Option<RECT> {
+/// The work-area-local rect a motion off a scrolling monitor has to cover
+/// (ANIM-10): the union of the old and new rects of every (from, to) pair
+/// that actually moves (not glide_still), grown by `margin` and clamped to
+/// the `w` x `h` work area; the whole work area when that is
+/// GLIDE_DAMAGE_FULL_PCT or more of it. None = nothing visibly moves.
+/// Everything outside it is a live window that stays put, so the overlay and
+/// every frame shrink to it. Still exact under the morph: every rect drawn
+/// between from and to lies inside their union. Each of `dims` (windows
+/// whose dim changes) the box touches is taken whole: the overlay
+/// crossfades its dim while apply_styles restyles the real window at once,
+/// so a cut one would show a band along the cut.
+fn glide_damage(
+    moves: &[(RECT, RECT)],
+    dims: &[RECT],
+    margin: i32,
+    w: i32,
+    h: i32,
+) -> Option<RECT> {
     let mut u: Option<RECT> = None;
-    for it in items.iter().filter(|it| !glide_still(&it.old, &it.new)) {
-        for r in [it.old, it.new] {
+    for (old, new) in moves.iter().filter(|(o, n)| !glide_still(o, n)) {
+        for r in [*old, *new] {
             u = Some(match u {
                 None => r,
-                Some(a) => RECT {
-                    left: a.left.min(r.left),
-                    top: a.top.min(r.top),
-                    right: a.right.max(r.right),
-                    bottom: a.bottom.max(r.bottom),
-                },
+                Some(a) => rect_union(a, r),
             });
         }
     }
-    let u = u?;
-    let d = RECT {
+    let mut u = u?;
+    let grow = |u: RECT| RECT {
         left: (u.left - margin).clamp(0, w),
         top: (u.top - margin).clamp(0, h),
         right: (u.right + margin).clamp(0, w),
         bottom: (u.bottom + margin).clamp(0, h),
     };
+    let mut d = grow(u);
     if d.right <= d.left || d.bottom <= d.top {
         return None; // every move lies outside the work area: nothing to show
+    }
+    // Each taken one is inside `u` from then on: at most dims.len() rounds.
+    while let Some(r) = dims
+        .iter()
+        .find(|r| rects_overlap(r, &d) && !rect_contains(&u, r))
+    {
+        u = rect_union(u, *r);
+        d = grow(u);
     }
     let area = (d.right - d.left) as i64 * (d.bottom - d.top) as i64;
     if area * 100 >= w as i64 * h as i64 * GLIDE_DAMAGE_FULL_PCT {
@@ -6202,44 +8152,429 @@ fn glide_damage(items: &[GlideItem], margin: i32, w: i32, h: i32) -> Option<RECT
     Some(d)
 }
 
+/// What a new motion's overlay must cover (screen), None when nothing
+/// visibly moves: the whole work area `wa` on a scrolling monitor (columns
+/// enter and leave across it), else only what moves (glide_damage), grown by
+/// the shadow reach `margin`, and with `dims` (a new motion) over every
+/// window whose dim changes that it touches. A whole-work-area overlay hides
+/// every window it does not list (other apps' popups, topmost windows,
+/// desktop icons) and costs two full-area blits per frame, so other layouts
+/// keep the box. A re-aim passes `dims` false: its box only has to fit the
+/// running one, and a dim change there is not worth ending the motion.
+fn motion_area(
+    scrolling: bool,
+    items: &[MotionItem],
+    wa: RECT,
+    margin: i32,
+    dims: bool,
+) -> Option<RECT> {
+    if scrolling {
+        return Some(wa);
+    }
+    let local = |r: RECT| rect_offset(r, -wa.left, -wa.top);
+    let moves: Vec<(RECT, RECT)> = items
+        .iter()
+        .filter(|it| motion_changes(it))
+        .map(|it| (local(it.from), local(it.to)))
+        .collect();
+    let dimmed: Vec<RECT> = items
+        .iter()
+        .filter(|it| dims && it.d0 != it.d1)
+        .map(|it| local(it.from))
+        .collect();
+    glide_damage(
+        &moves,
+        &dimmed,
+        margin,
+        wa.right - wa.left,
+        wa.bottom - wa.top,
+    )
+    .map(|d| rect_offset(d, wa.left, wa.top))
+}
+
 /// Do `a` and `b` overlap (non-empty intersection)?
 fn rects_overlap(a: &RECT, b: &RECT) -> bool {
     a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom
 }
 
-/// A cosmetic window-glide request handed from the manager to the glide worker.
-/// The worker owns and frees `out_bmp`.
+/// Is `inner` entirely inside `outer`?
+fn rect_contains(outer: &RECT, inner: &RECT) -> bool {
+    inner.left >= outer.left
+        && inner.top >= outer.top
+        && inner.right <= outer.right
+        && inner.bottom <= outer.bottom
+}
+
+/// `r`'s top-left at size `w` x `h`.
+fn rect_at_size(r: RECT, w: i32, h: i32) -> RECT {
+    RECT {
+        right: r.left + w,
+        bottom: r.top + h,
+        ..r
+    }
+}
+
+/// The smallest rect holding both.
+fn rect_union(a: RECT, b: RECT) -> RECT {
+    RECT {
+        left: a.left.min(b.left),
+        top: a.top.min(b.top),
+        right: a.right.max(b.right),
+        bottom: a.bottom.max(b.bottom),
+    }
+}
+
+/// `r` moved by (dx, dy).
+fn rect_offset(r: RECT, dx: i32, dy: i32) -> RECT {
+    RECT {
+        left: r.left + dx,
+        top: r.top + dy,
+        right: r.right + dx,
+        bottom: r.bottom + dy,
+    }
+}
+
+/// Move or Static for an item travelling `from` -> `to` (visible frames).
+/// Static when it is already there, or when its slot did not change
+/// (`slot_same`) and its top-left is there: an app that refuses its slot's
+/// size (wider than its column) then raises no overlay on every no-op
+/// retile. Anything else morphs, a resize in place included.
+fn motion_kind(from: RECT, to: RECT, slot_same: bool) -> MotionKind {
+    let near = |a: i32, b: i32| (a - b).abs() <= GLIDE_STILL_PX;
+    let sized = near(from.right - from.left, to.right - to.left)
+        && near(from.bottom - from.top, to.bottom - to.top);
+    if near(from.left, to.left) && near(from.top, to.top) && (slot_same || sized) {
+        MotionKind::Static
+    } else {
+        MotionKind::Move
+    }
+}
+
+/// Where a tile's motion ends: its new slot `raw`, except when its last slot
+/// (`slot`, LAST_SLOT) had the same size: then at raw's top-left at the
+/// window's real size (`frame`). An app refusing its slot's size keeps
+/// refusing the same size, so a scroll ends where the reveal shows it. A
+/// changed slot size ends at raw (what the app will do is unknown).
+fn motion_end(raw: RECT, slot: Option<RECT>, frame: RECT) -> RECT {
+    let near = |a: i32, b: i32| (a - b).abs() <= GLIDE_STILL_PX;
+    match slot {
+        Some(s)
+            if near(s.right - s.left, raw.right - raw.left)
+                && near(s.bottom - s.top, raw.bottom - raw.top) =>
+        {
+            rect_at_size(raw, frame.right - frame.left, frame.bottom - frame.top)
+        }
+        _ => raw,
+    }
+}
+
+/// Does this item change anything on screen? A motion where none does
+/// raises no overlay.
+fn motion_changes(it: &MotionItem) -> bool {
+    it.kind != MotionKind::Static || it.a0 != it.a1
+}
+
+/// Every rect `it` can be drawn at between its ends (the straight line
+/// between them), for "does the overlay show it at all?".
+fn motion_swept(it: &MotionItem) -> RECT {
+    rect_union(it.from, it.to)
+}
+
+/// Where `it` is drawn at eased progress `e` (0..=1). Move lerps all four
+/// edges (position and size together; exactly `from` at 0, which is the
+/// screen, and `to` at 1, where the real window is placed; an edge that does
+/// not move stays put); Static stays at `from` (motion_step draws a Static
+/// thumbnail at its window's live size there).
+fn motion_rect(it: &MotionItem, e: f64) -> RECT {
+    if it.kind == MotionKind::Static {
+        return it.from;
+    }
+    let lerp = |a: i32, b: i32| (a as f64 + (b - a) as f64 * e).round() as i32;
+    RECT {
+        left: lerp(it.from.left, it.to.left),
+        top: lerp(it.from.top, it.to.top),
+        right: lerp(it.from.right, it.to.right),
+        bottom: lerp(it.from.bottom, it.to.bottom),
+    }
+}
+
+/// Opacity at eased progress `e`: exactly `a0` at 0 and `a1` at 1.
+fn motion_alpha(a0: u8, a1: u8, e: f64) -> u8 {
+    (a0 as f64 + (a1 as f64 - a0 as f64) * e.clamp(0.0, 1.0)).round() as u8
+}
+
+/// The opacity a thumbnail or snapshot is drawn at: its visibility `alpha`
+/// times its layered dim `dim`. Exact at the ends: 255 x d = d, 0 stays 0.
+fn drawn_alpha(alpha: u8, dim: u8) -> u8 {
+    (alpha as u32 * dim as u32 / 255) as u8
+}
+
+/// Eased progress of a segment at linear time `t`. A motion's first segment
+/// eases in and out (no first-frame leap from a standing start); a re-aimed
+/// one is already moving, so it starts at speed with ease-out cubic (an
+/// ease-in there would stall the windows mid-flight on every key repeat).
+fn motion_ease(t: f64, reaimed: bool) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if reaimed {
+        ease_out_cubic(t)
+    } else {
+        ease_in_out_cubic(t)
+    }
+}
+
+/// Re-aim one item already on the overlay: it continues from where it is
+/// drawn now (`at`, size included; visibility `alpha`, dim `dim`) towards
+/// `next`'s end, so frame 0 of the new segment draws exactly `at` (no jump).
+/// It stands when it is already at its end, or when `next` is Static (its
+/// slot did not change) and it stands where `next` found the window; a
+/// mid-morph item whose slot did not change keeps morphing to it.
+fn retarget_item(at: RECT, alpha: u8, dim: u8, next: &MotionItem) -> MotionItem {
+    let stands = glide_still(&at, &next.to)
+        || (next.kind == MotionKind::Static && glide_still(&at, &next.from));
+    MotionItem {
+        from: at,
+        a0: alpha,
+        d0: dim,
+        kind: if stands {
+            MotionKind::Static
+        } else {
+            MotionKind::Move
+        },
+        ..*next
+    }
+}
+
+/// `n` as a re-aim takes it, given the running motion's items `cur`: a tile
+/// already morphing whose slot did not change (`slot_same`) keeps its end
+/// and morph, only its new opacity and dim apply. Its frame, re-read now,
+/// can predate a move the last retile posted (ASYNC_WINDOW_POS, still in
+/// flight): motion_end would end it at its old size, or motion_kind make it
+/// Static, and it would pop at the reveal instead of morphing.
+fn reaim_keep(cur: &[MotionItem], n: &MotionItem) -> MotionItem {
+    match cur.iter().find(|c| c.hwnd == n.hwnd) {
+        Some(c) if n.slot_same && c.kind == MotionKind::Move => MotionItem {
+            to: c.to,
+            kind: MotionKind::Move,
+            ..*n
+        },
+        _ => *n,
+    }
+}
+
+/// Does a re-aim to `next` change the running motion's items `cur`? An item
+/// left (closed, minimised, moved away), one joined, or an end moved or
+/// changed its opacity or dim (a focus change crossfades instead of popping
+/// at the reveal). False = the same layout again: the motion keeps its
+/// course instead of restarting its segment.
+fn reaim_changes(cur: &[MotionItem], next: &[MotionItem]) -> bool {
+    cur.iter().any(|c| !next.iter().any(|n| n.hwnd == c.hwnd))
+        || next.iter().any(|n| {
+            !cur.iter()
+                .any(|c| c.hwnd == n.hwnd && c.to == n.to && c.a1 == n.a1 && c.d1 == n.d1)
+        })
+}
+
+/// A new motion's draw order (later = on top): bottom-first by real z-order
+/// (`rank` per item, 0 = the top, usize::MAX = not found: at the bottom), so
+/// frame 0 stacks as the screen does. Then the focused tile is lifted to just
+/// above the highest tile, so it passes over the tiles it crosses (the reveal
+/// has it activated, on top), unless that would carry it over something it
+/// overlaps at frame 0 (a drop under the window it landed on). Floats and
+/// bars above every tile stay above it.
+fn motion_order(items: &mut Vec<MotionItem>, rank: &[usize]) {
+    let mut ranked: Vec<(usize, MotionItem)> = rank.iter().copied().zip(items.drain(..)).collect();
+    ranked.sort_by_key(|&(r, _)| std::cmp::Reverse(r));
+    items.extend(ranked.into_iter().map(|(_, it)| it));
+    let tile = |it: &MotionItem| matches!(it.role, MotionRole::Tile | MotionRole::Focus);
+    let (Some(f), Some(top)) = (
+        items.iter().position(|it| it.role == MotionRole::Focus),
+        items.iter().rposition(tile),
+    ) else {
+        return;
+    };
+    if top > f
+        && !items[f + 1..=top]
+            .iter()
+            .any(|o| rects_overlap(&o.from, &items[f].from))
+    {
+        let it = items.remove(f);
+        items.insert(top, it);
+    }
+}
+
+/// Each item's place in the real z-order (0 = the top; usize::MAX = not
+/// found), from one walk of the top-level windows. No messages.
+unsafe fn z_ranks(items: &[MotionItem]) -> Vec<usize> {
+    let mut rank = vec![usize::MAX; items.len()];
+    let mut left = items.len();
+    let mut w = GetTopWindow(None).ok();
+    let mut z = 0;
+    // Bounded: a GetWindow walk can loop while windows re-raise themselves
+    // (MSDN). Far above any real top-level count; unreached = the bottom.
+    while let Some(h) = w.filter(|_| left > 0 && z < 4096) {
+        if let Some(i) = items.iter().position(|it| it.hwnd == h.0 as isize) {
+            rank[i] = z;
+            left -= 1;
+        }
+        z += 1;
+        w = GetWindow(h, GW_HWNDNEXT).ok();
+    }
+    rank
+}
+
+/// Start and end opacity of a tile, or None for one never shown (an inactive
+/// tab before and after). An end is hidden (0) when it is an inactive tab, or
+/// parked although its rect overlaps the work area `wa` (bled onto another
+/// monitor): it fades instead of popping. A column scrolling off or on stays
+/// opaque and is clipped by the overlay's edge. `parked` = the window is at a
+/// park spot now, so `from` is its last slot rather than its real rect.
+fn motion_alphas(
+    parked: bool,
+    from: RECT,
+    parks: bool,
+    tab_hidden: bool,
+    to: RECT,
+    wa: RECT,
+) -> Option<(u8, u8)> {
+    if parked && tab_hidden {
+        return None;
+    }
+    let shows = |r: RECT| rects_overlap(&r, &wa);
+    let a0 = if parked && shows(from) { 0 } else { 255 };
+    let a1 = if tab_hidden || (parks && shows(to)) {
+        0
+    } else {
+        255
+    };
+    (a0 != 0 || a1 != 0).then_some((a0, a1))
+}
+
+/// Shadow opacity `d` px out from an item's edge for reach `r`: SHADOW_ALPHA
+/// at the edge, easing (quadratic) to 0 at `r`.
+fn shadow_alpha(d: f64, r: i32) -> u8 {
+    if r <= 0 || d >= r as f64 {
+        return 0;
+    }
+    let u = 1.0 - d.max(0.0) / r as f64;
+    (SHADOW_ALPHA * u * u).round() as u8
+}
+
+/// The shadow 9-slice for reach `r`: (2r+1)^2 premultiplied ARGB pixels
+/// (black, so only the alpha byte is set), row-major top-down. Each pixel's
+/// alpha falls off with its distance from the centre pixel: the corners come
+/// out round, the 1 px centre row and column are the edges' profile.
+fn shadow_pixels(r: i32) -> Vec<u32> {
+    let n = 2 * r + 1;
+    (0..n * n)
+        .map(|i| {
+            let (x, y) = (i % n - r, i / n - r);
+            let d = ((x * x + y * y) as f64).sqrt();
+            (shadow_alpha(d, r) as u32) << 24
+        })
+        .collect()
+}
+
+/// Where the shadow's eight pieces go around `rc` (overlay coordinates) for
+/// reach `r`, as (destination, source) pairs, the source inside the
+/// (2r+1)-square 9-slice: the corners 1:1, the edges stretched along `rc`
+/// from the 1 px centre row / column. No centre: the item covers it.
+fn shadow_slices(rc: RECT, r: i32) -> [(RECT, RECT); 8] {
+    let at = |x: i32, y: i32, w: i32, h: i32| RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    };
+    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+    let far = r + 1; // where the right/bottom pieces start in the source
+    [
+        (at(rc.left - r, rc.top - r, r, r), at(0, 0, r, r)),
+        (at(rc.right, rc.top - r, r, r), at(far, 0, r, r)),
+        (at(rc.left - r, rc.bottom, r, r), at(0, far, r, r)),
+        (at(rc.right, rc.bottom, r, r), at(far, far, r, r)),
+        (at(rc.left, rc.top - r, w, r), at(r, 0, 1, r)),
+        (at(rc.left, rc.bottom, w, r), at(r, far, 1, r)),
+        (at(rc.left - r, rc.top, r, h), at(0, r, r, 1)),
+        (at(rc.right, rc.top, r, h), at(far, r, r, 1)),
+    ]
+}
+
+/// A motion request handed from the manager to the glide worker: a new
+/// motion (`retarget` false: raise the overlay, signal, animate), or a re-aim
+/// of the one running (`retarget` true, the same generation: `items`
+/// replaces its targets; the overlay fields are ignored, the running overlay
+/// keeps its own). No thumbnail: the worker makes its own. The only GDI
+/// objects are cold snapshots in `cold`, handed over whole (Bmp, deselected
+/// and flushed by the cold worker): whoever drops the request frees them.
 struct GlideReq {
-    out_bmp: isize,        // HBITMAP: frozen `area` before placement (worker frees)
-    generation: u64,       // Invalidated by a newer layout or direct interaction.
-    hmon: isize,           // monitor, with `rect` the wallpaper-crop key
-    rect: RECT,            // work area (the wallpaper crop's extent)
-    area: RECT,            // screen rect glided (glide_damage): capture + overlay geometry
-    items: Vec<GlideItem>, // per-window old->new travel, `area`-local
+    generation: u64,        // Invalidated by a newer layout or direct interaction.
+    retarget: bool,         // re-aim the running motion instead of starting one
+    hmon: isize,            // monitor, with `rect` the wallpaper-crop key
+    rect: RECT,             // work area (the wallpaper crop's extent)
+    area: RECT,             // overlay rect (screen): the work area, or motion_area's box
+    items: Vec<MotionItem>, // screen coordinates; draw order, later on top
+    // Items with a blank DWM surface (cold, entering the overlay), each with
+    // its snapshot or None. Such an item never gets a thumbnail.
+    cold: Vec<(isize, Option<ColdBmp>)>,
     dur_ms: u64,
-    queued: Option<Instant>, // dispatch time, for the pickup probe (debug only)
+    dpi: u32,                  // the monitor's, for the shadow reach
+    queued: Option<Instant>,   // dispatch time, for the pickup probe (debug only)
     ex_style: WINDOW_EX_STYLE, // overlay_ex_style of the configured animation_ms
 }
 static GLIDE_REQ: Mutex<Option<GlideReq>> = Mutex::new(None);
 static GLIDE_CV: Condvar = Condvar::new();
 static GLIDE_READY: Mutex<bool> = Mutex::new(false);
 static GLIDE_READY_CV: Condvar = Condvar::new();
-// True from dispatch until the overlay tears down. Lets the manager skip
-// stacking a second glide over a running one (it places instantly instead).
+// True from dispatch until the overlay tears down with nothing queued. Lets
+// the manager re-aim a running motion on the same monitor, and place
+// instantly rather than stack a second overlay elsewhere. Set by
+// dispatch_glide and cleared by the worker, both under GLIDE_REQ's lock.
 static GLIDE_BUSY: AtomicBool = AtomicBool::new(false);
 static GLIDE_GENERATION: AtomicU64 = AtomicU64::new(0);
+// The generation whose retile has placed its windows (stored after
+// place_tiles): the motion's reveal waits for it, the slide's SLIDE_RELEASED
+// twin. A re-aim shares its motion's generation, so its own placement is
+// best-effort (the earlier store already matches).
+static GLIDE_PLACED: AtomicU64 = AtomicU64::new(0);
+/// How long past its segment's end a motion holds for GLIDE_PLACED.
+const GLIDE_HOLD_MS: u64 = 250;
+/// How long a new motion waits for a cancelled one's teardown (it sees the
+/// cancel on its next frame and flushes once more before the hide: about two
+/// frames at 60 Hz) before it places instantly instead.
+const GLIDE_TEARDOWN_WAIT_MS: u64 = 33;
 
 fn cancel_glide() -> u64 {
+    GLIDE_GF.store(0, Ordering::Relaxed);
     GLIDE_GENERATION
         .fetch_add(1, Ordering::AcqRel)
         .wrapping_add(1)
 }
-// The monitor that glide is on, stored with GLIDE_BUSY: a glide on one monitor
-// must not count as an overlay over another (see `overlay_up_on`).
+// The global_focus the running motion's dims were last aimed at (stored by
+// motion_start with each new motion or re-aim), 0 once cancelled: the
+// command tail re-aims only a motion aimed at another focus.
+static GLIDE_GF: AtomicIsize = AtomicIsize::new(0);
+// The monitor that motion is on, stored with GLIDE_BUSY: a motion on one
+// monitor must not count as an overlay over another (see `overlay_up_on`),
+// and only a retile of its own monitor re-aims it.
 static GLIDE_HMON: AtomicIsize = AtomicIsize::new(0);
+// The running motion's overlay rect (screen). Manager thread only (written
+// at dispatch, read to decide whether a re-aim fits under it); a mutex for
+// the static, never contended.
+static GLIDE_AREA: Mutex<RECT> = Mutex::new(RECT {
+    left: 0,
+    top: 0,
+    right: 0,
+    bottom: 0,
+});
+
+/// Is a motion running (or tearing down) on `hmon`? Then a retile of that
+/// monitor re-aims it instead of starting another.
+fn motion_on(hmon: isize) -> bool {
+    GLIDE_BUSY.load(Ordering::Acquire) && GLIDE_HMON.load(Ordering::Relaxed) == hmon
+}
 
 /// Could a capture of `hmon` right now include one of Astur's own overlays (a
-/// slide or glide running, or tearing down, on that monitor)? Sampled BEFORE
+/// slide or motion running, or tearing down, on that monitor)? Sampled BEFORE
 /// the capture: overlays are only ever started by the manager, so none can
 /// appear during it. Such a capture is fine as a slide's frame 0 (it is what
 /// is on screen) but is never cached as a workspace snapshot.
@@ -6262,19 +8597,80 @@ fn signal_glide_overlay_up() {
     GLIDE_READY_CV.notify_one();
 }
 
-/// Hand a glide to its worker, freeing any request it hasn't picked up yet.
+/// Hand a new motion to the worker (replacing any request it has not picked
+/// up yet). BUSY and HMON are set under the slot lock with the request: the
+/// worker clears BUSY under that lock only when the slot is empty, so it can
+/// never clear the BUSY of a motion it has not seen.
 fn dispatch_glide(req: GlideReq) {
     *GLIDE_READY.lock().unwrap() = false;
-    {
+    let old = {
         let mut slot = GLIDE_REQ.lock().unwrap();
-        if let Some(old) = slot.take() {
-            unsafe {
-                let _ = DeleteObject(HGDIOBJ(old.out_bmp as *mut c_void));
-            }
-        }
-        *slot = Some(req);
-    }
+        GLIDE_HMON.store(req.hmon, Ordering::Relaxed);
+        GLIDE_BUSY.store(true, Ordering::Release);
+        slot.replace(req)
+    };
     GLIDE_CV.notify_one();
+    drop(old); // a stale re-aim's snapshots, freed after the lock is released
+}
+
+/// Re-aim the running motion. No handshake: the overlay is already up. An
+/// earlier re-aim not applied yet is replaced (this one lists every item),
+/// but its cold snapshots carry over (carry_cold): they left the cache with
+/// it, and a column it brought in must not lose its snapshot to the next key
+/// press. One that arrives after the motion ended is dropped by the worker;
+/// its windows were placed instantly, which is all a late re-aim can cost.
+fn retarget_glide(mut req: GlideReq) {
+    let (old, spare) = {
+        let mut slot = GLIDE_REQ.lock().unwrap();
+        let mut old = slot.take();
+        let spare = match old.as_mut() {
+            Some(o) => carry_cold(std::mem::take(&mut o.cold), &mut req.cold),
+            None => Vec::new(),
+        };
+        *slot = Some(req);
+        (old, spare)
+    };
+    GLIDE_CV.notify_one();
+    drop((old, spare)); // snapshots freed after the lock is released
+}
+
+/// Move the snapshots of `old` (a replaced re-aim's cold list) into `into`:
+/// into a None slot of the same window, or as a new entry. A window that is
+/// no longer cold gets one too: placed on screen a moment ago it may not have
+/// painted yet, and the worker draws a snapshot of a cold-listed window
+/// rather than a maybe-blank thumbnail. Returns what is left (`into` had its
+/// own snapshot), for the caller to drop after its lock.
+fn carry_cold(
+    old: Vec<(isize, Option<ColdBmp>)>,
+    into: &mut Vec<(isize, Option<ColdBmp>)>,
+) -> Vec<ColdBmp> {
+    let mut spare = Vec::new();
+    for (h, s) in old {
+        let Some(s) = s else {
+            continue;
+        };
+        match into.iter_mut().find(|c| c.0 == h) {
+            Some(c) if c.1.is_none() => c.1 = Some(s),
+            Some(_) => spare.push(s),
+            None => into.push((h, Some(s))),
+        }
+    }
+    spare
+}
+
+/// keyboard_proc's motion reveal: cancels a running motion when dropped
+/// unless disarmed, so every early return of the hook reveals on a keydown
+/// without a cancel at each one. Disarmed for a keydown that resolves to an
+/// Astur hotkey, whose queued command re-aims the motion instead. An atomic
+/// add on drop: hook-legal.
+struct MotionReveal(bool);
+
+impl Drop for MotionReveal {
+    fn drop(&mut self) {
+        if self.0 {
+            cancel_glide();
+        }
+    }
 }
 
 /// Glide thread: owns its own overlay + message pump, idles on the condvar.
@@ -6291,54 +8687,353 @@ fn glide_worker() {
                 slot = GLIDE_CV.wait(slot).unwrap();
             }
         };
-        unsafe { run_window_glide(req, &mut wp) };
-        GLIDE_BUSY.store(false, Ordering::Release);
+        // A re-aim with no motion running here (it ended or was cancelled
+        // before this thread saw it): its windows are placed already, there
+        // is nothing to show.
+        if !req.retarget {
+            unsafe { run_window_glide(req, &mut wp) };
+        }
+        {
+            let slot = GLIDE_REQ.lock().unwrap();
+            if slot.is_none() {
+                GLIDE_BUSY.store(false, Ordering::Release);
+            }
+        }
         wp_ttl_hint();
     }
 }
 
-/// Composite a window glide: wallpaper backdrop + each window's frozen image
-/// translated at its original size. Resized layouts are placed directly.
-/// Worker owns and frees `out_bmp`; the wallpaper crop stays in `wpc`.
-unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
+/// One item on the worker: its thumbnail (or, for a cold window, its
+/// snapshot) and current segment.
+struct LiveItem {
+    seg: MotionItem,       // current segment; `from` = where it was drawn when it began
+    thumb: isize,          // HTHUMBNAIL; 0 = none (cold, source destroyed, or it left)
+    snap: Option<ColdBmp>, // a cold window's snapshot, drawn in the backdrop
+    at: RECT,              // where it was drawn last frame (screen)
+    alpha: u8,             // its visibility then (seg.a0 -> a1)
+    dim: u8,               // and its layered dim (seg.d0 -> d1)
+    sent: Option<(RECT, u8)>, // the last properties DWM got, to skip repeats
+}
+
+impl LiveItem {
+    /// Register `it`'s thumbnail on `overlay`; it shows once its first
+    /// properties are sent. None when DWM refuses (the window went away). A
+    /// window listed in `cold` has a blank surface: it gets its snapshot
+    /// (taken out of `cold`) instead, or None without one.
+    unsafe fn new(
+        overlay: HWND,
+        it: MotionItem,
+        cold: &mut [(isize, Option<ColdBmp>)],
+    ) -> Option<LiveItem> {
+        let (thumb, snap) = match cold.iter_mut().find(|c| c.0 == it.hwnd) {
+            Some(c) => (0, Some(c.1.take()?)),
+            None => (
+                DwmRegisterThumbnail(overlay, hwnd_from(it.hwnd)).ok()?,
+                None,
+            ),
+        };
+        Some(LiveItem {
+            seg: it,
+            thumb,
+            snap,
+            at: it.from,
+            alpha: it.a0,
+            dim: it.d0,
+            sent: None,
+        })
+    }
+
+    /// Still drawn: a thumbnail or a snapshot.
+    fn live(&self) -> bool {
+        self.thumb != 0 || self.snap.is_some()
+    }
+
+    /// How opaque it is drawn now: thumbnail, snapshot and shadow alike (a
+    /// dimmed window's DWM shadow is dimmed with it, measured).
+    fn opacity(&self) -> u8 {
+        drawn_alpha(self.alpha, self.dim)
+    }
+
+    /// Stop drawing it: unregister the thumbnail (it vanishes with the next
+    /// composition), free the snapshot (never selected between frames).
+    unsafe fn retire(&mut self) {
+        if self.thumb != 0 {
+            let _ = DwmUnregisterThumbnail(self.thumb);
+            self.thumb = 0;
+        }
+        self.snap = None;
+    }
+}
+
+/// The soft shadow drawn under every item but a tab bar (which has none):
+/// thumbnails carry no DWM shadow, and without one the reveal would pop
+/// shadows in. One premultiplied ARGB 9-slice per motion (shadow_pixels),
+/// selected into its own DC. Glide worker only; freed with the motion.
+struct Shadow {
+    dc: HDC,
+    bmp: HBITMAP,
+    old: HGDIOBJ,
+    r: i32,
+}
+
+impl Shadow {
+    /// The 9-slice for reach `r` px, from a DIB section (AlphaBlend's
+    /// per-pixel alpha wants 32 bpp). None on a GDI failure: no shadows.
+    unsafe fn new(like: HDC, r: i32) -> Option<Shadow> {
+        if r <= 0 {
+            return None;
+        }
+        let n = 2 * r + 1;
+        let bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: n,
+                biHeight: -n, // top-down, as shadow_pixels lays it out
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut bits: *mut c_void = core::ptr::null_mut();
+        let bmp =
+            CreateDIBSection(like, &bi, DIB_RGB_COLORS, &mut bits, HANDLE::default(), 0).ok()?;
+        if bits.is_null() {
+            let _ = DeleteObject(HGDIOBJ(bmp.0));
+            return None;
+        }
+        // Written before any GDI call touches the bitmap, so no GdiFlush.
+        let px = shadow_pixels(r);
+        core::ptr::copy_nonoverlapping(px.as_ptr(), bits as *mut u32, px.len());
+        let dc = CreateCompatibleDC(like);
+        let old = SelectObject(dc, HGDIOBJ(bmp.0));
+        Some(Shadow { dc, bmp, old, r })
+    }
+
+    /// Blend the shadow around `rc` (overlay coordinates) into `dst`, scaled
+    /// by `alpha` (a fading item's shadow fades with it). Pieces outside the
+    /// `w` x `h` buffer are skipped.
+    unsafe fn draw(&self, dst: HDC, rc: RECT, alpha: u8, w: i32, h: i32) {
+        // BlendOp 0 == AC_SRC_OVER; AlphaFormat 1 == AC_SRC_ALPHA (per-pixel,
+        // premultiplied), times SourceConstantAlpha.
+        let blend = BLENDFUNCTION {
+            BlendOp: 0,
+            BlendFlags: 0,
+            SourceConstantAlpha: alpha,
+            AlphaFormat: 1,
+        };
+        for (d, s) in shadow_slices(rc, self.r) {
+            let (dw, dh) = (d.right - d.left, d.bottom - d.top);
+            if dw <= 0 || dh <= 0 || d.right <= 0 || d.bottom <= 0 || d.left >= w || d.top >= h {
+                continue;
+            }
+            let _ = AlphaBlend(
+                dst,
+                d.left,
+                d.top,
+                dw,
+                dh,
+                self.dc,
+                s.left,
+                s.top,
+                s.right - s.left,
+                s.bottom - s.top,
+                blend,
+            );
+        }
+    }
+
+    unsafe fn free(self) {
+        SelectObject(self.dc, self.old);
+        let _ = DeleteDC(self.dc);
+        let _ = DeleteObject(HGDIOBJ(self.bmp.0));
+    }
+}
+
+/// Advance every item to eased progress `e`: where it is drawn (the whole
+/// source scaled into that rect by DWM, a snapshot by cold_draw), its
+/// visibility and its dim. A Static thumbnail is drawn at its `from`
+/// top-left at its window's LIVE frame size (read per frame: a window placed
+/// back to its slot, or refusing it, is drawn as it is, never squeezed). An
+/// item whose window is gone (closed mid-motion; a destroyed tab bar, which
+/// no re-aim retires) drops out, so its shadow goes too. True when anything
+/// drawn changed, i.e. the backdrop needs composing again. No messages.
+unsafe fn motion_step(items: &mut [LiveItem], e: f64) -> bool {
+    let mut changed = false;
+    for it in items.iter_mut().filter(|it| it.live()) {
+        let hwnd = hwnd_from(it.seg.hwnd);
+        let live = if !IsWindow(hwnd).as_bool() {
+            None
+        } else if it.thumb != 0 && it.seg.kind == MotionKind::Static {
+            frame_bounds(hwnd)
+                .map(|fr| rect_at_size(it.seg.from, fr.right - fr.left, fr.bottom - fr.top))
+        } else {
+            Some(motion_rect(&it.seg, e))
+        };
+        let Some(at) = live else {
+            it.retire();
+            changed = true;
+            continue;
+        };
+        let alpha = motion_alpha(it.seg.a0, it.seg.a1, e);
+        let dim = motion_alpha(it.seg.d0, it.seg.d1, e);
+        changed |= at != it.at || alpha != it.alpha || dim != it.dim;
+        it.at = at;
+        it.alpha = alpha;
+        it.dim = dim;
+    }
+    changed
+}
+
+/// Hand DWM each thumbnail's rect (overlay coordinates, `origin` = the
+/// overlay's screen top-left) and opacity, only where they changed since the
+/// last frame. No source rect: DWM scales the whole visible frame into the
+/// rect. A failed update (the source was destroyed) hides that item and the
+/// motion goes on. Returns (anything sent, anything retired).
+unsafe fn motion_present(items: &mut [LiveItem], origin: (i32, i32)) -> (bool, bool) {
+    let (mut sent, mut retired) = (false, false);
+    for it in items.iter_mut().filter(|it| it.thumb != 0) {
+        let r = rect_offset(it.at, -origin.0, -origin.1);
+        let opacity = it.opacity();
+        if it.sent == Some((r, opacity)) {
+            continue;
+        }
+        let props = DWM_THUMBNAIL_PROPERTIES {
+            dwFlags: DWM_TNP_RECTDESTINATION | DWM_TNP_VISIBLE | DWM_TNP_OPACITY,
+            rcDestination: r,
+            rcSource: RECT::default(),
+            opacity,
+            fVisible: BOOL(1),
+            fSourceClientAreaOnly: BOOL(0),
+        };
+        if DwmUpdateThumbnailProperties(it.thumb, &props).is_ok() {
+            it.sent = Some((r, opacity));
+            sent = true;
+        } else {
+            it.retire();
+            retired = true;
+        }
+    }
+    (sent, retired)
+}
+
+/// A re-aim for the motion `generation` runs, if the manager queued one. A
+/// stale one (another generation, whose motion is over) is taken and
+/// dropped. A new-motion request is left alone (none can arrive while
+/// GLIDE_BUSY is set; the main loop would pick it up after this one).
+fn motion_take_retarget(generation: u64) -> Option<GlideReq> {
+    let req = {
+        let mut slot = GLIDE_REQ.lock().unwrap();
+        if !slot.as_ref().is_some_and(|r| r.retarget) {
+            return None;
+        }
+        slot.take()
+    };
+    // A stale one (and its snapshots) is dropped here, after the lock.
+    req.filter(|r| r.generation == generation)
+}
+
+/// Does re-aim item `n` take part in the running motion? One it already
+/// draws (`known`) always. A new one only if its path enters the overlay
+/// `area` (a re-aim lists every tile) and it can be drawn: a cold window
+/// (listed in `cold`) only with a snapshot, its surface being blank. One left
+/// out neither joins nor counts as a change, or every re-aim of a long strip
+/// would restart the segment.
+fn reaim_admits(
+    n: &MotionItem,
+    known: bool,
+    area: RECT,
+    cold: &[(isize, Option<ColdBmp>)],
+) -> bool {
+    let drawable = cold
+        .iter()
+        .find(|c| c.0 == n.hwnd)
+        .is_none_or(|c| c.1.is_some());
+    known || (drawable && rects_overlap(&motion_swept(n), &area))
+}
+
+/// Apply a re-aim: an item it no longer lists left the layout and drops out,
+/// a new one joins at its `from` (only if its path enters the overlay rect
+/// `area`: a re-aim lists every tile; and a cold one only with a snapshot in
+/// `cold`), and every other continues from where it is drawn now
+/// (retarget_item), off screen or not. True when the segment restarts; the
+/// same layout again changes nothing.
+unsafe fn motion_reaim(
+    overlay: HWND,
+    area: RECT,
+    items: &mut Vec<LiveItem>,
+    next: &[MotionItem],
+    cold: &mut [(isize, Option<ColdBmp>)],
+) -> bool {
+    let cur: Vec<MotionItem> = items
+        .iter()
+        .filter(|it| it.live())
+        .map(|it| it.seg)
+        .collect();
+    let known = |n: &MotionItem| cur.iter().any(|c| c.hwnd == n.hwnd);
+    let next: Vec<MotionItem> = next
+        .iter()
+        .filter(|n| reaim_admits(n, known(n), area, cold))
+        .map(|n| reaim_keep(&cur, n))
+        .collect();
+    if !reaim_changes(&cur, &next) {
+        return false;
+    }
+    for it in items.iter_mut().filter(|it| it.live()) {
+        match next.iter().find(|n| n.hwnd == it.seg.hwnd) {
+            Some(n) => it.seg = retarget_item(it.at, it.alpha, it.dim, n),
+            None => it.retire(), // closed, minimised or moved away
+        }
+    }
+    for n in next.iter().filter(|n| !known(n)) {
+        if let Some(l) = LiveItem::new(overlay, *n, cold) {
+            items.push(l);
+        }
+    }
+    true
+}
+
+/// Composite one motion: wallpaper crop + drawn shadows (and cold windows'
+/// snapshots) as the overlay's backdrop, the items' live DWM thumbnails
+/// composited on top, re-aimed by retarget requests until its segment ends, a
+/// cancel or a drag. Owns and frees every thumbnail and GDI object it makes,
+/// and every snapshot handed to it; the wallpaper crop stays in `wpc`.
+unsafe fn run_window_glide(mut req: GlideReq, wpc: &mut WpCache) {
     let mut probe = Probe::start("glide");
     probe.note(format_args!("items={}", req.items.len()));
     if let Some(q) = req.queued {
         probe.note(format_args!("pickup={}us", q.elapsed().as_micros()));
     }
-    // The overlay covers only the glided area (glide_damage); the wallpaper
-    // crop is the whole work area's, read from the matching sub-rect.
-    let full = req.area;
-    let w = full.right - full.left;
-    let h = full.bottom - full.top;
-    let (wp_x, wp_y) = (full.left - req.rect.left, full.top - req.rect.top);
+    // The overlay covers the work area (scrolling) or the damage box; the
+    // wallpaper crop is the whole work area's, read from the matching rect.
+    let area = req.area;
+    let w = area.right - area.left;
+    let h = area.bottom - area.top;
+    let (wp_x, wp_y) = (area.left - req.rect.left, area.top - req.rect.top);
     probe.note(format_args!(
         "area={w}x{h}@{wp_x},{wp_y} of {}x{}",
         req.rect.right - req.rect.left,
         req.rect.bottom - req.rect.top
     ));
-    let free_out = || {
-        let _ = DeleteObject(HGDIOBJ(req.out_bmp as *mut c_void));
-    };
+    let generation = req.generation;
     let cancelled = || {
-        GLIDE_GENERATION.load(Ordering::Acquire) != req.generation
+        GLIDE_GENERATION.load(Ordering::Acquire) != generation
             || ANY_DRAG.load(Ordering::Relaxed)
             || NATIVE_DRAG.load(Ordering::Relaxed) != 0
     };
-    if w <= 0 || h <= 0 || req.out_bmp == 0 || req.items.is_empty() || cancelled() {
-        free_out();
+    if w <= 0 || h <= 0 || req.items.is_empty() || cancelled() {
         signal_glide_overlay_up();
         return;
     }
     // Need the still wallpaper to fill vacated areas. It comes ready-made from
     // the capture thread (never rendered here: see the wallpaper cache notes).
     // With no current crop for this exact monitor + work area, degrade to an
-    // instant switch (no overlay): signal and bail, the manager places the
+    // instant retile (no overlay): signal and bail, the manager places the
     // real windows with no animation.
     let wp = wpc.get(req.hmon, req.rect);
     probe.mark("wallpaper");
     if wp == 0 {
-        free_out();
         signal_glide_overlay_up();
         probe.note(format_args!("no-wallpaper=instant"));
         return;
@@ -6350,8 +9045,8 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
         SLIDE_CLASS,
         w!(""),
         WS_POPUP,
-        full.left,
-        full.top,
+        area.left,
+        area.top,
         w,
         h,
         None,
@@ -6361,126 +9056,529 @@ unsafe fn run_window_glide(req: GlideReq, wpc: &mut WpCache) {
     );
     probe.mark("window");
     let Ok(overlay) = overlay else {
-        free_out();
         signal_glide_overlay_up();
         return;
     };
     if cancelled() || !overlay_make_visible(overlay, req.ex_style) {
         let _ = DestroyWindow(overlay);
-        free_out();
         signal_glide_overlay_up();
         return;
     }
 
     let odc = GetDC(overlay);
-    let srcdc = CreateCompatibleDC(odc); // frozen before-frame
-    let os = SelectObject(srcdc, HGDIOBJ(req.out_bmp as *mut c_void));
-
-    // Frame 0 must be pixel-identical to the live screen: the exact capture,
-    // presented straight from srcdc (not the wallpaper-composited compose(0.0),
-    // and no back-buffer hop, which was a second full-frame blit before the
-    // signal). CRITICAL ORDER: show the overlay FIRST, THEN present — a blit to a
-    // still-hidden window's DC is clipped away and lost, leaving the overlay
-    // empty so the wallpaper flashes through (see the full note in
-    // run_transition). Show, present, settle, flush, then signal.
-    let _ = ShowWindow(overlay, SW_SHOWNA);
-    let _ = BitBlt(odc, 0, 0, w, h, srcdc, 0, 0, SRCCOPY);
-    let _ = UpdateWindow(overlay);
-    let _ = DwmFlush();
-    signal_glide_overlay_up();
-    probe.mark("signal");
-
-    // Back buffer and wallpaper DC only now: nothing before the signal reads
-    // them, and allocating a fresh w x h bitmap there was manager wait time.
-    // Every compose starts with a full wallpaper blit, so the buffer's initial
-    // contents are never shown. (A retarget mid-glide would have to seed it
-    // from srcdc here first.)
+    // Frame 0 is composed (wallpaper + shadows + cold snapshots), no longer a
+    // capture, so the
+    // back buffer exists before the signal. ponytail: a fresh w x h bitmap
+    // per motion; keep one across motions if `signal` in the probe shows it.
     let backdc = CreateCompatibleDC(odc);
     let back = CreateCompatibleBitmap(odc, w, h);
     let wpdc = CreateCompatibleDC(odc); // wallpaper backdrop
     let ob = SelectObject(backdc, HGDIOBJ(back.0));
     let owp = SelectObject(wpdc, HGDIOBJ(wp as *mut c_void));
-    // Compose one frame at eased progress `e` (0..=1). At e=0 every window sits
-    // at its old rect over the still wallpaper == current screen (no flash). At
-    // e=1 every window is at its new rect, pixel-aligned with the real windows
-    // placed underneath, so the reveal is seamless.
-    let compose = |e: f64| {
+    let shadow = Shadow::new(odc, dpi_px(GLIDE_SHADOW_PX, req.dpi));
+    // Cold snapshots are selected here one at a time, only while drawn.
+    let snapdc = CreateCompatibleDC(odc);
+    // Stacked as the screen is (thumbnails stack in registration order),
+    // read here, before the manager places anything.
+    let rank = z_ranks(&req.items);
+    motion_order(&mut req.items, &rank);
+    // Registered while the overlay is still hidden; frame 0's properties
+    // make them visible, and they appear with it.
+    let mut items: Vec<LiveItem> = req
+        .items
+        .iter()
+        .filter_map(|&it| LiveItem::new(overlay, it, &mut req.cold))
+        .collect();
+    let origin = (area.left, area.top);
+    // The backdrop for the items' current state: the still wallpaper, then
+    // per item in draw order its shadow and, for a cold window, its snapshot
+    // (so a cold window is always under every thumbnail). The thumbnails
+    // composite above it.
+    let compose = |items: &[LiveItem]| {
         let _ = BitBlt(backdc, 0, 0, w, h, wpdc, wp_x, wp_y, SRCCOPY);
-        for it in &req.items {
-            let lerp = |a: i32, b: i32| (a as f64 + (b - a) as f64 * e).round() as i32;
-            let dl = lerp(it.old.left, it.new.left);
-            let dt = lerp(it.old.top, it.new.top);
-            let (sw, sh) = (it.old.right - it.old.left, it.old.bottom - it.old.top);
-            // Keep source pixels 1:1 throughout the move. Size-changing layouts
-            // never reach this compositor; no scaled-text path remains.
-            let _ = BitBlt(
-                backdc,
-                dl,
-                dt,
-                sw,
-                sh,
-                srcdc,
-                it.old.left,
-                it.old.top,
-                SRCCOPY,
-            );
+        for it in items.iter().filter(|it| it.live() && it.opacity() > 0) {
+            let rc = rect_offset(it.at, -origin.0, -origin.1);
+            if let Some(s) = shadow.as_ref().filter(|_| it.seg.role != MotionRole::Bar) {
+                s.draw(backdc, rc, it.opacity(), w, h);
+            }
+            if let Some(c) = &it.snap {
+                cold_draw(backdc, snapdc, c, rc, it.opacity());
+            }
         }
     };
+    // No back buffer (GDI quota) would present garbage; no item (thumbnail
+    // or snapshot) means nothing to show. Either way the manager places
+    // instantly. Cancelled is the last check before anything reaches the
+    // screen (as run_transition's): a worker slower than the manager's 250 ms
+    // handshake must not show a stale frame 0 over windows already placed.
+    let shown = !back.is_invalid() && !items.is_empty() && !cancelled();
+    if shown {
+        // Frame 0: every item at its `from`, which is the screen. CRITICAL
+        // ORDER: show the overlay FIRST, THEN present: a blit to a
+        // still-hidden window's DC is clipped away and lost, leaving the
+        // overlay empty so the wallpaper flashes through (see the full note in
+        // run_transition). The thumbnails were set before the show. Show,
+        // present, settle, flush, then signal.
+        motion_step(&mut items, 0.0);
+        motion_present(&mut items, origin);
+        compose(&items);
+        let _ = ShowWindow(overlay, SW_SHOWNA);
+        let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+        let _ = UpdateWindow(overlay);
+        let _ = DwmFlush();
+    }
+    signal_glide_overlay_up();
+    probe.mark("signal");
 
     let dur = req.dur_ms.max(1) as f64;
-    let start = Instant::now();
+    // The reveal waits for the manager's placement (GLIDE_PLACED), at most
+    // this long past the segment's end: a slow synchronous placement must not
+    // be uncovered half done, a manager stuck on a hung app must not hold it.
+    let hold = std::time::Duration::from_millis(req.dur_ms.max(1) + GLIDE_HOLD_MS);
+    let mut start = Instant::now();
+    let mut reaimed = false;
+    let mut reaims = 0u32;
     let mut msg = MSG::default();
-    // compose+present time per frame (us), probes only.
+    // An item dropped out after the last compose: its shadow must go.
+    let mut stale = false;
+    // compose+present time per composed frame (us), probes only.
     let mut frame_us: Vec<u32> = Vec::new();
     loop {
+        if !shown {
+            break; // nothing on screen: straight to the teardown
+        }
         while PeekMessageW(&mut msg, overlay, 0, 0, PM_REMOVE).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-        if cancelled() || back.is_invalid() {
-            // No back buffer (GDI quota): presenting it would show garbage.
-            // Frame 0 is on screen, the windows are placed under it; reveal.
+        let mut dirty = std::mem::take(&mut stale);
+        // Snapshots the re-aim does not use are freed with `next`, here.
+        if let Some(mut next) = motion_take_retarget(generation) {
+            if motion_reaim(overlay, area, &mut items, &next.items, &mut next.cold) {
+                start = Instant::now();
+                reaimed = true;
+                reaims += 1;
+                dirty = true;
+            }
+        }
+        if cancelled() {
+            // The windows are placed under the overlay already; reveal now.
             break;
         }
-        let el = start.elapsed().as_secs_f64() * 1000.0;
+        let t = start.elapsed().as_secs_f64() * 1000.0 / dur;
         let tf = probe.on().then(Instant::now);
-        compose(ease_in_out_cubic((el / dur).min(1.0)));
-        let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
-        if let Some(tf) = tf {
+        dirty |= motion_step(&mut items, motion_ease(t, reaimed));
+        // An unchanged picture (frame 0 again, Static-only items, a settled
+        // tail) is not composed and blitted again.
+        if dirty {
+            compose(&items);
+            let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+        }
+        let (sent, retired) = motion_present(&mut items, origin);
+        stale = retired;
+        if let Some(tf) = tf.filter(|_| dirty) {
             if frame_us.is_empty() {
                 probe.mark("first_frame");
             }
             frame_us.push(tf.elapsed().as_micros() as u32);
         }
-        if el >= dur {
+        if t >= 1.0
+            && (GLIDE_PLACED.load(Ordering::Acquire) == generation || start.elapsed() >= hold)
+        {
             break;
         }
-        // Pace presentation with DWM instead of an unrelated 120 Hz timer.
-        if DwmFlush().is_err() {
+        // Pace presentation with DWM instead of an unrelated 120 Hz timer;
+        // with nothing new to present, a short sleep (DwmFlush need not wait
+        // when nothing is pending).
+        if !(dirty || sent) || DwmFlush().is_err() {
             std::thread::sleep(std::time::Duration::from_millis(8));
         }
     }
 
     SelectObject(backdc, ob);
-    SelectObject(srcdc, os);
     SelectObject(wpdc, owp); // deselected: the crop goes back to `wpc` for reuse
     let _ = GdiFlush(); // Finish bitmap reads before freeing or reusing them.
     let _ = DeleteObject(HGDIOBJ(back.0));
     let _ = DeleteDC(backdc);
-    let _ = DeleteDC(srcdc);
     let _ = DeleteDC(wpdc);
+    let _ = DeleteDC(snapdc); // holds no snapshot between draws
+    if let Some(s) = shadow {
+        s.free();
+    }
     ReleaseDC(overlay, odc);
-    free_out();
-    // Sync teardown to the next DWM frame so the real (already-placed) windows
-    // are composited before the overlay disappears — no flash on the reveal.
-    let _ = DwmFlush();
+    if shown {
+        // Sync teardown to the next DWM frame so the real (already-placed)
+        // windows are composited before the overlay disappears. Hide before
+        // unregistering: the hide takes the backdrop and every thumbnail away
+        // in one composition, where unregistering first could show a frame of
+        // bare wallpaper.
+        let _ = DwmFlush();
+        let _ = ShowWindow(overlay, SW_HIDE);
+    }
+    // Snapshots go here too (after the GdiFlush above); any the motion did
+    // not use are freed with `req.cold` when this returns.
+    for it in &mut items {
+        it.retire();
+    }
     let _ = DestroyWindow(overlay);
     probe.mark("teardown");
     let (p50, max) = p50_max(&mut frame_us);
     probe.note(format_args!(
-        "frames={} frame_p50={p50}us frame_max={max}us",
+        "frames={} frame_p50={p50}us frame_max={max}us reaims={reaims}",
         frame_us.len()
     ));
+}
+
+// =========================================================================
+// Cold-window snapshots: what a motion draws for a window whose DWM surface
+// is blank.
+//
+// A window shown or created at a park spot, or minimised, has a blank DWM
+// surface until it is on screen again (plan/animations.md, measured), so its
+// thumbnail would slide in white. The manager tracks which tiles are warm
+// (WARM). After every command it queues a request here for each cold tile
+// parked near the view of an active scrolling workspace (cold_request), and
+// the cold worker PrintWindows it into a bitmap of its visible frame. A
+// motion TAKES the snapshot out of the cache into its request (single-owner
+// hand-off, the Bmp type); the glide worker draws it in the backdrop instead
+// of registering a thumbnail, then frees it. No snapshot (not shot yet,
+// failed, hung app) = the item is left out and appears at the reveal; a blank
+// thumbnail is never shown.
+//   * Only `cold_worker` PrintWindows an app window (the wallpaper capture
+//     thread prints Explorer's wallpaper window, nothing else). PrintWindow
+//     is synchronous with the target app and a hung one blocks the caller:
+//     never the manager, a compositor or a hook. A print that never returns
+//     stalls only this thread; motions then leave cold windows out.
+//   * COLD is never held across a GDI or window call; bitmaps are dropped
+//     (DeleteObject) after the lock is released. Deselect + GdiFlush on the
+//     worker before a snapshot enters the cache.
+//   * Evicted on untrack (sync_managed), when the window turns warm, is
+//     hidden or minimised (WARM), and on anything that invalidates window
+//     images: display or work-area change, reload, a layout change away from
+//     scrolling (cold_clear).
+// =========================================================================
+
+/// A cold window's snapshot: its visible frame (what a thumbnail would show),
+/// `w` x `h` px, as PrintWindow rendered it.
+struct ColdBmp {
+    bmp: Bmp,
+    w: i32,
+    h: i32,
+}
+
+/// Requests and snapshots. `want` is in request order; the worker shoots its
+/// first and leaves it there until stored, so nothing is queued twice. A
+/// stored None = the shot failed (hung, gone, GDI): not retried until the
+/// entry is evicted.
+#[derive(Default)]
+struct ColdCache {
+    want: Vec<isize>,
+    snaps: Vec<(isize, Option<ColdBmp>)>, // oldest first, at most COLD_MAX
+}
+
+/// Snapshots kept at most, oldest dropped first. Requests only cover tiles
+/// parked within a view width of the view (cold_wanted), so a strip seldom
+/// needs more; each is a DDB of a visible frame (~16 MB for a half-width
+/// column at 4K).
+const COLD_MAX: usize = 16;
+
+/// While an animation runs the cold worker waits in steps of this: like the
+/// wallpaper render, a print never loads DWM and an app mid-animation.
+const COLD_BUSY_POLL_MS: u64 = 25;
+
+static COLD: Mutex<ColdCache> = Mutex::new(ColdCache {
+    want: Vec::new(),
+    snaps: Vec::new(),
+});
+static COLD_CV: Condvar = Condvar::new();
+
+impl ColdCache {
+    /// Queue `h` unless it is queued or stored already. True when queued.
+    fn request(&mut self, h: isize) -> bool {
+        if self.want.contains(&h) || self.snaps.iter().any(|s| s.0 == h) {
+            return false;
+        }
+        self.want.push(h);
+        true
+    }
+
+    /// Store the worker's shot of `h` if it is still wanted (an eviction
+    /// meanwhile cancelled it). Returns what leaves the cache, for the caller
+    /// to drop after the lock: an entry replaced or pushed out by COLD_MAX,
+    /// or the unwanted shot itself.
+    fn store(&mut self, h: isize, shot: Option<ColdBmp>) -> Vec<ColdBmp> {
+        if !self.want.contains(&h) {
+            return shot.into_iter().collect();
+        }
+        let mut dead = self.forget(h);
+        self.snaps.push((h, shot));
+        while self.snaps.len() > COLD_MAX {
+            dead.extend(self.snaps.remove(0).1);
+        }
+        dead
+    }
+
+    /// Hand `h`'s snapshot over; it leaves the cache. A failed entry stays,
+    /// so the window is not shot again.
+    fn take(&mut self, h: isize) -> Option<ColdBmp> {
+        let i = self.snaps.iter().position(|s| s.0 == h && s.1.is_some())?;
+        self.snaps.remove(i).1
+    }
+
+    /// Make the wanted set `cands` (nearest first; past COLD_MAX ignored):
+    /// requests and entries of anything else go, then each candidate neither
+    /// queued nor stored is queued. The cache so never overflows, and store
+    /// never pushes out a snapshot the next command would ask for again (a
+    /// print per command, forever, with more cold tiles than COLD_MAX).
+    /// Returns (anything queued, the snapshots that left, to drop after the
+    /// lock).
+    fn want_only(&mut self, cands: &[isize]) -> (bool, Vec<ColdBmp>) {
+        let cands = &cands[..cands.len().min(COLD_MAX)];
+        let dead = self.retain(|h| cands.contains(&h));
+        let mut queued = false;
+        for &h in cands {
+            queued |= self.request(h);
+        }
+        (queued, dead)
+    }
+
+    /// Drop `h`'s request and entry; returns its snapshot to drop after the
+    /// lock.
+    fn forget(&mut self, h: isize) -> Vec<ColdBmp> {
+        self.retain(|w| w != h)
+    }
+
+    /// Keep only the windows `keep` accepts (requests and entries); returns
+    /// the dropped snapshots, to drop after the lock.
+    fn retain(&mut self, keep: impl Fn(isize) -> bool) -> Vec<ColdBmp> {
+        self.want.retain(|&w| keep(w));
+        let (kept, gone): (Vec<_>, Vec<_>) = std::mem::take(&mut self.snaps)
+            .into_iter()
+            .partition(|s| keep(s.0));
+        self.snaps = kept;
+        gone.into_iter().filter_map(|s| s.1).collect()
+    }
+}
+
+/// Drop `h`'s request and snapshot (it turned warm, was hidden or minimised).
+fn cold_evict(h: isize) {
+    let dead = COLD.lock().unwrap().forget(h);
+    drop(dead); // freed after the lock is released
+}
+
+/// Take the snapshots of the windows in `cold` out of the cache for a motion
+/// request; None for one the cache has no snapshot of.
+fn cold_take(cold: &[isize]) -> Vec<(isize, Option<ColdBmp>)> {
+    let mut c = COLD.lock().unwrap();
+    cold.iter().map(|&h| (h, c.take(h))).collect()
+}
+
+/// Drop every request and snapshot: window images are not valid any more
+/// (display, work-area or layout change, reload). A shot in flight is
+/// discarded when it comes back; the next command's cold_request asks again
+/// for whatever is still cold.
+fn cold_clear() {
+    let old = std::mem::take(&mut *COLD.lock().unwrap());
+    drop(old); // freed after the lock is released
+}
+
+/// Is a cold tile worth a snapshot? Only when it is parked (`sent`, the rect
+/// last sent to it, lies on none of the monitors `fulls`) with its layout
+/// slot within one view width of the work area `wa`: the columns a scroll
+/// brings in next, and the inactive tabs of a column in view. A farther one
+/// would cost a print for a jump that seldom comes, and appears at the reveal.
+fn cold_wanted(sent: RECT, slot: RECT, wa: RECT, fulls: &[RECT]) -> bool {
+    let vw = wa.right - wa.left;
+    let near = RECT {
+        left: wa.left - vw,
+        right: wa.right + vw,
+        ..wa
+    };
+    !fulls.iter().any(|f| rects_overlap(&sent, f)) && rects_overlap(&slot, &near)
+}
+
+/// After every command: queue a snapshot of each cold tile worth one
+/// (cold_wanted) on the active workspace of every scrolling monitor, so the
+/// next motion that scrolls it in has something to draw. That covers a
+/// switch showing a strip (its windows were hidden, so cold) and a tile that
+/// turns cold while parked, and re-asks for one a motion used up while its
+/// tile stayed parked. The COLD_MAX nearest the view win (want_only), and
+/// whatever is no longer a candidate leaves the cache. One condvar poke
+/// however many are queued.
+unsafe fn cold_request(mgr: &Manager) {
+    if !mgr.tiling
+        || !glide_enabled(&mgr.cfg)
+        || !mgr.monitors.iter().any(|m| m.layout == "scrolling")
+    {
+        return;
+    }
+    let fulls: Vec<RECT> = mgr.monitors.iter().map(|m| m.full).collect();
+    // (window, how far its slot lies outside its view: 0 = an inactive tab)
+    let mut cands: Vec<(isize, i32)> = Vec::new();
+    {
+        // Manager-only maps; no Win32 call while they are held.
+        let warm = WARM.lock().unwrap();
+        let slots = LAST_SLOT.lock().unwrap();
+        let sent = LAST_SENT.lock().unwrap();
+        let (Some(slots), Some(sent)) = (slots.as_ref(), sent.as_ref()) else {
+            return;
+        };
+        for m in mgr.monitors.iter().filter(|m| m.layout == "scrolling") {
+            let Some(ws) = m.workspaces.get(m.active) else {
+                continue;
+            };
+            for &h in ws.windows.iter().filter(|h| !ws.floating.contains(h)) {
+                if warm.as_ref().is_some_and(|w| w.contains(&h)) {
+                    continue;
+                }
+                if let (Some(&r), Some(&s)) = (sent.get(&h), slots.get(&h)) {
+                    if cold_wanted(r, s, m.work_area, &fulls) {
+                        let wa = m.work_area;
+                        cands.push((h, (wa.left - s.right).max(s.left - wa.right).max(0)));
+                    }
+                }
+            }
+        }
+    }
+    // A minimised tile is out of the strip; it is asked for when it is back.
+    cands.retain(|&(h, _)| {
+        let w = hwnd_from(h);
+        IsWindowVisible(w).as_bool() && !IsIconic(w).as_bool()
+    });
+    cands.sort_by_key(|c| c.1);
+    let cands: Vec<isize> = cands.into_iter().map(|c| c.0).collect();
+    let (queued, dead) = COLD.lock().unwrap().want_only(&cands);
+    drop(dead); // freed after the lock is released
+    if queued {
+        COLD_CV.notify_one();
+    }
+}
+
+/// PrintWindow `h` (PW_RENDERFULLCONTENT renders a parked window's content
+/// although its DWM surface is blank: measured) and crop it to its visible
+/// frame. None for a window that is gone, hidden, minimised or hung, and on
+/// a GDI failure. Cold worker only (see the section notes).
+unsafe fn cold_shoot(h: isize) -> Option<ColdBmp> {
+    let hwnd = hwnd_from(h);
+    if !IsWindow(hwnd).as_bool()
+        || !IsWindowVisible(hwnd).as_bool()
+        || IsIconic(hwnd).as_bool()
+        || IsHungAppWindow(hwnd).as_bool()
+    {
+        return None;
+    }
+    let frame = frame_bounds(hwnd)?;
+    let mut wr = RECT::default();
+    GetWindowRect(hwnd, &mut wr).ok()?;
+    let (ww, wh) = (wr.right - wr.left, wr.bottom - wr.top);
+    let (fw, fh) = (frame.right - frame.left, frame.bottom - frame.top);
+    if ww <= 0 || wh <= 0 || fw <= 0 || fh <= 0 {
+        return None;
+    }
+    let screen = GetDC(None);
+    if screen.0.is_null() {
+        return None;
+    }
+    // PrintWindow draws the whole window rect (invisible borders included)
+    // at the DC origin; the frame is cut out of that.
+    let full_dc = CreateCompatibleDC(screen);
+    let crop_dc = CreateCompatibleDC(screen);
+    let full = CreateCompatibleBitmap(screen, ww, wh);
+    let crop = CreateCompatibleBitmap(screen, fw, fh);
+    let mut ok = !full.is_invalid() && !crop.is_invalid();
+    if ok {
+        let of = SelectObject(full_dc, HGDIOBJ(full.0));
+        let oc = SelectObject(crop_dc, HGDIOBJ(crop.0));
+        ok = PrintWindow(hwnd, full_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool()
+            && BitBlt(
+                crop_dc,
+                0,
+                0,
+                fw,
+                fh,
+                full_dc,
+                frame.left - wr.left,
+                frame.top - wr.top,
+                SRCCOPY,
+            )
+            .is_ok();
+        SelectObject(crop_dc, oc);
+        SelectObject(full_dc, of);
+    }
+    let _ = DeleteDC(crop_dc);
+    let _ = DeleteDC(full_dc);
+    let _ = ReleaseDC(None, screen);
+    if !full.is_invalid() {
+        let _ = DeleteObject(HGDIOBJ(full.0));
+    }
+    // Deselected above; the glide worker selects the crop next.
+    let _ = GdiFlush();
+    let bmp = Bmp::new(crop.0 as isize)?;
+    // Built either way so a failed crop is freed (dropped) here.
+    let shot = ColdBmp { bmp, w: fw, h: fh };
+    ok.then_some(shot)
+}
+
+/// Draw snapshot `c` scaled into `rc` (overlay coordinates; it morphs with
+/// its item like a thumbnail) into `dst` at opacity `alpha`. `via` is a
+/// scratch DC it is selected into for this draw only.
+unsafe fn cold_draw(dst: HDC, via: HDC, c: &ColdBmp, rc: RECT, alpha: u8) {
+    let old = SelectObject(via, HGDIOBJ(c.bmp.raw() as *mut c_void));
+    let (w, h) = (rc.right - rc.left, rc.bottom - rc.top);
+    if alpha == 255 && (w, h) == (c.w, c.h) {
+        let _ = BitBlt(dst, rc.left, rc.top, w, h, via, 0, 0, SRCCOPY);
+    } else {
+        // Constant alpha only (AlphaFormat 0): a DDB has no per-pixel alpha.
+        // ponytail: AlphaBlend scales COLORONCOLOR (nearest pixel); a cold
+        // item that also resizes looks blocky mid-motion. StretchBlt with
+        // HALFTONE at 255 if that shows.
+        // ponytail: a DIMMED cold item (unfocused_opacity < 1) takes this CPU
+        // blend on every composed frame, about 5x a BitBlt (measured on the
+        // 4K box: 1900x2060 BitBlt 1.7-2.3 ms, AlphaBlend at 204 8.3-12.2 ms,
+        // scaled 15.6 ms), so one dimmed cold column can take a 160 Hz frame
+        // to 11-17 ms. If frame_p50 with cold=k/k shows it at 4K: present the
+        // snapshot through DWM like a warm item (UpdateLayeredWindow it once
+        // into a per-motion proxy popup, thumbnail that; DWM_TNP_OPACITY and
+        // rcDestination then dim and scale it for ~45 us).
+        let blend = BLENDFUNCTION {
+            BlendOp: 0,
+            BlendFlags: 0,
+            SourceConstantAlpha: alpha,
+            AlphaFormat: 0,
+        };
+        let _ = AlphaBlend(dst, rc.left, rc.top, w, h, via, 0, 0, c.w, c.h, blend);
+    }
+    SelectObject(via, old);
+}
+
+/// The cold-snapshot thread: the only caller of PrintWindow on app windows
+/// (cold_shoot). Normal priority; idle on COLD_CV until cold_request queues.
+fn cold_worker() {
+    loop {
+        {
+            let mut c = COLD.lock().unwrap();
+            while c.want.is_empty() {
+                c = COLD_CV.wait(c).unwrap();
+            }
+        }
+        while GLIDE_BUSY.load(Ordering::Relaxed) || SLIDE_BUSY.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(COLD_BUSY_POLL_MS));
+        }
+        // Read after the wait: an eviction meanwhile may have cancelled it.
+        let Some(h) = COLD.lock().unwrap().want.first().copied() else {
+            continue;
+        };
+        let t = Instant::now();
+        let shot = unsafe { cold_shoot(h) };
+        log_debug!(
+            "cold snapshot {h:#x}: {} in {} ms",
+            shot.as_ref()
+                .map_or("failed".to_string(), |s| format!("{}x{}", s.w, s.h)),
+            t.elapsed().as_millis()
+        );
+        let dead = COLD.lock().unwrap().store(h, shot);
+        drop(dead); // freed after the lock is released
+    }
 }
 
 /// Transition thread: owns the slide overlay and pumps its own message loop, so
@@ -6770,7 +9868,8 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
     let target = -req.dir * w;
     let dur = req.dur_ms.max(1) as f64;
     let has_wp = wp != 0;
-    let frame_dur = std::time::Duration::from_micros(8_333); // ~120 Hz back-buffer
+    // Timer pacing for iterations that present nothing (see the loop's end).
+    let frame_dur = std::time::Duration::from_micros(8_333);
     let mut next = start;
     let mut msg = MSG::default();
     // Whole-frame constant-alpha blend descriptor, reused for the fade mode.
@@ -6797,6 +9896,8 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        // A new frame reached the overlay this iteration.
+        let mut presented = false;
         let g = if aborted {
             0
         } else {
@@ -6852,6 +9953,7 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
                 let tf = probe.on().then(Instant::now);
                 let _ =
                     SetLayeredWindowAttributes(top, COLORREF(0), fade_alpha(el / dur), LWA_ALPHA);
+                presented = true;
                 if let Some(tf) = tf {
                     if frame_us.is_empty() {
                         probe.mark("first_frame");
@@ -6895,6 +9997,7 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
                     }
                 }
                 let _ = BitBlt(odc, 0, 0, w, h, backdc, 0, 0, SRCCOPY);
+                presented = true;
                 if let Some(tf) = tf {
                     if frame_us.is_empty() {
                         probe.mark("first_frame");
@@ -6912,12 +10015,24 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
                 continue; // a hold landed first: honour it
             }
         }
-        next += frame_dur;
-        let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
+        // After a present, pace on DWM's composition clock, as the glide does.
+        // The fixed 8.333 ms timer this replaces beat against the display's
+        // refresh: presents landed unevenly (two in one vblank, none in the
+        // next), and at 60 Hz half of them never reached the glass. An
+        // iteration that presented nothing (a hold, a first visit's cover)
+        // keeps the timer: a DwmFlush with nothing new to compose may return
+        // at once, and this loop would spin. `next` only paces; the hold, cap
+        // and cover clocks all read Instant.
+        if presented && DwmFlush().is_ok() {
+            next = Instant::now();
         } else {
-            next = now;
+            next += frame_dur;
+            let now = Instant::now();
+            if next > now {
+                std::thread::sleep(next - now);
+            } else {
+                next = now;
+            }
         }
     }
     glass_clear(k); // cap hit or reset: off the glass before the teardown too
@@ -7063,6 +10178,11 @@ fn hide_order(outgoing: &[isize], fg: isize) -> impl Iterator<Item = isize> + '_
 /// Instant workspace switch: hide the old set, reveal + tile the new. Used when
 /// the slide compositor is disabled or not applicable.
 unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
+    // Exit restore under way or done: the hide would undo it (see EXITING).
+    // The model keeps `old` active, which is what is on screen.
+    if EXITING.load(Ordering::Relaxed) {
+        return;
+    }
     SUPPRESS.store(true, Ordering::Relaxed);
     // Iterate by index (no Vec clone per switch): the manager owns `mgr` on this
     // thread and ShowWindow touches no Astur state, so the borrow is safe to hold.
@@ -7105,8 +10225,9 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
 
 /// Capture a monitor's current pixels into a GPU-backed off-screen bitmap (DDB,
 /// not a DIB — so ~no process RAM). Returns the HBITMAP as an isize, or 0 on
-/// failure. The caller hands it to a compositor thread: the glide worker frees
-/// it; the transition worker hands it back as the left workspace's snapshot.
+/// failure. The workspace slide is its only user (the window motion shows DWM
+/// thumbnails instead): the transition worker hands it back as the left
+/// workspace's snapshot.
 unsafe fn capture_monitor(full: RECT) -> isize {
     let w = full.right - full.left;
     let h = full.bottom - full.top;
@@ -7144,21 +10265,32 @@ unsafe fn capture_monitor(full: RECT) -> isize {
 
 /// Work-area-local rects of every window on (mi, wsi), read from their real
 /// positions — so the slide moves floating windows (and float mode) too, not just
-/// the tiled layout.
+/// the tiled layout. Clipped to the work area, the slide's capture: a parked
+/// strip tile (off every monitor) or the off-screen part of a peeking one has
+/// no pixels in it, and blitting from there drew garbage into the slide.
 unsafe fn ws_window_rects(mgr: &Manager, mi: usize, wsi: usize, origin: RECT) -> Vec<RECT> {
+    let (w, h) = (origin.right - origin.left, origin.bottom - origin.top);
     mgr.monitors[mi].workspaces[wsi]
         .windows
         .iter()
         .filter_map(|&hwin| {
             let mut r = RECT::default();
-            GetWindowRect(hwnd_from(hwin), &mut r).ok().map(|_| RECT {
-                left: r.left - origin.left,
-                top: r.top - origin.top,
-                right: r.right - origin.left,
-                bottom: r.bottom - origin.top,
-            })
+            GetWindowRect(hwnd_from(hwin), &mut r).ok()?;
+            clip_local(r, origin, w, h)
         })
         .collect()
+}
+
+/// Screen rect `r` in `origin`-local coordinates, clipped to `w` x `h`; None
+/// when nothing of it is inside.
+fn clip_local(r: RECT, origin: RECT, w: i32, h: i32) -> Option<RECT> {
+    let local = RECT {
+        left: (r.left - origin.left).max(0),
+        top: (r.top - origin.top).max(0),
+        right: (r.right - origin.left).min(w),
+        bottom: (r.bottom - origin.top).min(h),
+    };
+    (local.left < local.right && local.top < local.bottom).then_some(local)
 }
 
 /// Switch one monitor to workspace `n`, then focus. Workspaces are never cleared
@@ -7322,6 +10454,10 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
         });
     }
 
+    // A scrolling workspace shows its focused column. Idempotent for a
+    // workspace left normally (its focus was in view then); it matters when
+    // the focus was set while hidden (an app activating a window there).
+    ensure_visible(mgr, mi, n);
     // The real, correct switch — instant placement, on this thread. Cannot fail.
     // Now hidden under the overlay (if sliding).
     switch_plain(mgr, mi, old, n);
@@ -7396,8 +10532,10 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
 /// workspace index when the monitor still exists.
 unsafe fn refresh_monitors(mgr: &mut Manager) {
     // Cached workspace snapshots are tied to the old monitor handles/resolution
-    // and are invalid after a display change — drop them all.
+    // and are invalid after a display change — drop them all. Cold window
+    // snapshots too: tiles change size and re-park against the new monitors.
     snap_clear();
+    cold_clear();
     // Snapshot tracked windows BEFORE the rebuild. Each window remembers the
     // GLOBAL workspace number it lived on (computed against the OLD layout), so
     // when a monitor is unplugged its windows keep their workspace identity and
@@ -7432,6 +10570,17 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             }
         }
     }
+    // Scrolling strips by (HMONITOR, local workspace). Windows re-home below
+    // in their old order, so a surviving workspace keeps its columns, widths
+    // and scroll position; ids of windows that went elsewhere are pruned when
+    // touched, and windows arriving from a gone monitor are columns of their
+    // own at the end.
+    let mut strips: Vec<(isize, usize, Strip)> = Vec::new();
+    for mon in mgr.monitors.iter_mut() {
+        for (wi, ws) in mon.workspaces.iter_mut().enumerate() {
+            strips.push((mon.hmon, wi, std::mem::take(&mut ws.strip)));
+        }
+    }
     let mut fresh = enumerate_monitors();
     let primary = primary_index(&fresh);
     distribute_workspaces(&mut fresh, primary, mgr.cfg.workspaces, mgr.cfg.per_monitor);
@@ -7442,7 +10591,17 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             }
         }
     }
+    for (hmon, wi, strip) in strips {
+        if let Some(ws) = fresh
+            .iter_mut()
+            .find(|m| m.hmon == hmon)
+            .and_then(|m| m.workspaces.get_mut(wi))
+        {
+            ws.strip = strip;
+        }
+    }
     reserve_bar(&mut fresh, &mgr.cfg);
+    resolve_layouts(&mut fresh, &mgr.cfg, &mgr.monitors);
     mgr.monitors = fresh;
     mgr.primary = primary;
     // New monitors / work areas: new crop targets, every old crop stale.
@@ -7488,9 +10647,31 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             }
         }
     }
-    // Normalize visibility: windows re-homed from a hidden (inactive) workspace
-    // onto a now-active one must be re-shown, and vice versa. Without this they
-    // stay SW_HIDE'd and appear to vanish.
+    normalize_visibility(mgr);
+    // New view widths, and new full rects: the retile re-parks against the
+    // new monitor set (hidden workspaces re-park when next shown).
+    ensure_visible_all(mgr);
+    retile_all(mgr);
+    // The retile places only tiles, and only while tiling: a floating window
+    // (every window in float mode) re-homed from a removed monitor that still
+    // lies on none comes back onto the nearest. unpark moves nothing else.
+    for m in &mgr.monitors {
+        for ws in &m.workspaces {
+            for &h in &ws.windows {
+                if !mgr.tiling || ws.floating.contains(&h) {
+                    unpark_tracked(h);
+                }
+            }
+        }
+    }
+}
+
+/// Show every window of an active workspace and hide every other one, after
+/// windows were re-homed between workspaces (display change, a reload that
+/// lowers the workspace count): one moved from a hidden workspace onto an
+/// active one must be shown, and vice versa. Without this they stay SW_HIDE'd
+/// and appear to vanish, missing from rescue.lst's hidden list too.
+unsafe fn normalize_visibility(mgr: &Manager) {
     SUPPRESS.store(true, Ordering::Relaxed);
     for mon in &mgr.monitors {
         let active = mon.active;
@@ -7516,7 +10697,6 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         }
     }
     SUPPRESS.store(false, Ordering::Relaxed);
-    retile_all(mgr);
 }
 
 /// SPI_SETWORKAREA with no display change folded in: re-read the work areas
@@ -7537,8 +10717,9 @@ unsafe fn refresh_work_areas(mgr: &mut Manager) {
     }
     let mut changed = false;
     for (f, m) in fresh.iter().zip(mgr.monitors.iter_mut()) {
-        if f.base_work != m.base_work {
+        if f.base_work != m.base_work || f.full != m.full {
             m.base_work = f.base_work;
+            m.full = f.full;
             changed = true;
         }
     }
@@ -7546,10 +10727,12 @@ unsafe fn refresh_work_areas(mgr: &mut Manager) {
         log_debug!("work-area change broadcast: no monitor's work area moved");
         return;
     }
-    // Cached snapshots show the old layout.
+    // Cached snapshots show the old layout (cold ones the old tile sizes).
     snap_clear();
+    cold_clear();
     reserve_bar(&mut mgr.monitors, &mgr.cfg);
     wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
+    ensure_visible_all(mgr);
     retile_all(mgr);
 }
 
@@ -7686,22 +10869,14 @@ unsafe fn process_extra(mgr: &mut Manager, index: usize) {
             .ok()
             .and_then(|n| n.checked_sub(1))
             .map(Cmd::MoveToWs),
-        _ => None,
+        "layout" => Some(Cmd::SetLayout(argument.clone())),
+        other => scroll_action(other),
     };
     if let Some(cmd) = core {
         process(mgr, cmd);
         return;
     }
     match action.as_str() {
-        "layout"
-            if matches!(
-                argument.as_str(),
-                "dwindle" | "master" | "columns" | "grid" | "monocle"
-            ) =>
-        {
-            mgr.cfg.layout = argument;
-            retile_all(mgr);
-        }
         "launch" | "command" => {
             mgr.pending_launch_mon = cursor_hmon();
             launch(&argument);
@@ -7747,25 +10922,42 @@ unsafe fn untrack_window(mgr: &mut Manager, h: isize) {
         SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
     }
     unmark_hidden_by_us(h); // untracked -> marker would only go stale
-    if let Some((mi, wi)) = mgr.locate(h) {
+    let was_focus = mgr.focused().2 == h;
+    if let Some((mi, wi, _)) = mgr.detach_window(h) {
+        // Nothing places it from here on, and exit and crash rescue know only
+        // tracked windows: a parked one its app hid (close-to-tray) would be
+        // shown again later at its park spot, off every monitor. Moved
+        // without being shown; a no-op for a destroyed or on-screen window.
+        // LAST_SENT still holds it (pruned at the next sync).
+        unpark_tracked(h);
         // Out of MANAGED now, not at the sync after this command: the retile
         // below raises SUPPRESS, and an app re-showing `h` meanwhile would
         // pass for our own echo (SUPPRESS && is_managed) and be dropped,
         // leaving a visible window unmanaged with nothing logged.
         MANAGED.lock().unwrap().retain(|&x| x != h);
-        let ws = &mut mgr.monitors[mi].workspaces[wi];
-        ws.windows.retain(|&x| x != h);
-        ws.floating.retain(|&x| x != h);
-        if ws.focused == h {
-            ws.focused = ws.windows.first().copied().unwrap_or(0);
-        }
         if wi == mgr.monitors[mi].active {
             retile_monitor(mgr, mi);
+            // Scrolling: the strip neighbour detach_window picked gets the
+            // real focus too, not whichever window Windows activates next
+            // (plan/scrolling.md "Defaults"). Its stale FOREGROUND event then
+            // fails Cmd::Focused's foreground check.
+            if was_focus && mgr.monitors[mi].layout == "scrolling" {
+                let f = mgr.monitors[mi].workspaces[wi].focused;
+                if f != 0 {
+                    focus_window(f);
+                }
+            }
         }
     }
 }
 
 unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
+    // A key command on a scrolling monitor acts on the strip instead
+    // (plan/scrolling.md "Keys"); every other command and layout falls
+    // through to the arms below untouched.
+    if process_strip(mgr, &cmd) {
+        return;
+    }
     match cmd {
         Cmd::Add(h, event) => {
             ev_count(EVC_ADD);
@@ -7828,12 +11020,21 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         SCRATCHPAD_HWND.store(h, Ordering::Relaxed);
                     }
                     let visible = wi == mgr.monitors[mi].active;
-                    let ws = &mut mgr.monitors[mi].workspaces[wi];
-                    ws.windows.push(h);
-                    if scratch || should_float(hwnd, rule) {
-                        ws.floating.push(h);
+                    // On a scrolling monitor: a new column right of the
+                    // focused one, scrolled into view.
+                    let floating = scratch || should_float(hwnd, rule);
+                    mgr.insert_window(h, mi, wi, None, floating);
+                    // Into MANAGED now, not at the sync after this command
+                    // (the mirror of untrack_window): EVENT_OBJECT_HIDE queues
+                    // RemoveHidden only for managed windows, so an app hiding
+                    // `h` before that sync would leave it holding a tile.
+                    MANAGED.lock().unwrap().push(h);
+                    // A hide that landed between is_manageable above and that
+                    // push was filtered out: catch it here. Later ones queue.
+                    if !IsWindowVisible(hwnd).as_bool() {
+                        untrack_window(mgr, h);
+                        return;
                     }
-                    ws.focused = h;
                     if visible {
                         mgr.focused_mon = mi;
                         retile_monitor(mgr, mi);
@@ -7909,12 +11110,36 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.focused_mon = mi;
                 if wi == mgr.monitors[mi].active {
                     mgr.monitors[mi].workspaces[wi].focused = h;
+                    // A clicked peeking tile, a parked one picked from the
+                    // taskbar or Alt+Tab: scroll it into view. Our own
+                    // focus_window echoes find it Full and do nothing.
+                    strip_reveal(mgr, h);
                 } else {
                     // The OS foregrounded a window on a hidden workspace (an app
                     // activated it — link opened in the browser, taskbar click).
                     // Follow it there; pulling it out would break both layouts.
                     mgr.monitors[mi].workspaces[wi].focused = h;
                     switch_monitor_workspace(mgr, mi, wi);
+                }
+            } else {
+                // An untracked owned popup ("Save changes?", a login prompt)
+                // of a tile on an active workspace. One the app centres on a
+                // PARKED owner opens off screen, and the taskbar or Alt+Tab
+                // then activates the popup, never the disabled owner: scroll
+                // the owner in and bring the popup onto a monitor
+                // (unpark_window moves only a window that lies on none).
+                let fg = GetForegroundWindow();
+                let root = GetAncestor(fg, GA_ROOTOWNER).0 as isize;
+                if fg == hwnd_from(h) && root != h {
+                    if let Some((mi, wi)) = mgr
+                        .locate(root)
+                        .filter(|&(mi, wi)| wi == mgr.monitors[mi].active)
+                    {
+                        mgr.focused_mon = mi;
+                        mgr.monitors[mi].workspaces[wi].focused = root;
+                        strip_reveal(mgr, root);
+                        unpark_window(h, None);
+                    }
                 }
             }
         }
@@ -7924,6 +11149,8 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.monitors[mi].workspaces[wi].focused = h;
                 if wi != mgr.monitors[mi].active {
                     switch_monitor_workspace(mgr, mi, wi);
+                } else {
+                    strip_reveal(mgr, h);
                 }
                 touch_window_mru(h);
                 focus_window(h);
@@ -7939,6 +11166,14 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // Focus-follows-mouse: only act on a tracked window on a visible
             // workspace that isn't already the focused one.
             if let Some((mi, wi)) = mgr.locate(h) {
+                // Never scrolls (plan/scrolling.md "Focus"): hovering a
+                // peeking tile does not focus it. Off scrolling every tile
+                // is Full, and the layout check keeps that free.
+                if mgr.monitors[mi].layout == "scrolling"
+                    && tile_slot(mgr, h).is_some_and(|(_, v)| v != Vis::Full)
+                {
+                    return;
+                }
                 if wi == mgr.monitors[mi].active
                     && !(mgr.focused_mon == mi && mgr.monitors[mi].workspaces[wi].focused == h)
                 {
@@ -7964,19 +11199,30 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
         }
         Cmd::BarFocus(h) => {
-            // App button clicked: focus that window (same effect as clicking it).
+            // App button clicked: focus that window (same effect as clicking
+            // it, so a parked strip tile scrolls into view first).
             if IsWindow(hwnd_from(h)).as_bool() {
+                strip_reveal(mgr, h);
                 focus_window(h);
             }
         }
         Cmd::Extra(index) => process_extra(mgr, index),
         Cmd::SetLayout(layout) => {
-            if matches!(
-                layout.as_str(),
-                "dwindle" | "master" | "columns" | "grid" | "monocle"
-            ) {
-                mgr.cfg.layout = layout;
-                retile_all(mgr);
+            // The focused monitor only: layouts are per monitor. The extra
+            // hotkey `layout` and the IPC verb both arrive here.
+            let mi = mgr.focused_mon;
+            if config::LAYOUTS.contains(&layout.as_str()) && mi < mgr.monitors.len() {
+                // Away from scrolling the new layout's tiles are all on screen,
+                // so the retile brings every parked window back; a hidden
+                // workspace's parked windows come back when it is next shown.
+                // Nothing is parked there to need a cold snapshot.
+                if mgr.monitors[mi].layout == "scrolling" && layout != "scrolling" {
+                    cold_clear();
+                }
+                mgr.monitors[mi].layout = layout;
+                let a = mgr.monitors[mi].active;
+                ensure_visible(mgr, mi, a);
+                retile_monitor(mgr, mi);
             }
         }
         Cmd::ToggleScratchpad => toggle_scratchpad(mgr),
@@ -7998,18 +11244,26 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // in the watcher: apply_theme has already replaced UI_CFG, and
             // mgr.cfg also holds runtime changes the file resets (Alt+H/L
             // master_ratio, layout switches), which must still re-tile.
-            let g = if full {
+            let mut g = if full {
                 config::ReloadGroups::full()
             } else {
                 config::reload_groups(&mgr.cfg, &cfg)
             };
             mgr.cfg = *cfg;
+            // The file wins over runtime layout switches on EVERY reload, as
+            // it did while the layout was global (the diff above saw the
+            // switch in mgr.cfg). Now the switch lives on the monitor, so the
+            // diff cannot see it: re-resolve, and re-tile if anything moved.
+            if resolve_layouts(&mut mgr.monitors, &mgr.cfg, &[]) {
+                g.wm = true;
+            }
             if g.wm || g.style || g.anim {
                 // Gaps/opacity may have changed — cached snapshots are now stale.
                 // Animations too: a switch with the slide off neither captures
                 // nor drops the workspace it leaves, so a snapshot from before
                 // an animations-off spell would slide in its old layout.
                 snap_clear();
+                cold_clear(); // window sizes and styles too
             }
             if g.wm {
                 // Apply new workspace counts / mode, then recompute work areas
@@ -8021,6 +11275,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     mgr.cfg.workspaces,
                     mgr.cfg.per_monitor,
                 );
+                // A lower count folds removed workspaces into workspace 0,
+                // and can make it the active one: their visibility flips.
+                normalize_visibility(mgr);
                 reserve_bar(&mut mgr.monitors, &mgr.cfg);
             }
             if g.wm || g.anim {
@@ -8044,6 +11301,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 STYLED_FOCUS.store(0, Ordering::Relaxed);
             }
             if g.wm {
+                ensure_visible_all(mgr);
                 retile_all(mgr);
             }
             if g.wm || g.style {
@@ -8099,8 +11357,8 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 return;
             }
             let mi = mgr.focused_mon;
-            if mgr.cfg.layout == "master" {
-                // Master layout: one global master width.
+            if mgr.monitors[mi].layout == "master" {
+                // Master layout: one master width shared by every master monitor.
                 mgr.cfg.master_ratio = (mgr.cfg.master_ratio + delta).clamp(0.15, 0.85);
             } else {
                 // Dwindle: grow/shrink the focused window's own split so H/L do
@@ -8171,18 +11429,23 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             // On the same monitor the source workspace is about to be hidden by
             // the switch below (the early return above rules out staying).
-            // Reflowing it first only ran a glide handshake (capture, overlay,
-            // DwmFlush, up to 250 ms) that the slide then covered and cut back
+            // Reflowing it first only ran a motion handshake (overlay, DwmFlush,
+            // up to 250 ms) that the slide then covered and cut back
             // from, before the switch could even start (SWITCH-3). Its windows
             // are placed while hidden instead, after the switch. Another monitor
             // keeps the source workspace on screen, so it retiles as before.
             let reflow_now = move_needs_source_retile(to_mi, from_mi);
-            if reflow_now {
-                retile_monitor(mgr, from_mi);
-            }
-            // Follow the window: show its destination workspace, focus it, warp.
+            // Follow the window: show its destination workspace, focus it,
+            // warp. The focus moves first: the source motion ends each
+            // window's dim at global_focus.
             mgr.focused_mon = to_mi;
-            if to_local != mgr.monitors[to_mi].active {
+            let to_shown = to_local == mgr.monitors[to_mi].active;
+            if reflow_now {
+                // Instant when the destination retiles below: one motion at a
+                // time, and that one shows the moved window arriving.
+                retile_monitor_opts(mgr, from_mi, to_shown);
+            }
+            if !to_shown {
                 switch_monitor_workspace(mgr, to_mi, to_local);
                 if !reflow_now {
                     // The capture the switch just took of from_a (its snapshot
@@ -8207,6 +11470,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // whether tiling is on or off; turning it back on re-applies layout.
             mgr.tiling = !mgr.tiling;
             if mgr.tiling {
+                // Focus moved freely in float mode (strip_reveal does nothing
+                // while !tiling): show each strip's focused column again.
+                ensure_visible_all(mgr);
                 retile_all(mgr);
                 let mi = mgr.focused_mon;
                 let a = mgr.monitors[mi].active;
@@ -8214,6 +11480,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 if f != 0 {
                     focus_window(f);
                 }
+            } else {
+                // Nothing places windows in float mode, so a parked one would
+                // stay off screen for good (hidden ones too, once shown).
+                unpark_all(mgr);
             }
         }
         Cmd::ToggleFloat => {
@@ -8229,7 +11499,16 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 ws.floating.remove(p);
             } else {
                 ws.floating.push(h);
+                // Floating windows are never placed: a parked tile would float
+                // off screen.
+                unpark_tracked(h);
+                // A float resized in place and unfloated back into the same
+                // slot morphs to it.
+                slot_forget(h);
             }
+            // Un-floated, it re-enters the strip at its old slot, which can
+            // lie off the view: scroll to it, or it parks while focused.
+            ensure_visible(mgr, mi, a);
             retile_monitor(mgr, mi);
         }
         Cmd::CloseFocused => {
@@ -8243,6 +11522,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
         // from now on queues exactly one more refresh.
         Cmd::BarRefresh => bar_refresh_clear(&BAR_REFRESH_QUEUED),
         Cmd::RetileFor(h) => {
+            // A minimise (this command's MINIMIZESTART) drops the window's
+            // DWM surface: cold until it is placed on screen again.
+            if IsIconic(hwnd_from(h)).as_bool() {
+                warm_forget(h);
+            }
             // Resolved now, not when the event fired: commands queued ahead
             // of this one (MoveToWs, Remove, a switch) can move h.
             let target = retile_for_target(
@@ -8251,6 +11535,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 |mi, wi| mgr.monitors[mi].workspaces[wi].floating.contains(&h),
             );
             if let Some(mi) = target {
+                // The strip shrank or grew under the offset: keep the focused
+                // column in view, as every membership change does.
+                let a = mgr.monitors[mi].active;
+                ensure_visible(mgr, mi, a);
                 retile_monitor(mgr, mi);
             }
         }
@@ -8339,7 +11627,46 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let pt = POINT { x, y };
             let to_mi = monitor_index_for_point(mgr, pt);
             let target = window_under_point(mgr, to_mi, pt, h);
-            if to_mi == from_mi {
+            // Dropped on a scrolling monitor: a drop zone (plan/scrolling.md
+            // "Keys"), which part of a window it landed on or which end of
+            // the strip; None when it landed back in its own slot.
+            let scrolling = mgr.monitors[to_mi].layout == "scrolling";
+            let zone = if scrolling {
+                let own = (to_mi == from_mi)
+                    .then(|| tile_slot(mgr, h))
+                    .flatten()
+                    .map(|(slot, _)| slot);
+                let on = target.map(|t| (t, window_rect_of(t)));
+                drop_zone(pt, on, own, mgr.monitors[to_mi].work_area)
+            } else {
+                None
+            };
+            if to_mi == from_mi && scrolling {
+                if let Some(zone) = zone {
+                    // A column of one keeps its settings (width, full-width
+                    // toggle) through the move. A tile leaving a shared
+                    // column starts at the default width, like an expel.
+                    let ws = &mgr.monitors[from_mi].workspaces[from_a];
+                    let cols = ws.strip.columns(&tiled_windows(ws));
+                    let keep = locate_tile(&cols, h)
+                        .filter(|&(ci, _)| cols[ci].len() == 1)
+                        .and_then(|_| ws.strip.col_meta(&[h]).copied());
+                    if mgr.move_window(h, from_mi, from_a, Some(zone))
+                        && !matches!(zone, DropAt::Below(_))
+                    {
+                        if let Some(meta) = keep {
+                            let default = mgr.cfg.scroll_default_width;
+                            let ws = &mut mgr.monitors[from_mi].workspaces[from_a];
+                            *ws.strip.col_mut(h, default) = ColMeta { active: h, ..meta };
+                            ensure_visible(mgr, from_mi, from_a);
+                        }
+                    }
+                }
+                mgr.monitors[from_mi].workspaces[from_a].focused = h;
+                // h is the focus the motion's dims end at (global_focus).
+                mgr.focused_mon = from_mi;
+                retile_drop(mgr, from_mi);
+            } else if to_mi == from_mi {
                 // Reorder within the same monitor: swap with the window dropped onto.
                 if let Some(t) = target {
                     let ws = &mut mgr.monitors[to_mi].workspaces[from_a];
@@ -8350,23 +11677,32 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     }
                 }
                 mgr.monitors[from_mi].workspaces[from_a].focused = h;
-                retile_monitor_opts(mgr, from_mi, true);
+                mgr.focused_mon = from_mi;
+                retile_drop(mgr, from_mi);
             } else {
                 // Move the window to the monitor it was dropped on, landing it
-                // where it was dropped in the tiled order.
+                // where it was dropped in the tiled order (or its drop zone).
                 let to_a = mgr.monitors[to_mi].active;
-                let at = target.and_then(|t| {
-                    mgr.monitors[to_mi].workspaces[to_a]
-                        .windows
-                        .iter()
-                        .position(|&w| w == t)
-                });
+                let at = if scrolling {
+                    zone
+                } else {
+                    target
+                        .and_then(|t| {
+                            mgr.monitors[to_mi].workspaces[to_a]
+                                .windows
+                                .iter()
+                                .position(|&w| w == t)
+                        })
+                        .map(DropAt::Index)
+                };
                 if !mgr.move_window(h, to_mi, to_a, at) {
                     return;
                 }
                 mgr.focused_mon = to_mi;
+                // The source closes its gap instantly; the destination's
+                // motion shows the window settling in from the drop.
                 retile_monitor_opts(mgr, from_mi, true);
-                retile_monitor_opts(mgr, to_mi, true);
+                retile_drop(mgr, to_mi);
             }
             focus_window(h);
         }
@@ -8374,7 +11710,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // Tiled resize: apply its final slot once. Floating/unmanaged
             // windows keep the exact release rect; native drags already landed.
             if let Some(r) = rect {
-                if tile_target(mgr, h).is_none() {
+                if tile_slot(mgr, h).is_none() {
                     commit_rect(h, r.left, r.top, r.right - r.left, r.bottom - r.top);
                 }
             }
@@ -8389,18 +11725,46 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             {
                 return;
             }
+            // Dragged to another size: a slot it keeps (a stack tile, a grid
+            // cell) morphs back.
+            slot_forget(h);
             let r = match rect {
                 Some(r) => r,
                 None => {
                     let mut r = RECT::default();
                     if GetWindowRect(hwnd_from(h), &mut r).is_err() {
-                        retile_monitor(mgr, mi);
+                        retile_drop(mgr, mi);
                         return;
                     }
                     r
                 }
             };
             let wa = mgr.monitors[mi].work_area;
+            if mgr.monitors[mi].layout == "scrolling" {
+                // A horizontal edge sets the column width, a vertical one the
+                // tile's share of its column (plan/scrolling.md "Keys").
+                if let Some((slot, _)) = tile_slot(mgr, h) {
+                    let placed = adjust_for_border(hwnd_from(h), slot);
+                    let (new_w, new_h) = strip_resize(r, placed, slot);
+                    let (outer, inner) = (mgr.cfg.outer_gap, mgr.cfg.inner_gap);
+                    let default = mgr.cfg.scroll_default_width;
+                    let ws = &mut mgr.monitors[mi].workspaces[wi];
+                    let tiled = tiled_windows(ws);
+                    if let Some(px) = new_w {
+                        let width = col_width(wa.right - wa.left, px, outer, inner);
+                        ws.strip.set_width(h, width, default);
+                    }
+                    if let (Some(px), Some((_, share))) = (new_h, ws.strip.tile_share(&tiled, h)) {
+                        // Tile heights are weight shares of one column total.
+                        let total = (slot.bottom - slot.top).max(1) as f32 / share;
+                        ws.strip
+                            .adjust_tile_height(&tiled, h, px as f32 / total - share);
+                    }
+                    ensure_visible(mgr, mi, wi);
+                }
+                retile_drop(mgr, mi);
+                return;
+            }
             // Tiled order must match what retile_monitor / dwindle_layout use.
             let tiled: Vec<isize> = mgr.monitors[mi].workspaces[wi]
                 .windows
@@ -8412,7 +11776,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 })
                 .collect();
             let n = tiled.len();
-            if mgr.cfg.layout == "master" {
+            if mgr.monitors[mi].layout == "master" {
                 // Master width sets the ratio; stack windows snap back.
                 if tiled.first() == Some(&h) {
                     let total =
@@ -8432,7 +11796,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     r,
                 );
             }
-            retile_monitor_opts(mgr, mi, true);
+            retile_drop(mgr, mi);
         }
         Cmd::LaunchTerminal => {
             // Land the new window on the workspace the cursor is on, not wherever
@@ -8470,27 +11834,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 if mgr.cfg.cursor_follows_focus {
                     center_cursor_on(mgr, target);
                 }
-            } else if let Some(to_mi) = adjacent_monitor(mgr, mi, dir) {
+            } else {
                 // No neighbour this way: jump focus to the adjacent monitor.
-                mgr.focused_mon = to_mi;
-                let ta = mgr.monitors[to_mi].active;
-                let f = mgr.monitors[to_mi].workspaces[ta].focused;
-                let f = if f != 0 {
-                    f
-                } else {
-                    mgr.monitors[to_mi].workspaces[ta]
-                        .windows
-                        .first()
-                        .copied()
-                        .unwrap_or(0)
-                };
-                if f != 0 {
-                    mgr.monitors[to_mi].workspaces[ta].focused = f;
-                    focus_window(f);
-                    if mgr.cfg.cursor_follows_focus {
-                        center_cursor_on(mgr, f);
-                    }
-                }
+                focus_adjacent_monitor(mgr, mi, dir);
             }
             bump_follow_settle();
         }
@@ -8524,23 +11870,290 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
                 // Posted retile: the neighbour may still be under the cursor.
                 bump_follow_settle();
-            } else if let Some(to_mi) = adjacent_monitor(mgr, mi, dir) {
-                // Move the window to the adjacent monitor's active workspace.
-                let ta = mgr.monitors[to_mi].active;
-                if !mgr.move_window(h, to_mi, ta, None) {
-                    return;
-                }
-                mgr.focused_mon = to_mi;
-                retile_monitor(mgr, mi);
-                retile_monitor(mgr, to_mi);
+            } else {
+                move_to_adjacent_monitor(mgr, mi, h, dir);
+            }
+        }
+        // Scrolling only (process_strip ran them); nothing on other layouts,
+        // except Alt+Shift+H/L keeping their old meaning there.
+        Cmd::ResizeTile(d) => process(mgr, Cmd::ResizeMaster(0.05 * d.signum())),
+        Cmd::ScrollWheel { steps, carry, x, y } => {
+            // The strip the hook gated on, under the cursor, which need not
+            // be the focused monitor's. Gone since (a layout switch): dropped.
+            let Some(mi) = mgr.scroll_mon_at(x, y) else {
+                return;
+            };
+            let other = mi != mgr.focused_mon;
+            mgr.focused_mon = mi;
+            let before = mgr.focused().2;
+            process(
+                mgr,
+                if carry {
+                    Cmd::ScrollMove(steps)
+                } else {
+                    Cmd::ScrollFocus(steps)
+                },
+            );
+            // A ScrollFocus that moved focused a window there. From a focus on
+            // another monitor, a move, or a focus step stopped at the strip
+            // end, would leave the real focus behind while focused_mon (what
+            // the next key, close included, acts on) points here: focus here.
+            let h = mgr.focused().2;
+            if other && h != 0 && (carry || h == before) {
                 focus_window(h);
-                if mgr.cfg.cursor_follows_focus {
-                    center_cursor_on(mgr, h);
-                }
-                bump_follow_settle();
+            }
+        }
+        Cmd::ScrollFocus(_)
+        | Cmd::ScrollMove(_)
+        | Cmd::CycleWidth
+        | Cmd::CycleHeight
+        | Cmd::CenterColumn
+        | Cmd::ConsumeOrExpel(_)
+        | Cmd::ToggleTabbed
+        | Cmd::MaximizeColumn
+        | Cmd::ColumnEdge { .. } => {}
+        Cmd::TabClick(w, i) => {
+            // Focus tab `i` of `w`'s column. The bar may be a frame behind
+            // (a tab closed meanwhile): anything that no longer resolves is
+            // dropped.
+            let Some((mi, wi)) = mgr.locate(w).filter(|&(mi, wi)| {
+                mgr.tiling
+                    && mgr.monitors[mi].layout == "scrolling"
+                    && wi == mgr.monitors[mi].active
+            }) else {
+                return;
+            };
+            let ws = &mgr.monitors[mi].workspaces[wi];
+            let cols = ws.strip.columns(&tiled_windows(ws));
+            if let Some(t) = locate_tile(&cols, w).and_then(|(ci, _)| cols[ci].get(i).copied()) {
+                mgr.focused_mon = mi;
+                // Like a bar app button (BarFocus): the clicked tab becomes
+                // the focus (so the shown tab), the strip scrolls a peeking
+                // column in, and the cursor stays on the tab bar for the
+                // next click instead of warping to the window.
+                strip_reveal(mgr, t);
+                focus_window(t);
             }
         }
     }
+}
+
+/// Alt+Left/Right with no neighbour that way: focus the adjacent monitor's
+/// focused window (or its first), scrolled into view there.
+unsafe fn focus_adjacent_monitor(mgr: &mut Manager, mi: usize, dir: Dir) {
+    let Some(to_mi) = adjacent_monitor(mgr, mi, dir) else {
+        return;
+    };
+    mgr.focused_mon = to_mi;
+    let ta = mgr.monitors[to_mi].active;
+    let f = mgr.monitors[to_mi].workspaces[ta].focused;
+    let f = if f != 0 {
+        f
+    } else {
+        mgr.monitors[to_mi].workspaces[ta]
+            .windows
+            .first()
+            .copied()
+            .unwrap_or(0)
+    };
+    if f != 0 {
+        mgr.monitors[to_mi].workspaces[ta].focused = f;
+        // Before the warp, which skips a parked tile.
+        strip_reveal(mgr, f);
+        focus_window(f);
+        if mgr.cfg.cursor_follows_focus {
+            center_cursor_on(mgr, f);
+        }
+    }
+}
+
+/// Alt+Shift+Left/Right with no neighbour that way: move `h` to the adjacent
+/// monitor's active workspace (a new column there on scrolling).
+unsafe fn move_to_adjacent_monitor(mgr: &mut Manager, mi: usize, h: isize, dir: Dir) {
+    let Some(to_mi) = adjacent_monitor(mgr, mi, dir) else {
+        return;
+    };
+    let ta = mgr.monitors[to_mi].active;
+    if !mgr.move_window(h, to_mi, ta, None) {
+        return;
+    }
+    mgr.focused_mon = to_mi;
+    // The source closes its gap instantly: one motion at a time, and the
+    // destination's shows the window arriving (it would cancel this one).
+    retile_monitor_opts(mgr, mi, true);
+    retile_monitor(mgr, to_mi);
+    focus_window(h);
+    if mgr.cfg.cursor_follows_focus {
+        center_cursor_on(mgr, h);
+    }
+    bump_follow_settle();
+}
+
+/// The scrolling branch of a key command (plan/scrolling.md "Keys"): runs
+/// when the focused monitor is scrolling and tiling is on, and returns true
+/// when it handled `cmd`. False sends `cmd` to its usual arm in `process`:
+/// any other command or layout, and Alt+arrows from a focus outside the
+/// strip (a floating window), which keep the geometric pick. A strip end on
+/// Alt+(Shift+)Left/Right goes to the adjacent monitor, as on other layouts.
+unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
+    use Cmd::*;
+    if !matches!(
+        cmd,
+        FocusGeo(_)
+            | MoveGeo(_)
+            | FocusDir(_)
+            | SwapDir(_)
+            | ResizeMaster(_)
+            | PromoteMaster
+            | ScrollFocus(_)
+            | ScrollMove(_)
+            | CycleWidth
+            | CycleHeight
+            | CenterColumn
+            | ConsumeOrExpel(_)
+            | ToggleTabbed
+            | MaximizeColumn
+            | ColumnEdge { .. }
+            | ResizeTile(_)
+    ) || !mgr.tiling
+        || mgr.monitors.is_empty()
+    {
+        return false;
+    }
+    let (mi, a, h) = mgr.focused();
+    if mgr.monitors[mi].layout != "scrolling" {
+        return false;
+    }
+    let default = mgr.cfg.scroll_default_width;
+    let ws = &mut mgr.monitors[mi].workspaces[a];
+    let mut tiled = tiled_windows(ws);
+    let cols = ws.strip.columns(&tiled);
+    let at = locate_tile(&cols, h);
+    // Which column to focus, for the focus keys that pick one.
+    let focus_col = |c: usize| column_entry(&ws.strip, &cols[c]);
+    let changed = match *cmd {
+        FocusGeo(dir) => {
+            let Some((ci, ti)) = at else {
+                return false;
+            };
+            let target = match dir {
+                Dir::Left | Dir::Right => {
+                    let n = if matches!(dir, Dir::Left) { -1 } else { 1 };
+                    match column_target(Some(ci), n, cols.len()) {
+                        Some(c) => Some(focus_col(c)),
+                        None => {
+                            focus_adjacent_monitor(mgr, mi, dir);
+                            bump_follow_settle();
+                            return true;
+                        }
+                    }
+                }
+                // A tabbed column steps through its tabs the same way.
+                Dir::Up => step(ti, -1, cols[ci].len()).map(|t| cols[ci][t]),
+                Dir::Down => step(ti, 1, cols[ci].len()).map(|t| cols[ci][t]),
+            };
+            if let Some(t) = target {
+                strip_focus(mgr, mi, a, t);
+            }
+            return true;
+        }
+        FocusDir(d) => {
+            // Flat next/prev over `windows`, as on every layout (columns are
+            // runs of it, so this is column-major), plus the scroll.
+            let Some(idx) = focused_index(ws) else {
+                return true;
+            };
+            let len = ws.windows.len() as i32;
+            let target = ws.windows[(idx as i32 + d).rem_euclid(len) as usize];
+            strip_focus(mgr, mi, a, target);
+            return true;
+        }
+        ScrollFocus(n) => {
+            if let Some(c) = column_target(at.map(|p| p.0), n, cols.len()) {
+                let t = focus_col(c);
+                strip_focus(mgr, mi, a, t);
+            }
+            return true;
+        }
+        ColumnEdge { last, carry: false } => {
+            let edge = if last {
+                cols.len().checked_sub(1)
+            } else {
+                (!cols.is_empty()).then_some(0)
+            };
+            if let Some(c) = edge.filter(|&c| Some(c) != at.map(|p| p.0)) {
+                let t = focus_col(c);
+                strip_focus(mgr, mi, a, t);
+            }
+            return true;
+        }
+        _ if at.is_none() => return !matches!(cmd, MoveGeo(_)),
+        MoveGeo(dir) => match dir {
+            Dir::Left | Dir::Right => {
+                let n = if matches!(dir, Dir::Left) { -1 } else { 1 };
+                if !ws.move_column(&tiled, h, n) {
+                    move_to_adjacent_monitor(mgr, mi, h, dir);
+                    return true;
+                }
+                true
+            }
+            Dir::Up => ws.move_tile(&tiled, h, -1),
+            Dir::Down => ws.move_tile(&tiled, h, 1),
+        },
+        SwapDir(d) => ws.move_column(&tiled, h, d),
+        ScrollMove(n) => {
+            // One column per step; the order changes under each, so the
+            // tiled list is re-read.
+            let mut moved = false;
+            for _ in 0..n.unsigned_abs() {
+                if !ws.move_column(&tiled, h, n.signum()) {
+                    break;
+                }
+                moved = true;
+                tiled = tiled_windows(ws);
+            }
+            moved
+        }
+        ColumnEdge { last, carry: true } => ws.move_column_to_edge(&tiled, h, last),
+        ResizeMaster(delta) => {
+            ws.strip.adjust_width(h, 0.1 * delta.signum(), default);
+            true
+        }
+        PromoteMaster | MaximizeColumn => {
+            ws.strip.toggle_maximize(h, default);
+            true
+        }
+        CycleWidth => {
+            ws.strip
+                .cycle_width(h, &mgr.cfg.scroll_width_presets, default);
+            true
+        }
+        CycleHeight => ws
+            .strip
+            .cycle_tile_height(&tiled, h, &mgr.cfg.scroll_height_presets),
+        ResizeTile(d) => ws.strip.adjust_tile_height(&tiled, h, d),
+        ConsumeOrExpel(d) => ws.consume_or_expel(&tiled, h, d),
+        ToggleTabbed => {
+            ws.strip.toggle_tabbed(h, default);
+            true
+        }
+        CenterColumn => {
+            let view_w = mgr.monitors[mi].work_area.right - mgr.monitors[mi].work_area.left;
+            let ws = &mut mgr.monitors[mi].workspaces[a];
+            match strip_show_offset(&ws.strip, &tiled, h, view_w, &mgr.cfg, Center::Always) {
+                Some(off) if off != ws.strip.offset => {
+                    ws.strip.offset = off;
+                    true
+                }
+                _ => false,
+            }
+        }
+        _ => return false,
+    };
+    if changed {
+        strip_settle(mgr, mi, a, false);
+    }
+    true
 }
 
 // =========================================================================
@@ -8590,24 +12203,40 @@ unsafe fn bar_fonts_clear() {
 
 /// The bar font for one monitor DPI, built on first use. Main thread only.
 unsafe fn bar_font_for(dpi: u32) -> isize {
+    cached_font(
+        dpi,
+        BAR_HEIGHT.load(Ordering::Relaxed) as i32,
+        BAR_FONT_SIZE.load(Ordering::Relaxed) as i32,
+        dpi,
+    )
+}
+
+/// The tab-bar font for one DPI and `tab_bar_height` (logical): the bar's
+/// face and `bar_font_size`, capped to fit the shorter strip, else half the
+/// tab height as the bar does. Cached beside the bar fonts under a key above
+/// every DPI value, so bar_fonts_clear frees both. Main thread only.
+unsafe fn tab_font_for(dpi: u32, tab_h: i32) -> isize {
+    let size = BAR_FONT_SIZE.load(Ordering::Relaxed) as i32;
+    let size = if size > 0 { size.min(tab_h * 3 / 5) } else { 0 };
+    cached_font(((tab_h.max(1) as u32) << 16) | dpi, tab_h, size, dpi)
+}
+
+/// BAR_FONTS[key], made with make_bar_font on a miss. Main thread only.
+unsafe fn cached_font(key: u32, height: i32, font_size: i32, dpi: u32) -> isize {
     if let Some(f) = BAR_FONTS
         .lock()
         .unwrap()
         .as_ref()
-        .and_then(|m| m.get(&dpi).copied())
+        .and_then(|m| m.get(&key).copied())
     {
         return f;
     }
-    let f = make_bar_font(
-        BAR_HEIGHT.load(Ordering::Relaxed) as i32,
-        BAR_FONT_SIZE.load(Ordering::Relaxed) as i32,
-        dpi,
-    );
+    let f = make_bar_font(height, font_size, dpi);
     BAR_FONTS
         .lock()
         .unwrap()
         .get_or_insert_with(HashMap::new)
-        .insert(dpi, f);
+        .insert(key, f);
     f
 }
 
@@ -9166,6 +12795,27 @@ unsafe fn window_exe(hwnd: HWND) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..len as usize]))
 }
 
+/// window_exe of each tracked window, for the bar's app buttons and the tab
+/// bars: every command's tail asked twice per app button and once per tab,
+/// a process open each. A window's exe never changes; sync_managed prunes
+/// untracked windows (so a recycled HWND starts fresh). Manager thread only.
+static EXE_CACHE: Mutex<Option<HashMap<isize, Option<String>>>> = Mutex::new(None);
+
+/// window_exe through EXE_CACHE (manager thread, tracked windows).
+unsafe fn tracked_exe(hwnd: HWND) -> Option<String> {
+    let h = hwnd.0 as isize;
+    if let Some(exe) = EXE_CACHE.lock().unwrap().as_ref().and_then(|m| m.get(&h)) {
+        return exe.clone();
+    }
+    let exe = window_exe(hwnd);
+    EXE_CACHE
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(h, exe.clone());
+    exe
+}
+
 /// Return cached app icon without shell work on manager thread. Cache misses are
 /// queued to icon workers and temporarily render a placeholder.
 /// `px` is the physical size the caller will draw at — icons are resolved at
@@ -9174,18 +12824,21 @@ unsafe fn window_exe(hwnd: HWND) -> Option<String> {
 /// Stamp 0: this runs per window on every bar update, too hot for a metadata
 /// read, so an app updated mid-session keeps its old bar icon until restart.
 unsafe fn bar_app_icon(hwnd: HWND, px: i32) -> isize {
-    let Some(path) = window_exe(hwnd) else {
-        return -1;
-    };
+    tracked_exe(hwnd).map_or(-1, |path| bar_exe_icon(&path, px))
+}
+
+/// bar_app_icon for an exe path already in hand (the tab bars keep the path
+/// to look the icon up again at paint time).
+fn bar_exe_icon(path: &str, px: i32) -> isize {
     {
         let mut cache = BAR_ICON_CACHE.lock().unwrap();
-        if let Some(icon) = cache.get(&path, px, 0) {
+        if let Some(icon) = cache.get(path, px, 0) {
             return icon;
         }
         // 0 = queued: later lookups wait for the worker instead of re-queueing.
-        cache.insert(&path, px, 0, 0, 0);
+        cache.insert(path, px, 0, 0, 0);
     }
-    let job = IconJob::Bar(path, px);
+    let job = IconJob::Bar(path.to_string(), px);
     let mut q = ICON_QUEUE.lock().unwrap();
     if !q.contains(&job) {
         q.push_back(job);
@@ -9457,6 +13110,12 @@ unsafe fn update_bar(mgr: &Manager) {
     // title freezes with nothing logged (BAR-10).
     bar_refresh_clear(&BAR_REFRESH_QUEUED);
     if BARS.lock().unwrap().is_empty() {
+        // No bar was ever built (BARS only grows), so BAR is still the
+        // startup seed and holds no icon: mark every retired one free to go.
+        // Without this a retired tab-bar icon (tab_bars_build shares this
+        // cache) would never be swept while the status bar is off.
+        let gen = BAR_ICON_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+        BAR_SHOWN_GEN.store(gen, Ordering::SeqCst);
         return;
     }
     // Before the first bar_app_icon below (see BAR_ICON_GEN).
@@ -9543,7 +13202,7 @@ unsafe fn update_bar(mgr: &Manager) {
                         .filter(|h| IsWindow(hwnd_from(**h)).as_bool())
                         .map(|&h| {
                             let hwnd = hwnd_from(h);
-                            let label = window_exe(hwnd)
+                            let label = tracked_exe(hwnd)
                                 .and_then(|path| {
                                     std::path::Path::new(&path)
                                         .file_stem()
@@ -9571,6 +13230,14 @@ unsafe fn update_bar(mgr: &Manager) {
             occupied,
             title,
             apps,
+            layout: match m.workspaces.get(m.active) {
+                // `scrolling 2/5`: the focused column of the shown strip.
+                Some(ws) if m.layout == "scrolling" => {
+                    let cols = ws.strip.columns(&tiled_windows(ws));
+                    scroll_label(locate_tile(&cols, ws.focused).map(|p| p.0), cols.len())
+                }
+                _ => m.layout.clone(),
+            },
         });
     }
     for slot in BAR_TITLE_HWND.iter().skip(mgr.monitors.len()) {
@@ -9610,7 +13277,6 @@ unsafe fn update_bar(mgr: &Manager) {
             || old.icon_battery != new.icon_battery
             || old.icon_net != new.icon_net
             || old.icon_volume != new.icon_volume
-            || old.layout != new.layout
             || old.tiling != new.tiling
             || old.left != new.left
             || old.center != new.center
@@ -9689,7 +13355,6 @@ fn bar_data_from(cfg: &Config, light: bool, tiling: bool, mons: Vec<MonBar>) -> 
         icon_battery: cfg.bar_icon_battery.clone(),
         icon_net: cfg.bar_icon_net.clone(),
         icon_volume: cfg.bar_icon_volume.clone(),
-        layout: cfg.layout.clone(),
         tiling,
         left: zone_widgets(&cfg.bar_left, cfg),
         center: zone_widgets(&cfg.bar_center, cfg),
@@ -9824,8 +13489,10 @@ unsafe fn bar_widget_text(
             (!text.is_empty()).then_some((text, false))
         }
         BarWidget::Layout => {
+            // Each bar shows its own monitor's layout; none before the
+            // manager's first snapshot names the monitor.
             let s = if data.tiling {
-                format!("[{}]", data.layout)
+                format!("[{}]", mb?.layout)
             } else {
                 "[float]".to_string()
             };
@@ -10459,6 +14126,566 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
     }
 }
 
+// =========================================================================
+// Tab bars (scrolling layout, plan/scrolling.md "Tabbed columns")
+// =========================================================================
+//
+// One Astur window (class `astur_tabs`) over each tabbed column whose shown
+// tab is on screen. The manager owns the strips, so it builds the bars after
+// every command (tab_bars_publish); the main thread owns the windows, as it
+// owns the status bars, and makes them match (tab_bars_sync). Neither waits
+// on the other: one post, and a diff on each side, so an unchanged snapshot
+// costs no post and an unchanged bar no repaint. Bars are cosmetic: no
+// placement reads them, and a lost update leaves a stale bar, never a
+// misplaced window.
+
+/// One tab of a tab bar.
+#[derive(Clone, Debug, PartialEq)]
+struct TabInfo {
+    hwnd: isize,
+    title: String,
+    exe: String, // icon cache key ("" = unknown: no icon)
+    // BAR_ICON_CACHE's value when the snapshot was built. Only diffed, so the
+    // bar repaints when the icon resolves; paint looks the handle up again
+    // (paint_tab_bar says why).
+    icon: isize,
+}
+
+/// Everything one tab bar paints, built by the manager (tab_bars_build).
+#[derive(Clone, Debug, PartialEq)]
+struct TabBarData {
+    rect: RECT,                   // physical screen rect (layout::StripOut::tab_bars)
+    tabs: Vec<TabInfo>,           // the column's tiles, top to bottom; never empty
+    active: usize,                // the shown tab
+    dpi: u32,                     // its monitor's
+    tab_h: i32,                   // tab_bar_height, logical (the font)
+    icon_px: i32,                 // physical icon box; 0 = no icons (too short a bar)
+    colors: (u32, u32, u32, u32), // bar_colors: bg, fg, accent, inactive
+}
+
+/// The manager's latest tab bars, read by tab_bars_sync.
+static TAB_SNAPSHOT: Mutex<Vec<TabBarData>> = Mutex::new(Vec::new());
+/// A WM_TAB_BARS is posted and not handled yet: a publish meanwhile only
+/// replaces the snapshot, which that sync reads.
+static TAB_SYNC_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// A tab-bar window and what it shows (None: created, not placed yet).
+struct TabWin {
+    hwnd: isize,
+    data: Option<TabBarData>,
+    // Hidden for a fullscreen shown tab (tab_bars_sync), which the
+    // snapshot does not know about: the main thread tracks fullscreen.
+    hidden: bool,
+}
+/// The live tab bars. Main thread only (sync, paint, clicks, the NAMECHANGE
+/// arm). Never held across a call that can send a tab bar a message (create,
+/// move, destroy, paint): the paint takes it too, and a std Mutex is not
+/// reentrant (see ensure_bars_inner).
+static TAB_WINS: Mutex<Vec<TabWin>> = Mutex::new(Vec::new());
+
+/// The tab bars one scrolling workspace shows (pure): (column, bar rect,
+/// shown tab) per tabbed column whose bar has area, unless its shown tab
+/// parks (the column is off its monitor or would bleed) or the bar itself
+/// would (a staggered neighbour level with the bar only). `out` is the
+/// strip's layout of `cols`, `map` the workspace's PlaceMap.
+fn tab_bar_slots(
+    strip: &Strip,
+    cols: &[Vec<isize>],
+    focused: isize,
+    out: &StripOut,
+    map: &PlaceMap,
+) -> Vec<(usize, RECT, usize)> {
+    let Some(own) = map.own else {
+        return Vec::new();
+    };
+    let mut slots = Vec::new();
+    let mut start = 0; // the column's first tile in out.tiles
+    for (ci, col) in cols.iter().enumerate() {
+        let first = start;
+        start += col.len();
+        let Some(bar) = out.tab_bars.get(ci).copied().flatten() else {
+            continue;
+        };
+        let active = strip.active_tab(col, focused);
+        let Some(&tile) = out.tiles.get(first + active) else {
+            continue;
+        };
+        if bar.right > bar.left
+            && bar.bottom > bar.top
+            && map.vis(col[active], tile) != Vis::Park
+            && classify(bar, own, &map.others) != Vis::Park
+        {
+            slots.push((ci, bar, active));
+        }
+    }
+    slots
+}
+
+/// The tab bars to show now: each on-screen tabbed column of the active
+/// workspace of every scrolling monitor, while tiling. Hidden workspaces,
+/// other layouts and tiling off have none, so their bars go with the next
+/// sync. Window reads (title, exe) only for tabbed columns.
+unsafe fn tab_bars_build(mgr: &Manager) -> Vec<TabBarData> {
+    let mut bars = Vec::new();
+    if !mgr.tiling {
+        return bars;
+    }
+    let colors = themed_bar_colors(&mgr.cfg);
+    for (mi, m) in mgr.monitors.iter().enumerate() {
+        // The no-tabs case (nearly always) costs a scan of the column metadata.
+        let Some(ws) = m
+            .workspaces
+            .get(m.active)
+            .filter(|ws| m.layout == "scrolling" && ws.strip.cols.values().any(|c| c.tabbed))
+        else {
+            continue;
+        };
+        let tiled = tiled_windows(ws);
+        let cols = ws.strip.columns(&tiled);
+        let dpi = monitor_dpi(m.hmon);
+        // The same physical height workspace_layout leaves room for.
+        let tab_h = dpi_px(mgr.cfg.tab_bar_height, dpi);
+        let out = strip_out(&ws.strip, &tiled, ws.focused, m.work_area, &mgr.cfg, tab_h);
+        let map = PlaceMap::new(mgr, mi, m.active);
+        for (ci, rect, active) in tab_bar_slots(&ws.strip, &cols, ws.focused, &out, &map) {
+            // The bar's icon size, so the icons share its cache entries (and
+            // nothing a size change retires stays behind); none if too tall.
+            let icon_px = dpi_px(BAR_ICON_PX_CFG.load(Ordering::Relaxed), dpi);
+            let fits = icon_px + 2 * dpi_px(2, dpi) <= rect.bottom - rect.top;
+            let icon_px = if fits { icon_px } else { 0 };
+            let tabs = cols[ci]
+                .iter()
+                .map(|&h| {
+                    // No exe read when no icon is drawn.
+                    let exe = if icon_px > 0 {
+                        tracked_exe(hwnd_from(h)).unwrap_or_default()
+                    } else {
+                        String::new()
+                    };
+                    let icon = if exe.is_empty() {
+                        -1
+                    } else {
+                        bar_exe_icon(&exe, icon_px)
+                    };
+                    TabInfo {
+                        hwnd: h,
+                        title: window_title(hwnd_from(h)),
+                        exe,
+                        icon,
+                    }
+                })
+                .collect();
+            bars.push(TabBarData {
+                rect,
+                tabs,
+                active,
+                dpi,
+                tab_h: mgr.cfg.tab_bar_height,
+                icon_px,
+                colors,
+            });
+        }
+    }
+    bars
+}
+
+/// Hand the tab bars to the main thread, after every command and at
+/// startup: stored only when they changed, and one WM_TAB_BARS however many
+/// publishes land before the main thread gets to it (it reads the latest).
+unsafe fn tab_bars_publish(mgr: &Manager) {
+    let bars = tab_bars_build(mgr);
+    {
+        let mut snap = TAB_SNAPSHOT.lock().unwrap();
+        if *snap == bars {
+            return;
+        }
+        *snap = bars;
+    }
+    // SeqCst pairs with tab_bars_sync's clear-then-read (see there).
+    if TAB_SYNC_PENDING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let marker = MARKER_HWND.load(Ordering::Relaxed);
+    if marker == 0 || PostMessageW(hwnd_from(marker), WM_TAB_BARS, WPARAM(0), LPARAM(0)).is_err() {
+        TAB_SYNC_PENDING.store(false, Ordering::SeqCst);
+        // Cosmetic only: the bars stay one change behind until the next one.
+        log_error!("tab bar update dropped: could not post to the main thread");
+    }
+}
+
+/// What one tab-bar window needs going from `old` to `new` (pure): (move,
+/// repaint). A fresh window needs both; a scroll is a move alone unless the
+/// size changed too (the tabs are laid out on the width).
+fn tab_bar_diff(old: Option<&TabBarData>, new: &TabBarData) -> (bool, bool) {
+    let Some(old) = old else {
+        return (true, true);
+    };
+    let size = |r: RECT| (r.right - r.left, r.bottom - r.top);
+    let same_look = TabBarData {
+        rect: new.rect,
+        ..old.clone()
+    } == *new;
+    (
+        old.rect != new.rect,
+        !same_look || size(old.rect) != size(new.rect),
+    )
+}
+
+/// Tab `i`'s x span in a bar `w` px wide holding `n` equal tabs (pure); the
+/// last one ends exactly at `w`.
+fn tab_span(i: usize, n: usize, w: i32) -> (i32, i32) {
+    let n = n.max(1) as i64;
+    let at = |k: usize| (k as i64 * w as i64 / n) as i32;
+    (at(i), at(i + 1))
+}
+
+/// The tab under client x (pure): exactly the span paint drew it in.
+fn tab_at(x: i32, n: usize, w: i32) -> Option<usize> {
+    (0..n).find(|&i| {
+        let (a, b) = tab_span(i, n, w);
+        x >= a && x < b
+    })
+}
+
+/// Where a tab bar goes in the z-order: right above its column's shown tab,
+/// so whatever is stacked over the column (a floating window, a fullscreen
+/// app) stays over its bar too. HWND_TOP when the tab tops the normal band:
+/// the window above it is then topmost, and a window placed among the
+/// topmost ones can become topmost itself. None: it is there already.
+unsafe fn tab_z_after(shown: isize, bar: isize) -> Option<HWND> {
+    match GetWindow(hwnd_from(shown), GW_HWNDPREV) {
+        Ok(a) if a.0 as isize == bar => None,
+        Ok(a)
+            if !a.0.is_null()
+                && GetWindowLongPtrW(a, GWL_EXSTYLE) & WS_EX_TOPMOST.0 as isize == 0 =>
+        {
+            Some(a)
+        }
+        _ => Some(HWND_TOP),
+    }
+}
+
+/// Which live bar window each new bar keeps (pure): the one whose shown tab
+/// (`shown`, per window; 0 = none) is among the bar's tabs, so a bar stays
+/// with its column through scrolls, tab switches and other bars coming and
+/// going (motion_extras maps a bar window to its column the same way). None =
+/// a fresh window; a window no bar keeps is destroyed. Never repurposed for
+/// another column: its thumbnail in a running motion would show the other
+/// column's tabs where its own column was.
+fn tab_bar_pick(shown: &[isize], new: &[TabBarData]) -> Vec<Option<usize>> {
+    let mut taken = vec![false; shown.len()];
+    new.iter()
+        .map(|d| {
+            let i = (0..shown.len())
+                .find(|&i| !taken[i] && d.tabs.iter().any(|t| t.hwnd == shown[i]))?;
+            taken[i] = true;
+            Some(i)
+        })
+        .collect()
+}
+
+/// Main thread (WM_TAB_BARS): make the tab-bar windows match TAB_SNAPSHOT.
+/// Each bar keeps its window (tab_bar_pick), the rest get fresh ones, and
+/// windows no bar keeps are destroyed, so no bar outlives its column:
+/// untabbed, parked, its workspace hidden, its monitor gone or off scrolling,
+/// tiling off, each simply drops out of the snapshot. (Quit needs nothing:
+/// the windows die with the process.)
+unsafe fn tab_bars_sync() {
+    // Clear, then read: a publish after the read sees the flag clear and
+    // posts again, so the last snapshot is never left unsynced.
+    TAB_SYNC_PENDING.store(false, Ordering::SeqCst);
+    let new = TAB_SNAPSHOT.lock().unwrap().clone();
+    let shown_of = |d: &TabBarData| d.tabs.get(d.active).map_or(0, |t| t.hwnd);
+    // Only this thread changes TAB_WINS, so the pick holds until the swap.
+    let pick = {
+        let wins = TAB_WINS.lock().unwrap();
+        let shown: Vec<isize> = wins
+            .iter()
+            .map(|w| w.data.as_ref().map_or(0, shown_of))
+            .collect();
+        tab_bar_pick(&shown, &new)
+    };
+    let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+    let mut fresh = Vec::new();
+    for _ in pick.iter().filter(|p| p.is_none()) {
+        // Hidden until placed. NOACTIVATE: a click never takes focus from the
+        // app (the click is the TabClick); TOOLWINDOW keeps it off the
+        // taskbar and Alt+Tab. Never topmost (tab_z_after).
+        match CreateWindowExW(
+            WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            w!("astur_tabs"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            hinst,
+            None,
+        ) {
+            Ok(h) => fresh.push(h.0 as isize),
+            Err(_) => {
+                log_error!("tab bar window could not be created");
+                break;
+            }
+        }
+    }
+    // A shown tab that went fullscreen (or maximized) covers its monitor,
+    // and the bar sits right above it: hide the bar, as the status bar gets
+    // out of a fullscreen app's way. Anything else fullscreen is stacked
+    // above the bar already (tab_z_after). Read before TAB_WINS is taken.
+    let fullscreen: Vec<bool> = new
+        .iter()
+        .map(|d| fullscreen_window_tracked(shown_of(d)))
+        .collect();
+    // The swap itself, under the lock with no Win32 call: what moves,
+    // repaints, hides and goes.
+    let (gone, ops) = {
+        let mut wins = TAB_WINS.lock().unwrap();
+        let mut old: Vec<Option<TabWin>> = wins.drain(..).map(Some).collect();
+        let mut fresh = fresh.into_iter();
+        let mut ops = Vec::new();
+        for ((d, p), fs) in new.into_iter().zip(pick).zip(fullscreen) {
+            let w = match p {
+                Some(i) => old[i].take(),
+                None => fresh.next().map(|hwnd| TabWin {
+                    hwnd,
+                    data: None,
+                    hidden: false,
+                }),
+            };
+            // No window (its creation failed): left out until the next sync.
+            let Some(mut w) = w else {
+                continue;
+            };
+            let (mut moved, mut repaint) = tab_bar_diff(w.data.as_ref(), &d);
+            if w.hidden != fs {
+                // Coming back out of hiding is a full re-place.
+                moved = true;
+                repaint |= !fs;
+                w.hidden = fs;
+            }
+            if moved || repaint {
+                ops.push((w.hwnd, d.rect, shown_of(&d), moved, repaint, fs));
+            }
+            w.data = Some(d);
+            wins.push(w);
+        }
+        let gone: Vec<isize> = old.into_iter().flatten().map(|w| w.hwnd).collect();
+        (gone, ops)
+    };
+    for h in gone {
+        let _ = DestroyWindow(hwnd_from(h));
+    }
+    for (h, r, shown, moved, repaint, hide) in ops {
+        let hb = hwnd_from(h);
+        // For the Alt-drag redirect (drag_root_at), which runs on this thread.
+        SetWindowLongPtrW(hb, GWLP_USERDATA, shown);
+        if hide {
+            let _ = ShowWindow(hb, SW_HIDE);
+            continue;
+        }
+        if moved {
+            let (w, ht) = (r.right - r.left, r.bottom - r.top);
+            let flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+            let (after, z) = match tab_z_after(shown, h) {
+                Some(a) => (a, SET_WINDOW_POS_FLAGS(0)),
+                None => (HWND::default(), SWP_NOZORDER),
+            };
+            // A refused insert-after (that window just went away) must not
+            // leave the bar where it was: place it without the z-order.
+            if SetWindowPos(hb, after, r.left, r.top, w, ht, flags | z).is_err() {
+                let _ = SetWindowPos(
+                    hb,
+                    HWND::default(),
+                    r.left,
+                    r.top,
+                    w,
+                    ht,
+                    flags | SWP_NOZORDER,
+                );
+            }
+        }
+        if repaint {
+            let _ = InvalidateRect(hb, None, BOOL(0));
+            // Now, not when the queue drains: a new or reused window would
+            // show stale pixels at its new place for a frame.
+            let _ = UpdateWindow(hb);
+        }
+    }
+}
+
+/// Repaint every tab bar: the fonts were dropped (bar_fonts_clear) and the
+/// snapshot does not know. Main thread.
+unsafe fn tab_bars_repaint() {
+    let wins: Vec<isize> = TAB_WINS.lock().unwrap().iter().map(|w| w.hwnd).collect();
+    for h in wins {
+        let _ = InvalidateRect(hwnd_from(h), None, BOOL(0));
+    }
+}
+
+/// Is `h` a tab of a tab bar on screen? The NAMECHANGE arm's test: a tab's
+/// title refreshes through the bar's BarRefresh. Main thread.
+fn tab_bar_shows(h: isize) -> bool {
+    TAB_WINS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter_map(|w| w.data.as_ref())
+        .any(|d| d.tabs.iter().any(|t| t.hwnd == h))
+}
+
+/// Paint one tab bar: equal-width tabs, each the app icon and the
+/// ellipsized title, the shown tab filled with the accent colour; buffered
+/// like the bar. The icon is looked up in BAR_ICON_CACHE here rather than
+/// drawn from the snapshot: only this thread frees bar icons
+/// (bar_icons_sweep, between paints), so a handle the cache holds now is
+/// live for this whole paint, whatever snapshot generation built the bar.
+unsafe fn paint_tab_bar(h: HWND) {
+    // Between paints, as paint_bar does; the lookups below run after it.
+    bar_icons_sweep();
+    let data = TAB_WINS
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|w| w.hwnd == h.0 as isize)
+        .and_then(|w| w.data.clone());
+    let mut ps = PAINTSTRUCT::default();
+    let win_hdc = BeginPaint(h, &mut ps);
+    if let Some(d) = data {
+        let mut rc = RECT::default();
+        let _ = GetClientRect(h, &mut rc);
+        let bb = backbuf_begin(win_hdc, rc.right, rc.bottom);
+        let hdc = bb.as_ref().map_or(win_hdc, |b| b.dc);
+        let fill = |r: RECT, color: u32| {
+            let brush = CreateSolidBrush(COLORREF(color));
+            FillRect(hdc, &r, brush);
+            let _ = DeleteObject(HGDIOBJ(brush.0));
+        };
+        let (bg, fg, accent, inactive) = d.colors;
+        fill(rc, bg);
+        let font = tab_font_for(d.dpi, d.tab_h);
+        let old_font = SelectObject(
+            hdc,
+            if font != 0 {
+                HGDIOBJ(font as *mut c_void)
+            } else {
+                GetStockObject(DEFAULT_GUI_FONT)
+            },
+        );
+        SetBkMode(hdc, TRANSPARENT);
+        let pad = dpi_px(6, d.dpi);
+        let n = d.tabs.len();
+        for (i, t) in d.tabs.iter().enumerate() {
+            let (x0, x1) = tab_span(i, n, rc.right);
+            let shown = i == d.active;
+            if shown {
+                fill(
+                    RECT {
+                        left: x0,
+                        top: 0,
+                        right: x1,
+                        bottom: rc.bottom,
+                    },
+                    accent,
+                );
+            } else if i > 0 && i - 1 != d.active {
+                // A hairline between two unshown tabs.
+                fill(
+                    RECT {
+                        left: x0,
+                        top: rc.bottom / 4,
+                        right: x0 + 1,
+                        bottom: rc.bottom - rc.bottom / 4,
+                    },
+                    inactive,
+                );
+            }
+            let mut x = x0 + pad;
+            if d.icon_px > 0 && x + d.icon_px <= x1 - pad {
+                let icon = BAR_ICON_CACHE
+                    .lock()
+                    .unwrap()
+                    .get(&t.exe, d.icon_px, 0)
+                    .unwrap_or(0);
+                let iy = (rc.bottom - d.icon_px) / 2;
+                if icon > 1 {
+                    let _ = DrawIconEx(
+                        hdc,
+                        x,
+                        iy,
+                        HICON(icon as *mut c_void),
+                        d.icon_px,
+                        d.icon_px,
+                        0,
+                        None,
+                        DI_NORMAL,
+                    );
+                } else {
+                    draw_builtin_icon(hdc, "command", x, iy, d.icon_px, inactive);
+                }
+                x += d.icon_px + pad / 2;
+            }
+            let mut text = RECT {
+                left: x,
+                top: 0,
+                right: x1 - pad,
+                bottom: rc.bottom,
+            };
+            let mut s: Vec<u16> = t.title.encode_utf16().collect();
+            if text.right > text.left && !s.is_empty() {
+                SetTextColor(hdc, COLORREF(if shown { bg } else { fg }));
+                DrawTextW(
+                    hdc,
+                    &mut s,
+                    &mut text,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
+            }
+        }
+        SelectObject(hdc, old_font);
+        if let Some(b) = bb {
+            backbuf_end(win_hdc, b);
+        }
+    }
+    let _ = EndPaint(h, &ps);
+}
+
+/// Tab-bar WndProc: paint, and a click focuses that tab (Cmd::TabClick,
+/// anchored on the column's first window, which the manager re-resolves).
+unsafe extern "system" fn tab_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    match msg {
+        WM_PAINT => {
+            paint_tab_bar(h);
+            LRESULT(0)
+        }
+        // Paint is double-buffered; a background erase would only flicker.
+        WM_ERASEBKGND => LRESULT(1),
+        WM_LBUTTONDOWN => {
+            let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
+            // The window sits exactly on its rect, so its width is the
+            // client width the paint laid the tabs out on.
+            let hit = TAB_WINS
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|t| t.hwnd == h.0 as isize)
+                .and_then(|t| t.data.as_ref())
+                .and_then(|d| {
+                    let i = tab_at(x, d.tabs.len(), d.rect.right - d.rect.left)?;
+                    Some((d.tabs[0].hwnd, i))
+                });
+            if let Some((anchor, i)) = hit {
+                push_cmd(Cmd::TabClick(anchor, i));
+            }
+            LRESULT(0)
+        }
+        _ => DefWindowProcW(h, msg, w, l),
+    }
+}
+
 /// Focus-follows-mouse poll loop. Polls the cursor instead of running in the
 /// low-level mouse hook so it never adds latency to the global input path. Only
 /// active while `focus_follows_mouse` is enabled and no drag/Alt/button is busy.
@@ -10897,6 +15124,7 @@ fn manager_loop(cfg: Config) {
             }
         }
         reserve_bar(&mut monitors, &cfg);
+        resolve_layouts(&mut monitors, &cfg, &[]);
         let mut m = Manager {
             monitors,
             focused_mon: primary,
@@ -10906,13 +15134,19 @@ fn manager_loop(cfg: Config) {
             pending_launch_mon: 0,
         };
         assign_existing_windows(&mut m);
+        // Into MANAGED before the startup placement, not after it: an app
+        // hiding one of these windows meanwhile queues RemoveHidden only once
+        // the window is managed (see the EVENT_OBJECT_HIDE arm).
+        sync_managed(&m);
+        // Adopted windows are columns of their own; show the focused one.
+        ensure_visible_all(&mut m);
         // Warm the wallpaper cache now, not on the first animation. Until it
         // lands (one render, ~60-110 ms) glides place instantly.
         wp_publish(&m.monitors, &m.cfg, std::time::Duration::ZERO);
         queue_workspace_wallpaper(&m, primary, m.monitors[primary].active);
         if m.tiling {
-            // Instant, never the glide (ANIM-16): the glide handshake (capture,
-            // overlay up, DwmFlush; bounded by the 250 ms wait) held back the
+            // Instant, never the glide (ANIM-16): the motion handshake (overlay
+            // up, DwmFlush; bounded by the 250 ms wait) held back the
             // first placement, the first bar update and the first command.
             // Owner-visible: monitor 0's startup resize now shows directly
             // instead of under an overlay, as monitors 1..n (GLIDE_BUSY already
@@ -10922,11 +15156,16 @@ fn manager_loop(cfg: Config) {
             }
         }
         style_all(&m);
+        // The sync above ran before the placement parked anything: list the
+        // parked columns now, not at the first command, or a hard kill while
+        // idle leaves them off screen.
+        persist_hidden(&m);
         m
     };
-    sync_managed(&mgr);
+    strip_after_command(&mut mgr);
     unsafe {
         update_bar(&mgr);
+        tab_bars_publish(&mgr);
     }
     let mut last_drag = None;
     let mut drag_generation = 0;
@@ -10972,12 +15211,33 @@ fn manager_loop(cfg: Config) {
             } else {
                 None
             };
+            // Alt+wheel notches the same way, into one scroll of their sum.
+            let mut c = c;
+            let folded = fold_scrolls(&mut c, &mut q, |x, y| mgr.scroll_mon_at(x, y));
+            if folded > 0 {
+                log_debug!("scroll burst: {} commands folded into one", folded + 1);
+            }
             (c, q.len(), burst)
         };
+        // Exit handshake (EXITING, MGR_BUSY): busy before the check, so the
+        // exit restore either waits for this command or it is dropped here.
+        MGR_BUSY.store(true, Ordering::SeqCst);
+        if EXITING.load(Ordering::SeqCst) {
+            MGR_BUSY.store(false, Ordering::SeqCst);
+            continue;
+        }
         // Per-command probe: time in `process` and in the fixed tail (styles,
-        // bar, index sync), SetWindowPos calls issued, queue depth left behind.
-        // Everything here is skipped unless log_level = debug.
-        let probe = probe_now().map(|t0| (t0, cmd.name(), SWP_CALLS.load(Ordering::Relaxed)));
+        // bar, index sync), SetWindowPos calls issued and skipped as already in
+        // place, queue depth left behind. Everything here is skipped unless
+        // log_level = debug.
+        let probe = probe_now().map(|t0| {
+            (
+                t0,
+                cmd.name(),
+                SWP_CALLS.load(Ordering::Relaxed),
+                SWP_SKIPPED.load(Ordering::Relaxed),
+            )
+        });
         unsafe {
             match burst {
                 Some((target, folded)) => {
@@ -11000,20 +15260,69 @@ fn manager_loop(cfg: Config) {
             }
         }
         let t1 = probe.map(|_| Instant::now());
+        strip_after_command(&mut mgr);
         unsafe {
+            // The focus moved with no retile (a focus key off scrolling,
+            // FocusMouse, Windows' own pick after a close) while a motion
+            // aimed at the old one runs: re-aim it, so the two windows' dims
+            // crossfade instead of flipping back at the reveal. Not after a
+            // command whose own retile aimed it (GLIDE_GF): a second retile
+            // would re-read frames whose posted moves are still in flight
+            // and post those moves again. Nothing to fade with dimming off.
+            let aimed = GLIDE_GF.load(Ordering::Relaxed);
+            if GLIDE_BUSY.load(Ordering::Acquire)
+                && aimed != 0
+                && global_focus(&mgr) != aimed
+                && styled_alpha(false, mgr.cfg.unfocused_opacity).is_some()
+            {
+                if let Some(mi) = mgr.mon_by_hmon(GLIDE_HMON.load(Ordering::Relaxed)) {
+                    retile_monitor(&mgr, mi);
+                }
+            }
             apply_styles(&mgr);
             update_bar(&mgr);
+            tab_bars_publish(&mgr);
         }
         sync_managed(&mgr);
-        if let (Some((t0, name, swp0)), Some(t1)) = (probe, t1) {
+        if let (Some((t0, name, swp0, skip0)), Some(t1)) = (probe, t1) {
             log_debug!(
-                "cmd {name} process={}us tail={}us swp={} queued={depth}",
+                "cmd {name} process={}us tail={}us swp={} swp_skipped={} queued={depth}",
                 (t1 - t0).as_micros(),
                 t1.elapsed().as_micros(),
-                SWP_CALLS.load(Ordering::Relaxed) - swp0
+                SWP_CALLS.load(Ordering::Relaxed) - swp0,
+                SWP_SKIPPED.load(Ordering::Relaxed) - skip0
             );
         }
+        MGR_BUSY.store(false, Ordering::SeqCst);
     }
+}
+
+/// Scrolling bookkeeping after every command, in one place so no focus path
+/// can forget it: each workspace's focus becomes its column's last-focused
+/// tile (Strip::note_focus: the tab a tabbed column shows while focus is
+/// elsewhere, and where focus lands coming back), and the mouse hook gets the
+/// current scrolling monitors (layouts, monitors, work areas and tiling all
+/// change only inside commands), and the cold-snapshot worker gets the cold
+/// parked tiles worth a snapshot (cold_request). Hash lookups and a compare
+/// when nothing changed.
+fn strip_after_command(mgr: &mut Manager) {
+    for ws in mgr
+        .monitors
+        .iter_mut()
+        .flat_map(|m| m.workspaces.iter_mut())
+    {
+        let f = ws.focused;
+        ws.strip.note_focus(f);
+    }
+    let rects: Vec<RECT> = mgr
+        .monitors
+        .iter()
+        .filter(|m| mgr.tiling && m.layout == "scrolling")
+        .map(|m| m.full)
+        .collect();
+    scrollmon_publish(&rects);
+    // SAFETY: manager thread; visibility reads of tracked windows only.
+    unsafe { cold_request(mgr) };
 }
 
 /// Refresh the shutdown registry and the O(1) locate index from current manager
@@ -11031,76 +15340,197 @@ fn sync_managed(mgr: &Manager) {
             }
         }
     }
+    // Untracked and destroyed windows leave the skip-unchanged map here, one
+    // place for every way a window stops being managed.
+    if let Some(sent) = LAST_SENT.lock().unwrap().as_mut() {
+        sent.retain(|h, _| map.contains_key(h));
+    }
+    if let Some(slots) = LAST_SLOT.lock().unwrap().as_mut() {
+        slots.retain(|h, _| map.contains_key(h));
+    }
+    if let Some(warm) = WARM.lock().unwrap().as_mut() {
+        warm.retain(|h| map.contains_key(h));
+    }
+    if let Some(exe) = EXE_CACHE.lock().unwrap().as_mut() {
+        exe.retain(|h, _| map.contains_key(h));
+    }
+    let dead = COLD.lock().unwrap().retain(|h| map.contains_key(&h));
     *INDEX.lock().unwrap() = Some(map);
     drop(all);
+    // Snapshots freed after COLD and MANAGED are released: the hook thread
+    // takes MANAGED on every SHOW/HIDE/FOREGROUND.
+    drop(dead);
     persist_hidden(mgr);
 }
 
 // ---- crash rescue -------------------------------------------------------------
-// Astur hides inactive-workspace windows with SW_HIDE. Graceful exits restore
-// them, but a hard kill (taskkill /F, Task Manager End task, a crash that skips
-// the panic hook) cannot — the windows would stay hidden ("died"). So the
-// manager persists the CURRENTLY HIDDEN set to ~/.astur/rescue.lst whenever it
-// changes, and the next launch un-hides any verified survivors before adopting
-// windows. A graceful restore deletes the file.
+// Astur hides inactive-workspace windows with SW_HIDE, and parks off-screen
+// scrolling columns outside every monitor. Graceful exits restore both, but a
+// hard kill (taskkill /F, Task Manager End task, a crash that skips the panic
+// hook) cannot — the windows would stay hidden or off screen ("died"). So the
+// manager persists the CURRENTLY HIDDEN and PARKED sets to
+// ~/.astur/rescue.lst whenever they change, and the next launch un-hides and
+// unparks any verified survivors before adopting windows. A graceful restore
+// deletes the file.
 static LAST_RESCUE_HASH: AtomicU64 = AtomicU64::new(0);
 
 fn rescue_file() -> std::path::PathBuf {
     config_path("ASTUR_RESCUE", "rescue.lst")
 }
 
-/// Write (or clear) the hidden-window rescue list. Cheap: hashes the hidden set
-/// and returns without touching the disk when nothing changed (the common case —
-/// it only actually writes on workspace switches and window moves).
+/// Write (or clear) the rescue list. Cheap: hashes the two sets and returns
+/// when nothing changed (the common case — it only writes on workspace
+/// switches, window moves and strip scrolls), and the disk work itself runs on
+/// the rescue writer thread (queue_rescue).
+/// Parked = a window of an ACTIVE workspace whose last placement (LAST_SENT,
+/// which also covers a posted move not landed yet) is on no monitor. Hidden
+/// windows of a scrolling workspace may be parked too; their rescue unparks
+/// them after the show. An active-workspace window we hid (the scratchpad
+/// toggled away) counts as hidden.
 fn persist_hidden(mgr: &Manager) {
     let mut hidden: Vec<isize> = Vec::new();
-    for m in &mgr.monitors {
-        for (wi, ws) in m.workspaces.iter().enumerate() {
-            if wi != m.active {
-                hidden.extend(ws.windows.iter().copied());
+    let mut parked: Vec<isize> = Vec::new();
+    {
+        // One lock for the whole walk (the hook thread takes it too).
+        let ours = HIDDEN_BY_US.lock().unwrap();
+        for m in &mgr.monitors {
+            for (wi, ws) in m.workspaces.iter().enumerate() {
+                for &h in &ws.windows {
+                    if wi != m.active || ours.as_ref().is_some_and(|s| s.contains(&h)) {
+                        hidden.push(h);
+                    } else {
+                        parked.push(h);
+                    }
+                }
             }
         }
     }
-    let mut hash: u64 = 0x9E37_79B9_7F4A_7C15 ^ hidden.len() as u64;
-    for &h in &hidden {
-        hash = hash.rotate_left(9) ^ (h as u64).wrapping_mul(0x0100_0000_01B3);
+    {
+        let fulls: Vec<RECT> = mgr.monitors.iter().map(|m| m.full).collect();
+        let sent = LAST_SENT.lock().unwrap();
+        parked.retain(|h| {
+            sent.as_ref()
+                .and_then(|s| s.get(h))
+                .is_some_and(|r| !fulls.iter().any(|f| rects_overlap(r, f)))
+        });
     }
+    let hash = rescue_hash(&hidden, &parked);
     if LAST_RESCUE_HASH.swap(hash, Ordering::Relaxed) == hash {
         return;
     }
-    let path = rescue_file();
-    if hidden.is_empty() {
-        let _ = std::fs::remove_file(&path);
+    if hidden.is_empty() && parked.is_empty() {
+        queue_rescue(None);
         return;
     }
     let mut out = String::new();
-    for &h in &hidden {
-        unsafe {
-            let hw = hwnd_from(h);
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(hw, Some(&mut pid));
-            let mut cls = [0u16; 64];
-            let n = GetClassNameW(hw, &mut cls) as usize;
-            // hwnd pid class — class may contain spaces, so it goes last.
-            out.push_str(&format!(
-                "{} {} {}\n",
-                h,
-                pid,
-                String::from_utf16_lossy(&cls[..n])
-            ));
+    for (is_parked, list) in [(false, &hidden), (true, &parked)] {
+        for &h in list {
+            unsafe {
+                let hw = hwnd_from(h);
+                let mut pid = 0u32;
+                GetWindowThreadProcessId(hw, Some(&mut pid));
+                let mut cls = [0u16; 64];
+                let n = GetClassNameW(hw, &mut cls) as usize;
+                out.push_str(&rescue_line(
+                    is_parked,
+                    h,
+                    pid,
+                    &String::from_utf16_lossy(&cls[..n]),
+                ));
+            }
         }
     }
-    if let Some(p) = path.parent() {
-        let _ = std::fs::create_dir_all(p);
-    }
-    let _ = std::fs::write(&path, out);
+    queue_rescue(Some(out));
 }
 
-/// Un-hide windows a previous Astur instance hid and then failed to restore.
-/// Each entry is verified (same hwnd AND pid AND class) so a recycled HWND can
-/// never make us show a window some other app deliberately hid. Runs once at
-/// startup, before window adoption — rescued windows are then adopted normally
-/// onto the active workspace of their monitor.
+/// rescue.lst for the writer thread, latest wins: Some(Some(text)) writes the
+/// file, Some(None) removes it. The manager only fills the slot, so a slow
+/// disk (an antivirus scan on close, after every strip scroll) never delays
+/// the next command.
+static RESCUE_REQ: Mutex<Option<Option<String>>> = Mutex::new(None);
+static RESCUE_CV: Condvar = Condvar::new();
+/// Held from taking a job to the end of its disk work, by the writer and by
+/// the exit's removal (lock order RESCUE_IO, then RESCUE_REQ), so a list
+/// queued or in flight before `rescue_remove_now` never lands after it.
+static RESCUE_IO: Mutex<()> = Mutex::new(());
+
+fn queue_rescue(job: Option<String>) {
+    *RESCUE_REQ.lock().unwrap() = Some(job);
+    RESCUE_CV.notify_one();
+}
+
+fn rescue_worker() {
+    loop {
+        {
+            let mut slot = RESCUE_REQ.lock().unwrap();
+            while slot.is_none() {
+                slot = RESCUE_CV.wait(slot).unwrap();
+            }
+        }
+        let _io = RESCUE_IO.lock().unwrap();
+        // None: the exit's removal took the job in between.
+        let Some(job) = RESCUE_REQ.lock().unwrap().take() else {
+            continue;
+        };
+        let path = rescue_file();
+        match job {
+            Some(text) => {
+                if let Some(p) = path.parent() {
+                    let _ = std::fs::create_dir_all(p);
+                }
+                let _ = std::fs::write(&path, text);
+            }
+            None => {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+}
+
+/// The graceful exit's removal: drops a queued list and waits out a write in
+/// flight, then deletes the file.
+fn rescue_remove_now() {
+    let _io = RESCUE_IO.lock().unwrap();
+    RESCUE_REQ.lock().unwrap().take();
+    let _ = std::fs::remove_file(rescue_file());
+}
+
+/// Change detector for persist_hidden. The parked half is mixed in apart
+/// from the hidden half, so a window moving from one list to the other (a
+/// workspace switch away from a parked window) still rewrites the file.
+fn rescue_hash(hidden: &[isize], parked: &[isize]) -> u64 {
+    let mix = |a: u64, h: isize| a.rotate_left(9) ^ (h as u64).wrapping_mul(0x0100_0000_01B3);
+    let seed = 0x9E37_79B9_7F4A_7C15 ^ hidden.len() as u64;
+    let hash = hidden.iter().fold(seed, |a, &h| mix(a, h));
+    let hash = hash.rotate_left(17) ^ (parked.len() as u64).wrapping_mul(0xA24B_AED4_963E_E407);
+    parked.iter().fold(hash, |a, &h| mix(a, h))
+}
+
+/// One rescue.lst line: `hwnd pid class`, the class last since it may hold
+/// spaces. A parked window's line starts with `P `; a hidden one's has no tag,
+/// so a list written before parking existed still reads as hidden.
+fn rescue_line(parked: bool, h: isize, pid: u32, class: &str) -> String {
+    format!("{}{h} {pid} {class}\n", if parked { "P " } else { "" })
+}
+
+/// rescue_line read back: (parked, hwnd, pid, class).
+fn parse_rescue_line(line: &str) -> Option<(bool, isize, u32, &str)> {
+    let (parked, rest) = match line.strip_prefix("P ") {
+        Some(rest) => (true, rest),
+        None => (false, line),
+    };
+    let mut it = rest.splitn(3, ' ');
+    let h = it.next()?.parse().ok()?;
+    let pid = it.next()?.parse().ok()?;
+    Some((parked, h, pid, it.next()?))
+}
+
+/// Un-hide and unpark windows a previous Astur instance hid or parked and
+/// then failed to restore. Each entry is verified (same hwnd AND pid AND
+/// class) so a recycled HWND can never make us show or move a window some
+/// other app deliberately hid or placed. Runs once at startup, before window
+/// adoption — rescued windows are then adopted normally onto the active
+/// workspace of their monitor.
 unsafe fn rescue_orphans() {
     let path = rescue_file();
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -11108,15 +15538,11 @@ unsafe fn rescue_orphans() {
     };
     let mut n = 0u32;
     for line in text.lines() {
-        let mut it = line.splitn(3, ' ');
-        let (Some(hs), Some(ps), Some(cls)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        let (Ok(h), Ok(pid)) = (hs.parse::<isize>(), ps.parse::<u32>()) else {
+        let Some((parked, h, pid, cls)) = parse_rescue_line(line) else {
             continue;
         };
         let hw = hwnd_from(h);
-        if !IsWindow(hw).as_bool() || IsWindowVisible(hw).as_bool() {
+        if !IsWindow(hw).as_bool() {
             continue;
         }
         let mut p = 0u32;
@@ -11124,17 +15550,28 @@ unsafe fn rescue_orphans() {
         let mut c = [0u16; 64];
         let cn = GetClassNameW(hw, &mut c) as usize;
         if p == pid && String::from_utf16_lossy(&c[..cn]) == cls {
-            let _ = ShowWindow(hw, SW_SHOWNA);
-            n += 1;
+            // A hidden entry that is visible again was shown by its own app
+            // since, maybe still at its park spot: no show, but the unpark.
+            let shown = !parked && !IsWindowVisible(hw).as_bool();
+            if shown {
+                let _ = ShowWindow(hw, SW_SHOWNA);
+            }
+            // A hidden window of a scrolling workspace may be parked as well.
+            // unpark_window moves only a window that lies on no monitor.
+            if unpark_window(h, None) || shown {
+                n += 1;
+            }
         }
     }
     let _ = std::fs::remove_file(&path);
     if n > 0 {
-        log_info!("rescued {n} window(s) hidden by a previous session");
+        log_info!("rescued {n} window(s) hidden or parked by a previous session");
     }
 }
 
-/// Whether the manager tracks `h` as of its last command batch.
+/// Whether the manager tracks `h`. Synced after every command batch, and
+/// updated at once when a window is adopted (Cmd::Add) or untracked
+/// (untrack_window), so the HIDE filter never misses a just-adopted window.
 fn is_managed(h: isize) -> bool {
     MANAGED.lock().unwrap().contains(&h)
 }
@@ -11306,14 +15743,29 @@ unsafe extern "system" fn win_event_proc(
         {
             remove_fullscreen_window(h)
         }
+        // A window being dragged (Alt-drag or a title-bar drag) is mid-move,
+        // not entering fullscreen, and it is usually the foreground one, so
+        // every drag frame paid the full probe below (~10 calls and a class
+        // String). MOVESIZEEND re-probes the native case; an Alt-drag's
+        // release lands after ANY_DRAG clears, so its LOCATIONCHANGE probes.
+        // A tracked fullscreen window still probes: dragging one (an Alt-drag
+        // un-maximizes it) is how it leaves fullscreen.
+        EVENT_OBJECT_LOCATIONCHANGE
+            if !tracked_fullscreen
+                && (ANY_DRAG.load(Ordering::Relaxed)
+                    || NATIVE_DRAG.load(Ordering::Relaxed) == h) =>
+        {
+            false
+        }
         // F11/maximize geometry changes arrive here. Ignore background resize
         // noise unless window is foreground or already tracked fullscreen.
         EVENT_OBJECT_LOCATIONCHANGE if GetForegroundWindow() == hwnd || tracked_fullscreen => {
             refresh_fullscreen_window(hwnd)
         }
-        EVENT_OBJECT_SHOW | EVENT_SYSTEM_FOREGROUND | EVENT_SYSTEM_MINIMIZEEND => {
-            refresh_fullscreen_window(hwnd)
-        }
+        EVENT_OBJECT_SHOW
+        | EVENT_SYSTEM_FOREGROUND
+        | EVENT_SYSTEM_MINIMIZEEND
+        | EVENT_SYSTEM_MOVESIZEEND => refresh_fullscreen_window(hwnd),
         _ => false,
     };
     if fullscreen_changed {
@@ -11339,13 +15791,16 @@ unsafe extern "system" fn win_event_proc(
             // reads as "the bar is frozen".
             // Only displayed windows' titles are shown (see namechange_forward),
             // so filter here and keep everything else off the queue. No bar,
-            // nothing to refresh.
-            if BAR_HEIGHT.load(Ordering::Relaxed) > 0
+            // nothing to refresh, unless the window is a tab of a tab bar
+            // (any tab, shown or parked): those titles come from the same
+            // per-command tick (tab_bars_publish), bar or no bar.
+            if (BAR_HEIGHT.load(Ordering::Relaxed) > 0
                 && namechange_forward(
                     hwnd.0 as isize,
                     || GetForegroundWindow().0 as isize,
                     &BAR_TITLE_HWND,
-                )
+                ))
+                || tab_bar_shows(hwnd.0 as isize)
             {
                 if bar_refresh_gate(&BAR_REFRESH_QUEUED) {
                     push_cmd(Cmd::BarRefresh);
@@ -11370,7 +15825,12 @@ unsafe extern "system" fn win_event_proc(
             // Astur performed for a workspace switch are marked in HIDDEN_BY_US;
             // SUPPRESS alone misses the tail of the batch (async delivery), and
             // untracking those orphaned live windows on hidden workspaces.
-            if !SUPPRESS.load(Ordering::Relaxed) && !was_hidden_by_us(h) {
+            // Managed windows only: every menu, tooltip and popup in the
+            // session fires HIDE, and each used to wake the manager for a
+            // RemoveHidden no-op plus the bar update and index sync behind it.
+            // Safe because a window enters MANAGED the moment it is adopted
+            // (Cmd::Add, startup), not at the next sync.
+            if !SUPPRESS.load(Ordering::Relaxed) && is_managed(h) && !was_hidden_by_us(h) {
                 push_cmd(Cmd::RemoveHidden(h));
             }
         }
@@ -11424,17 +15884,33 @@ fn map_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
                 Cmd::FocusDir(-1)
             });
         }
+        // Shift+H/L is the tile height on a scrolling monitor; the manager
+        // turns ResizeTile back into the old ResizeMaster everywhere else.
         if vk == hk.shrink_master {
-            return Some(Cmd::ResizeMaster(-0.05));
+            return Some(if shift {
+                Cmd::ResizeTile(-0.1)
+            } else {
+                Cmd::ResizeMaster(-0.05)
+            });
         }
         if vk == hk.grow_master {
-            return Some(Cmd::ResizeMaster(0.05));
+            return Some(if shift {
+                Cmd::ResizeTile(0.1)
+            } else {
+                Cmd::ResizeMaster(0.05)
+            });
         }
         if vk == hk.promote_master {
             return Some(Cmd::PromoteMaster);
         }
         if vk == hk.toggle_tiling {
-            return Some(Cmd::ToggleTiling);
+            // Shift used to be ignored here, so Alt+Shift+T toggled tiling by
+            // accident; it is the tabbed toggle now (a no-op off scrolling).
+            return Some(if shift {
+                Cmd::ToggleTabbed
+            } else {
+                Cmd::ToggleTiling
+            });
         }
         if vk == hk.toggle_float {
             return Some(Cmd::ToggleFloat);
@@ -11442,8 +15918,32 @@ fn map_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
         if vk == hk.close_window {
             return Some(Cmd::CloseFocused);
         }
+        if vk == hk.cycle_width {
+            return Some(if shift {
+                Cmd::CycleHeight
+            } else {
+                Cmd::CycleWidth
+            });
+        }
+        if vk == hk.center_column {
+            return Some(Cmd::CenterColumn);
+        }
+        if vk == hk.consume_left {
+            return Some(Cmd::ConsumeOrExpel(-1));
+        }
+        if vk == hk.consume_right {
+            return Some(Cmd::ConsumeOrExpel(1));
+        }
     }
     match vk {
+        0x24 => Some(Cmd::ColumnEdge {
+            last: false,
+            carry: shift,
+        }), // Home
+        0x23 => Some(Cmd::ColumnEdge {
+            last: true,
+            carry: shift,
+        }), // End
         0x0D => Some(if shift {
             Cmd::LaunchBrowser
         } else {
@@ -16644,6 +21144,10 @@ fn main() {
         // chance to drain its queue, and a panic is the one event that must
         // never be lost.
         log_sync(&format!("PANIC {info}"));
+        // Release aborts after this anyway (panic = "abort"). A dev build
+        // would unwind only the panicking thread and keep running with
+        // EXITING set, a manager that drops every command: end it the same.
+        std::process::abort();
     }));
     unsafe {
         // MUST be the first Win32 call: it has to happen before any window, DC
@@ -16736,8 +21240,8 @@ fn main() {
         };
         RegisterClassW(&wc);
 
-        // Workspace-slide overlay class (black background; the slide paints the
-        // captured screen onto it via GDI, DWM thumbnails composite over that).
+        // Workspace-slide overlay class (black background; the slide paints
+        // captured screen bitmaps onto it with GDI, no DWM thumbnails).
         let slide_wc = WNDCLASSW {
             lpfnWndProc: Some(slide_wndproc),
             hInstance: hinst,
@@ -16746,6 +21250,18 @@ fn main() {
             ..Default::default()
         };
         RegisterClassW(&slide_wc);
+
+        // Tab bars of the scrolling layout's tabbed columns (tab_bars_sync).
+        // Whether or not the status bar is on, and before the manager starts
+        // publishing them. No class brush: the paint is buffered and covers
+        // the window before it is first shown (UpdateWindow in the sync).
+        let tabs_wc = WNDCLASSW {
+            lpfnWndProc: Some(tab_wndproc),
+            hInstance: hinst,
+            lpszClassName: w!("astur_tabs"),
+            ..Default::default()
+        };
+        RegisterClassW(&tabs_wc);
 
         let marker = CreateWindowExW(
             WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
@@ -16863,19 +21379,27 @@ fn main() {
         spawn_named("focus-follow", focus_follow_worker);
         // CPU/RAM/battery poll loop (idles unless a stats widget is enabled).
         spawn_named("stats", stats_worker);
-        // Wallpaper/state writes can involve disk/shell I/O; keep them off manager/hooks.
+        // Wallpaper/state/rescue writes can involve disk/shell I/O; keep them off
+        // manager/hooks.
         spawn_named("wallpaper", wallpaper_worker);
         spawn_named("state", state_worker);
         spawn_named("mru", mru_worker);
+        spawn_named("rescue", rescue_worker);
         // Workspace-slide compositor (owns its overlay + message pump; idle on a
         // condvar until the manager dispatches a slide).
         spawn_named("transition", transition_worker);
-        // Per-window glide compositor (move/open/close/re-tile). Own overlay +
-        // pump; idle on a condvar until the manager dispatches a glide.
+        // Window motion compositor (move/open/close/re-tile/scroll; DWM
+        // thumbnails). Own overlay + pump; idle on a condvar until the manager
+        // dispatches a motion, which it re-aims while it runs.
         spawn_named("glide", glide_worker);
-        // Wallpaper renders for both compositors (the only PrintWindow caller;
-        // see the wallpaper cache notes). Normal priority, idle on a condvar.
+        // Wallpaper renders for both compositors (PrintWindow of the
+        // wallpaper window only; see the wallpaper cache notes). Normal
+        // priority, idle on a condvar.
         spawn_named("wallpaper-capture", wallpaper_capture_worker);
+        // Snapshots of cold parked windows for the motion compositor (the
+        // only PrintWindow of app windows: a hung app blocks this thread
+        // alone). Normal priority, idle on a condvar.
+        spawn_named("cold-snapshot", cold_worker);
         // App launcher (Alt+Space): owns its picker window + message pump, idle
         // until the keyboard hook posts an open/key message.
         spawn_named("launcher", launcher_thread);
@@ -16958,6 +21482,16 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_session_that_really_ends_runs_the_exit_restore() {
+        use windows::Win32::UI::WindowsAndMessaging::WM_QUERYENDSESSION;
+        assert!(exit_restore_msg(WM_CLOSE, 0));
+        assert!(exit_restore_msg(WM_ENDSESSION, 1));
+        // Cancellable: Astur keeps running after these.
+        assert!(!exit_restore_msg(WM_QUERYENDSESSION, 0));
+        assert!(!exit_restore_msg(WM_ENDSESSION, 0));
+    }
 
     #[test]
     fn hook_delay_keeps_the_worst_and_ignores_future_stamps() {
@@ -17234,7 +21768,7 @@ mod tests {
         assert!(!wp_entry_usable(7, 7, 0x10, wa, 0x10, wider));
     }
 
-    // ---- glide compose ------------------------------------------------------
+    // ---- window motion ------------------------------------------------------
 
     #[test]
     fn native_drag_moves_preserve_size_and_resizes_change_real_geometry() {
@@ -17377,43 +21911,6 @@ mod tests {
     }
 
     #[test]
-    fn glide_rejects_resizing_and_partial_source_pixels() {
-        let bounds = rc(0, 0, 1920, 1080);
-        let old = rc(10, 10, 650, 490);
-        assert!(glide_can_translate(&old, &old, &bounds));
-        assert!(glide_can_translate(&old, &rc(800, 100, 1440, 580), &bounds));
-        // Even one pixel of scaling would shimmer text.
-        assert!(!glide_can_translate(
-            &old,
-            &rc(800, 100, 1441, 580),
-            &bounds
-        ));
-        assert!(!glide_can_translate(
-            &old,
-            &rc(800, 100, 1440, 579),
-            &bounds
-        ));
-        // Missing source pixels cannot be recovered from a monitor capture.
-        assert!(!glide_can_translate(&rc(-8, 10, 632, 490), &old, &bounds));
-        assert!(!glide_can_translate(
-            &old,
-            &rc(1600, 10, 2240, 490),
-            &bounds
-        ));
-        assert!(!glide_can_translate(
-            &rc(0, 0, 0, 10),
-            &rc(0, 0, 0, 10),
-            &bounds
-        ));
-        // Negative screen coordinates on a secondary monitor are valid.
-        assert!(glide_can_translate(
-            &rc(-1910, 10, -1270, 490),
-            &rc(-800, 20, -160, 500),
-            &rc(-1920, 0, 0, 1080),
-        ));
-    }
-
-    #[test]
     fn glide_still_is_the_two_pixel_jitter_band() {
         let a = RECT {
             left: 10,
@@ -17447,28 +21944,22 @@ mod tests {
         // 1920x1040 work area. Left window static (1 px jitter), right column
         // split: the top one grows down over a closed sibling's slot.
         let items = [
-            GlideItem {
-                old: rc(8, 8, 956, 1032),
-                new: rc(9, 8, 956, 1032),
-            },
-            GlideItem {
-                old: rc(964, 8, 1912, 516),
-                new: rc(964, 8, 1912, 1032),
-            },
+            (rc(8, 8, 956, 1032), rc(9, 8, 956, 1032)),
+            (rc(964, 8, 1912, 516), rc(964, 8, 1912, 1032)),
         ];
         // Union over the moving item only, grown by 32 and clamped.
         assert_eq!(
-            glide_damage(&items, 32, 1920, 1040),
+            glide_damage(&items, &[], 32, 1920, 1040),
             Some(rc(932, 0, 1920, 1040))
         );
         // No margin: the exact union.
         assert_eq!(
-            glide_damage(&items, 0, 1920, 1040),
+            glide_damage(&items, &[], 0, 1920, 1040),
             Some(rc(964, 8, 1912, 1032))
         );
         // Nothing moves beyond the jitter band: no glide at all.
-        assert_eq!(glide_damage(&items[..1], 32, 1920, 1040), None);
-        assert_eq!(glide_damage(&[], 32, 1920, 1040), None);
+        assert_eq!(glide_damage(&items[..1], &[], 32, 1920, 1040), None);
+        assert_eq!(glide_damage(&[], &[], 32, 1920, 1040), None);
     }
 
     #[test]
@@ -17476,38 +21967,650 @@ mod tests {
         let full = Some(rc(0, 0, 1920, 1040));
         // A layout change moving everything: the whole work area.
         let items = [
-            GlideItem {
-                old: rc(8, 8, 956, 1032),
-                new: rc(8, 8, 1280, 1032),
-            },
-            GlideItem {
-                old: rc(964, 8, 1912, 1032),
-                new: rc(1288, 8, 1912, 1032),
-            },
+            (rc(8, 8, 956, 1032), rc(8, 8, 1280, 1032)),
+            (rc(964, 8, 1912, 1032), rc(1288, 8, 1912, 1032)),
         ];
-        assert_eq!(glide_damage(&items, 32, 1920, 1040), full);
+        assert_eq!(glide_damage(&items, &[], 32, 1920, 1040), full);
         // Just under the threshold stays a sub-rect, at it goes full: 90% of
         // 1000x1000 is 900000 = 900x1000.
-        let near = |right: i32| {
-            [GlideItem {
-                old: rc(0, 0, 10, 1000),
-                new: rc(0, 0, right, 1000),
-            }]
-        };
+        let near = |right: i32| [(rc(0, 0, 10, 1000), rc(0, 0, right, 1000))];
         assert_eq!(
-            glide_damage(&near(899), 0, 1000, 1000),
+            glide_damage(&near(899), &[], 0, 1000, 1000),
             Some(rc(0, 0, 899, 1000))
         );
         assert_eq!(
-            glide_damage(&near(900), 0, 1000, 1000),
+            glide_damage(&near(900), &[], 0, 1000, 1000),
             Some(rc(0, 0, 1000, 1000))
         );
         // A move entirely off the work area (another monitor) shows nothing.
-        let off = [GlideItem {
-            old: rc(-900, 0, -500, 400),
-            new: rc(-800, 0, -400, 400),
+        let off = [(rc(-900, 0, -500, 400), rc(-800, 0, -400, 400))];
+        assert_eq!(glide_damage(&off, &[], 32, 1000, 1000), None);
+    }
+
+    #[test]
+    fn glide_damage_takes_whole_every_dim_change_it_touches() {
+        // 1000x1000, no margin. One tile widens from 100 to 200 px.
+        let moves = [(rc(0, 0, 100, 100), rc(0, 0, 200, 100))];
+        // B is touched only once A is taken; C never is.
+        let a = rc(150, 0, 300, 100);
+        let b = rc(250, 0, 400, 100);
+        let c = rc(600, 600, 700, 700);
+        assert_eq!(
+            glide_damage(&moves, &[b, a, c], 0, 1000, 1000),
+            Some(rc(0, 0, 400, 100))
+        );
+        assert_eq!(
+            glide_damage(&moves, &[c], 0, 1000, 1000),
+            Some(rc(0, 0, 200, 100))
+        );
+        // A dim change alone raises nothing.
+        assert_eq!(glide_damage(&[], &[a], 0, 1000, 1000), None);
+    }
+
+    #[test]
+    fn motion_area_is_the_work_area_only_on_scrolling() {
+        // A work area at a screen offset (a second monitor). One tile swaps
+        // with its neighbour's slot; the one beside it, which the box's
+        // shadow margin cuts, stands, with or without a dim change.
+        let wa = rc(1920, 0, 3840, 1040);
+        let moving = item(
+            rc(1928, 8, 2876, 516),
+            rc(1928, 524, 2876, 1032),
+            MotionKind::Move,
+        );
+        let still = item(
+            rc(2884, 8, 3832, 1032),
+            rc(2884, 8, 3832, 1032),
+            MotionKind::Static,
+        );
+        let dimmed = MotionItem { d1: 204, ..still };
+        assert_eq!(motion_area(true, &[moving, still], wa, 32, true), Some(wa));
+        // Off scrolling: the moving tile's damage box, in screen coordinates.
+        let boxed = Some(rc(1920, 0, 2908, 1040));
+        assert_eq!(motion_area(false, &[moving, still], wa, 32, true), boxed);
+        // The cut window changes its dim: taken whole (here: the full path).
+        assert_eq!(
+            motion_area(false, &[moving, dimmed], wa, 32, true),
+            Some(wa)
+        );
+        // Not for a re-aim, which only has to fit the running box.
+        assert_eq!(motion_area(false, &[moving, dimmed], wa, 32, false), boxed);
+        // Only a dim change: nothing to cover (no overlay off scrolling).
+        assert_eq!(motion_area(false, &[still, dimmed], wa, 32, true), None);
+    }
+
+    fn item(from: RECT, to: RECT, kind: MotionKind) -> MotionItem {
+        MotionItem {
+            hwnd: 0xA,
+            from,
+            to,
+            kind,
+            a0: 255,
+            a1: 255,
+            d0: 255,
+            d1: 255,
+            role: MotionRole::Tile,
+            slot_same: false,
+        }
+    }
+
+    #[test]
+    fn motion_end_keeps_a_refused_size_only_where_the_slot_kept_its_size() {
+        // A 900 px slot whose app insists on 1000 px.
+        let frame = rc(5000, 50, 6000, 530);
+        let old = rc(100, 50, 1000, 530);
+        let scrolled = rc(-700, 50, 200, 530);
+        // Scrolled (same slot size): ends at the new top-left, real size.
+        assert_eq!(
+            motion_end(scrolled, Some(old), frame),
+            rc(-700, 50, 300, 530)
+        );
+        // Within the jitter band counts as the same size.
+        assert_eq!(
+            motion_end(scrolled, Some(rc(100, 50, 1002, 530)), frame),
+            rc(-700, 50, 300, 530)
+        );
+        // A resized slot, or none known (new window, forgotten): the slot.
+        let wider = rc(-700, 50, 500, 530);
+        assert_eq!(motion_end(wider, Some(old), frame), wider);
+        assert_eq!(motion_end(scrolled, None, frame), scrolled);
+        // Where the app accepts its size, that is the slot exactly.
+        assert_eq!(motion_end(scrolled, Some(old), old), scrolled);
+    }
+
+    #[test]
+    fn a_static_item_is_drawn_at_its_live_size_where_it_stands() {
+        // motion_step draws a Static thumbnail at rect_at_size(from, live).
+        let from = rc(100, 50, 1100, 530);
+        assert_eq!(rect_at_size(from, 900, 480), rc(100, 50, 1000, 530));
+        assert_eq!(rect_at_size(from, 1000, 480), from);
+        assert_eq!(rect_at_size(from, 1200, 600), rc(100, 50, 1300, 650));
+    }
+
+    #[test]
+    fn motion_order_stacks_by_z_order_and_lifts_the_focus_over_tiles_only() {
+        let at = |hwnd: isize, r: RECT, role: MotionRole| MotionItem {
+            hwnd,
+            role,
+            ..item(r, r, MotionKind::Static)
+        };
+        let left = rc(0, 0, 900, 1000);
+        let right = rc(1000, 0, 1900, 1000);
+        let focus = at(1, left, MotionRole::Focus);
+        let tile = at(2, right, MotionRole::Tile);
+        let float = at(3, rc(500, 200, 1500, 800), MotionRole::Float);
+        let bar = at(4, rc(1000, 0, 1900, 30), MotionRole::Bar);
+        let order = |items: &[MotionItem]| items.iter().map(|it| it.hwnd).collect::<Vec<_>>();
+        // Real z-order, top first: float, bar, tile, focus. Bottom-first,
+        // then the focus lifted to just above the tile, under the float and
+        // the bar that really are above every tile.
+        let mut items = vec![tile, bar, float, focus];
+        motion_order(&mut items, &[2, 1, 0, 3]);
+        assert_eq!(order(&items), vec![2, 1, 4, 3]);
+        // A window not found in the z-order goes to the bottom.
+        let mut items = vec![tile, focus];
+        motion_order(&mut items, &[usize::MAX, 0]);
+        assert_eq!(order(&items), vec![2, 1]);
+        // Dropped onto the tile it is under: frame 0 keeps it under.
+        let under = at(1, rc(1200, 100, 1800, 700), MotionRole::Focus);
+        let mut items = vec![under, tile];
+        motion_order(&mut items, &[1, 0]);
+        assert_eq!(order(&items), vec![1, 2]);
+        // No focused tile among the items: z-order alone.
+        let mut items = vec![float, tile];
+        motion_order(&mut items, &[0, 1]);
+        assert_eq!(order(&items), vec![2, 3]);
+    }
+
+    #[test]
+    fn motion_kind_is_static_only_where_it_stands_or_its_slot_kept() {
+        let a = rc(100, 50, 740, 530);
+        // Already there (within the jitter band): Static.
+        assert_eq!(motion_kind(a, a, false), MotionKind::Static);
+        assert_eq!(
+            motion_kind(a, rc(102, 48, 741, 530), false),
+            MotionKind::Static
+        );
+        // Resized in place: a morph, unless the slot is the one it had (an
+        // app refusing its slot's size raises no overlay).
+        let wider = rc(100, 50, 900, 700);
+        assert_eq!(motion_kind(a, wider, false), MotionKind::Move);
+        assert_eq!(motion_kind(a, wider, true), MotionKind::Static);
+        // Moved, at the same size or not: Move, whatever the slot says.
+        assert_eq!(
+            motion_kind(a, rc(900, 50, 1540, 530), false),
+            MotionKind::Move
+        );
+        assert_eq!(
+            motion_kind(a, rc(900, 50, 1700, 530), false),
+            MotionKind::Move
+        );
+        assert_eq!(
+            motion_kind(a, rc(900, 50, 1540, 530), true),
+            MotionKind::Move
+        );
+        // Only a moving or fading item raises an overlay; a dim change alone
+        // (a focus change) does not.
+        assert!(!motion_changes(&item(a, a, MotionKind::Static)));
+        assert!(motion_changes(&item(a, a, MotionKind::Move)));
+        let fade = MotionItem {
+            a1: 0,
+            ..item(a, a, MotionKind::Static)
+        };
+        assert!(motion_changes(&fade));
+        let dim = MotionItem {
+            d1: 204,
+            ..item(a, a, MotionKind::Static)
+        };
+        assert!(!motion_changes(&dim));
+    }
+
+    #[test]
+    fn motion_rect_morphs_position_and_size_exactly_end_to_end() {
+        let (from, to) = (rc(0, 0, 640, 480), rc(1000, 200, 1900, 680));
+        let mv = item(from, to, MotionKind::Move);
+        assert_eq!(motion_rect(&mv, 0.0), from);
+        assert_eq!(motion_rect(&mv, 0.5), rc(500, 100, 1270, 580));
+        assert_eq!(motion_rect(&mv, 1.0), to);
+        // A width change keeps the edge that does not move exactly in place.
+        let grow = item(
+            rc(100, 0, 700, 480),
+            rc(100, 0, 1000, 480),
+            MotionKind::Move,
+        );
+        for i in 0..=10 {
+            let r = motion_rect(&grow, i as f64 / 10.0);
+            assert_eq!((r.left, r.top, r.bottom), (100, 0, 480));
+        }
+        let shrink_left = item(rc(100, 0, 700, 480), rc(400, 0, 700, 480), MotionKind::Move);
+        assert_eq!(motion_rect(&shrink_left, 0.37).right, 700);
+        // A pure slide keeps its size on every frame.
+        let slide = item(from, rc(333, 77, 973, 557), MotionKind::Move);
+        for i in 0..=10 {
+            let r = motion_rect(&slide, i as f64 / 10.0);
+            assert_eq!((r.right - r.left, r.bottom - r.top), (640, 480));
+        }
+        // Static stays where it is, 1:1 (its slot may differ: a refused size).
+        let st = item(from, rc(0, 0, 900, 480), MotionKind::Static);
+        assert_eq!(motion_rect(&st, 0.0), from);
+        assert_eq!(motion_rect(&st, 0.7), from);
+    }
+
+    #[test]
+    fn motion_alpha_and_ease_hit_their_ends_and_never_step_back() {
+        for reaimed in [false, true] {
+            assert_eq!(motion_ease(0.0, reaimed), 0.0);
+            assert_eq!(motion_ease(1.0, reaimed), 1.0);
+            // Past either end it holds the end (a late frame, a clock skew).
+            assert_eq!(motion_ease(-0.5, reaimed), 0.0);
+            assert_eq!(motion_ease(1.5, reaimed), 1.0);
+            let mut last = 0.0;
+            for i in 0..=100 {
+                let e = motion_ease(i as f64 / 100.0, reaimed);
+                assert!(e >= last);
+                last = e;
+            }
+        }
+        // A re-aimed segment is already moving: it starts at speed, the first
+        // one eases in.
+        assert!(motion_ease(0.1, true) > 3.0 * motion_ease(0.1, false));
+        assert_eq!(motion_alpha(0, 255, 0.0), 0);
+        assert_eq!(motion_alpha(0, 255, 1.0), 255);
+        assert_eq!(motion_alpha(255, 0, 0.5), 128);
+        assert_eq!(motion_alpha(255, 255, 0.3), 255);
+    }
+
+    #[test]
+    fn retarget_continues_from_where_the_item_is_drawn() {
+        // Halfway through a morph (moving and widening), a new layout sends
+        // it elsewhere at another size.
+        let first = item(rc(0, 0, 640, 480), rc(1000, 0, 1900, 480), MotionKind::Move);
+        let at = motion_rect(&first, motion_ease(0.5, false));
+        assert_eq!(at, rc(500, 0, 1270, 480));
+        let next = item(
+            rc(1000, 0, 1900, 480),
+            rc(-700, 0, -60, 480),
+            MotionKind::Move,
+        );
+        let seg = retarget_item(at, 255, 255, &next);
+        // Frame 0 of the new segment draws exactly where it was, size
+        // included: no jump. It ends exactly at its new slot.
+        assert_eq!(motion_rect(&seg, motion_ease(0.0, true)), at);
+        assert_eq!(motion_rect(&seg, motion_ease(1.0, true)), next.to);
+        assert_eq!(seg.kind, MotionKind::Move);
+        // A fade and a dim continue from where they are too.
+        let fading = MotionItem {
+            a1: 0,
+            d1: 204,
+            ..next
+        };
+        let seg = retarget_item(at, 140, 230, &fading);
+        assert_eq!(motion_alpha(seg.a0, seg.a1, 0.0), 140);
+        assert_eq!(motion_alpha(seg.a0, seg.a1, 1.0), 0);
+        assert_eq!(motion_alpha(seg.d0, seg.d1, 0.0), 230);
+        assert_eq!(motion_alpha(seg.d0, seg.d1, 1.0), 204);
+        // Mid-morph with its slot unchanged (the re-aim reads the window
+        // placed at its end: Static there): it keeps morphing to the slot.
+        let slot = rc(1000, 0, 1900, 480);
+        let kept = item(slot, slot, MotionKind::Static);
+        let seg = retarget_item(at, 255, 255, &kept);
+        assert_eq!(seg.kind, MotionKind::Move);
+        assert_eq!(motion_rect(&seg, 0.0), at);
+        assert_eq!(motion_rect(&seg, 1.0), slot);
+        // Already at its end, or Static standing where it is (a refused
+        // size): it stands, 1:1.
+        let there = retarget_item(rc(-701, 1, -61, 481), 255, 255, &next);
+        assert_eq!(there.kind, MotionKind::Static);
+        let refused = item(rc(0, 0, 700, 480), rc(0, 0, 640, 480), MotionKind::Static);
+        let seg = retarget_item(refused.from, 255, 255, &refused);
+        assert_eq!(seg.kind, MotionKind::Static);
+        assert_eq!(motion_rect(&seg, 0.6), refused.from);
+    }
+
+    #[test]
+    fn reaim_restarts_only_for_a_different_layout() {
+        let a = item(rc(0, 0, 10, 10), rc(100, 0, 110, 10), MotionKind::Move);
+        let b = MotionItem { hwnd: 0xB, ..a };
+        let cur = [a, b];
+        // The same ends again (from differs: the manager reads the windows
+        // where they were placed): keep the course.
+        let same = [
+            MotionItem {
+                from: a.to,
+                kind: MotionKind::Static,
+                ..a
+            },
+            b,
+        ];
+        assert!(!reaim_changes(&cur, &same));
+        // An end moved, an opacity or dim changed, one left, one joined.
+        let moved = [
+            MotionItem {
+                to: rc(200, 0, 210, 10),
+                ..a
+            },
+            b,
+        ];
+        assert!(reaim_changes(&cur, &moved));
+        assert!(reaim_changes(&cur, &[MotionItem { a1: 0, ..a }, b]));
+        assert!(reaim_changes(&cur, &[MotionItem { d1: 204, ..a }, b]));
+        assert!(reaim_changes(&cur, &[a]));
+        let c = MotionItem { hwnd: 0xC, ..a };
+        assert!(reaim_changes(&cur, &[a, b, c]));
+    }
+
+    #[test]
+    fn a_reaim_keeps_the_end_of_a_tile_whose_slot_did_not_change() {
+        // B grows from a quarter to the right half. Focus moves a few ms
+        // later (no retile); the re-aim reads B before its posted move
+        // lands: its slot is the same, its frame still the quarter.
+        let (quarter, half) = (rc(964, 8, 1912, 516), rc(964, 8, 1912, 1032));
+        let cur = [MotionItem {
+            d1: 204,
+            ..item(quarter, half, MotionKind::Move)
         }];
-        assert_eq!(glide_damage(&off, 32, 1000, 1000), None);
+        let stale = MotionItem {
+            to: quarter,
+            kind: MotionKind::Static,
+            d1: 255,
+            slot_same: true,
+            ..item(quarter, quarter, MotionKind::Static)
+        };
+        let n = reaim_keep(&cur, &stale);
+        assert_eq!((n.to, n.kind, n.d1), (half, MotionKind::Move, 255));
+        // Only the dim changed: the segment restarts, still morphing to half.
+        assert!(reaim_changes(&cur, &[n]));
+        let seg = retarget_item(quarter, 255, 204, &n);
+        assert_eq!((seg.kind, motion_rect(&seg, 1.0)), (MotionKind::Move, half));
+        // A changed slot, a standing item or a newcomer takes the re-read.
+        let moved = MotionItem {
+            slot_same: false,
+            ..stale
+        };
+        assert_eq!(reaim_keep(&cur, &moved), moved);
+        let standing = [item(quarter, quarter, MotionKind::Static)];
+        assert_eq!(reaim_keep(&standing, &stale), stale);
+        assert_eq!(reaim_keep(&[], &stale), stale);
+    }
+
+    #[test]
+    fn dim_ends_where_style_window_leaves_the_window() {
+        // style_window's alpha, bit for bit: 0.8 -> 204, focused 255, off None.
+        assert_eq!(styled_alpha(false, 0.8), Some(204));
+        assert_eq!(styled_alpha(true, 0.8), Some(255));
+        assert_eq!(styled_alpha(false, 0.1), Some(25));
+        assert_eq!(styled_alpha(false, 1.0), None);
+        assert_eq!(styled_alpha(true, 0.999), None);
+        // Drawn opacity = visibility x dim: exact at both ends of a motion.
+        for d in [255u8, 204, 102, 25] {
+            assert_eq!(drawn_alpha(255, d), d);
+            assert_eq!(drawn_alpha(0, d), 0);
+            assert_eq!(drawn_alpha(d, 255), d);
+        }
+        assert_eq!(drawn_alpha(128, 204), 102);
+        // A window losing focus mid-motion: 255 at frame 0 (the screen), the
+        // styled alpha on the last frame (what the reveal uncovers).
+        let end = styled_alpha(false, 0.8).unwrap();
+        assert_eq!(drawn_alpha(255, motion_alpha(255, end, 0.0)), 255);
+        assert_eq!(drawn_alpha(255, motion_alpha(255, end, 1.0)), end);
+    }
+
+    #[test]
+    fn motion_alphas_fade_only_ends_hidden_inside_the_work_area() {
+        let wa = rc(0, 0, 1920, 1040);
+        let on = rc(100, 0, 900, 1040);
+        let off = rc(2000, 0, 2800, 1040);
+        let bleed = rc(1500, 0, 2300, 1040);
+        // Plain move on screen.
+        assert_eq!(
+            motion_alphas(false, on, false, false, on, wa),
+            Some((255, 255))
+        );
+        // Scrolling off or in from a park spot: opaque, clipped by the edge.
+        assert_eq!(
+            motion_alphas(false, on, true, false, off, wa),
+            Some((255, 255))
+        );
+        assert_eq!(
+            motion_alphas(true, off, false, false, on, wa),
+            Some((255, 255))
+        );
+        // Parked for bleeding onto another monitor: fades out, or in.
+        assert_eq!(
+            motion_alphas(false, on, true, false, bleed, wa),
+            Some((255, 0))
+        );
+        assert_eq!(
+            motion_alphas(true, bleed, false, false, on, wa),
+            Some((0, 255))
+        );
+        // A tab switch: the old shown tab fades out in place, the new one in.
+        assert_eq!(motion_alphas(false, on, true, true, on, wa), Some((255, 0)));
+        assert_eq!(
+            motion_alphas(true, on, false, false, on, wa),
+            Some((0, 255))
+        );
+        // An inactive tab before and after is never drawn, even crossing.
+        assert_eq!(motion_alphas(true, off, true, true, on, wa), None);
+    }
+
+    #[test]
+    fn shadow_nine_slice_fades_out_and_frames_the_item() {
+        let r = 4;
+        assert_eq!(shadow_alpha(0.0, r), SHADOW_ALPHA as u8);
+        assert_eq!(shadow_alpha(4.0, r), 0);
+        assert_eq!(shadow_alpha(9.0, r), 0);
+        assert_eq!(shadow_alpha(1.0, 0), 0);
+        assert!(shadow_alpha(1.0, r) > shadow_alpha(2.0, r));
+        let px = shadow_pixels(r);
+        let n = (2 * r + 1) as usize;
+        assert_eq!(px.len(), n * n);
+        // Premultiplied black: only alpha. Peak at the centre, none in the
+        // far corners (distance r*sqrt(2) > r).
+        assert!(px.iter().all(|p| p & 0x00FF_FFFF == 0));
+        assert_eq!(px[n * (r as usize) + r as usize] >> 24, SHADOW_ALPHA as u32);
+        assert_eq!(px[0], 0);
+        assert_eq!(px[n * n - 1], 0);
+        // The pieces hug the item: corners outside its corners, edges along
+        // its sides; every source inside the (2r+1)-square bitmap.
+        let item_rc = rc(10, 20, 110, 70);
+        let s = shadow_slices(item_rc, r);
+        assert_eq!(s[0].0, rc(6, 16, 10, 20));
+        assert_eq!(s[3].0, rc(110, 70, 114, 74));
+        assert_eq!(s[4].0, rc(10, 16, 110, 20));
+        assert_eq!(s[7].0, rc(110, 20, 114, 70));
+        let side = 2 * r + 1;
+        for (_, src) in s {
+            assert!(src.left >= 0 && src.top >= 0 && src.right <= side && src.bottom <= side);
+            assert!(src.right > src.left && src.bottom > src.top);
+        }
+    }
+
+    /// A 10 x 10 cold snapshot owning test handle `raw`.
+    fn cold_bmp(raw: isize) -> ColdBmp {
+        ColdBmp {
+            bmp: Bmp::new(raw).unwrap(),
+            w: 10,
+            h: 10,
+        }
+    }
+
+    fn raws(v: &[ColdBmp]) -> Vec<isize> {
+        v.iter().map(|c| c.bmp.raw()).collect()
+    }
+
+    #[test]
+    fn cold_cache_queues_once_hands_over_once_and_frees_what_leaves() {
+        // A local cache, never the COLD static: snapshots freed on another
+        // test's thread would land in that thread's BMP_FREED.
+        let _ = freed();
+        let mut c = ColdCache::default();
+        assert!(c.request(0xA));
+        assert!(!c.request(0xA), "queued once");
+        assert!(c.request(0xB));
+        assert!(c.store(0xA, Some(cold_bmp(0x1A))).is_empty());
+        assert!(!c.request(0xA), "stored: not asked again");
+        assert_eq!(c.want, vec![0xB]);
+        // Handed over whole, once; then a re-ask queues it again.
+        let got = c.take(0xA).expect("stored");
+        assert_eq!((got.bmp.raw(), got.w, got.h), (0x1A, 10, 10));
+        assert!(c.take(0xA).is_none());
+        assert!(freed().is_empty(), "the taker owns it now");
+        drop(got);
+        assert_eq!(freed(), vec![0x1A]);
+        assert!(c.request(0xA));
+        // A failed shot stays (no retry), and is never handed over.
+        assert!(c.store(0xB, None).is_empty());
+        assert!(c.take(0xB).is_none());
+        assert!(!c.request(0xB));
+        // An eviction cancels a request: the shot coming back is not stored
+        // but handed back to be freed.
+        assert!(c.request(0xC));
+        assert!(c.forget(0xC).is_empty());
+        let back = c.store(0xC, Some(cold_bmp(0x1C)));
+        assert_eq!(raws(&back), vec![0x1C]);
+        assert!(c.snaps.iter().all(|s| s.0 != 0xC));
+        drop(back);
+        assert_eq!(freed(), vec![0x1C]);
+        // Untracked windows leave with their snapshot and their request.
+        assert!(c.request(0xD));
+        assert!(c.store(0xD, Some(cold_bmp(0x1D))).is_empty());
+        let gone = c.retain(|h| h != 0xD && h != 0xA);
+        assert_eq!(raws(&gone), vec![0x1D]);
+        assert!(!c.want.contains(&0xA));
+        drop(gone);
+        assert_eq!(freed(), vec![0x1D]);
+        // Bounded: the oldest snapshots go first.
+        let mut c = ColdCache::default();
+        for i in 0..COLD_MAX as isize + 2 {
+            assert!(c.request(0x100 + i));
+            drop(c.store(0x100 + i, Some(cold_bmp(0x200 + i))));
+        }
+        assert_eq!(c.snaps.len(), COLD_MAX);
+        assert_eq!(freed(), vec![0x200, 0x201]);
+        drop(c);
+        assert_eq!(freed().len(), COLD_MAX);
+    }
+
+    #[test]
+    fn cold_cache_wants_only_the_nearest_candidates_and_never_churns() {
+        let _ = freed();
+        let mut c = ColdCache::default();
+        // More candidates than fit: only the first (nearest) COLD_MAX queue.
+        let cands: Vec<isize> = (0..COLD_MAX as isize + 4).map(|i| 0x100 + i).collect();
+        let (queued, dead) = c.want_only(&cands);
+        assert!(queued && dead.is_empty());
+        assert_eq!(c.want.as_slice(), &cands[..COLD_MAX]);
+        for &h in &cands[..COLD_MAX] {
+            assert!(
+                c.store(h, Some(cold_bmp(h + 0x100))).is_empty(),
+                "never overflows"
+            );
+        }
+        // The next command asks again: nothing re-queued, nothing shot twice.
+        let (queued, dead) = c.want_only(&cands);
+        assert!(!queued && dead.is_empty());
+        assert!(freed().is_empty());
+        // A tile no longer a candidate (scrolled away, out of range) leaves.
+        let (_, dead) = c.want_only(&cands[1..]);
+        assert_eq!(raws(&dead), vec![0x200]);
+        drop(dead);
+        assert_eq!(freed(), vec![0x200]);
+        drop(c);
+    }
+
+    #[test]
+    fn cold_snapshots_are_wanted_only_for_parked_tiles_near_the_view() {
+        let wa = rc(0, 0, 1920, 1040);
+        let fulls = [rc(0, 0, 1920, 1080), rc(1920, 0, 3840, 1080)];
+        let parked = rc(-5000, 3000, -4000, 4040); // on no monitor
+                                                   // The next column right of the view, and an inactive tab in view.
+        assert!(cold_wanted(parked, rc(1930, 0, 2890, 1040), wa, &fulls));
+        assert!(cold_wanted(parked, rc(100, 0, 900, 1040), wa, &fulls));
+        // More than a view width off either side: not worth a print.
+        assert!(!cold_wanted(parked, rc(3900, 0, 4800, 1040), wa, &fulls));
+        assert!(!cold_wanted(parked, rc(-2900, 0, -1930, 1040), wa, &fulls));
+        // Last sent on a monitor (either one): it paints there, no snapshot.
+        let on = rc(100, 0, 900, 1040);
+        assert!(!cold_wanted(on, on, wa, &fulls));
+        let next_door = rc(2000, 0, 2900, 1040);
+        assert!(!cold_wanted(next_door, rc(1930, 0, 2890, 1040), wa, &fulls));
+    }
+
+    #[test]
+    fn a_replaced_reaim_hands_its_snapshots_to_the_next() {
+        let _ = freed();
+        let old = vec![
+            (0xA, Some(cold_bmp(0x4A))), // fills the next one's empty slot
+            (0xB, Some(cold_bmp(0x4B))), // the next one has its own: spare
+            (0xC, Some(cold_bmp(0x4C))), // not listed any more: joins anyway
+            (0xD, None),
+        ];
+        let mut into = vec![(0xA, None), (0xB, Some(cold_bmp(0x5B))), (0xE, None)];
+        let spare = carry_cold(old, &mut into);
+        assert_eq!(raws(&spare), vec![0x4B]);
+        let got: Vec<(isize, Option<isize>)> = into
+            .iter()
+            .map(|(h, s)| (*h, s.as_ref().map(|c| c.bmp.raw())))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0xA, Some(0x4A)),
+                (0xB, Some(0x5B)),
+                (0xE, None),
+                (0xC, Some(0x4C))
+            ]
+        );
+        assert!(freed().is_empty(), "nothing freed while handed on");
+        drop(spare);
+        drop(into);
+        let mut f = freed();
+        f.sort_unstable();
+        assert_eq!(f, vec![0x4A, 0x4B, 0x4C, 0x5B]);
+    }
+
+    #[test]
+    fn a_reaim_admits_a_cold_newcomer_only_with_its_snapshot() {
+        let area = rc(0, 0, 1920, 1040);
+        let entering = item(
+            rc(2000, 0, 2800, 1040),
+            rc(1000, 0, 1800, 1040),
+            MotionKind::Move,
+        );
+        let far = item(
+            rc(4000, 0, 4800, 1040),
+            rc(3000, 0, 3800, 1040),
+            MotionKind::Move,
+        );
+        let none: &[(isize, Option<ColdBmp>)] = &[];
+        // Warm: joins when its path enters the overlay.
+        assert!(reaim_admits(&entering, false, area, none));
+        assert!(!reaim_admits(&far, false, area, none));
+        // Cold (blank surface): only with a snapshot to draw.
+        let _ = freed();
+        let blank = [(entering.hwnd, None)];
+        assert!(!reaim_admits(&entering, false, area, &blank));
+        let shot = [(entering.hwnd, Some(cold_bmp(0x3A)))];
+        assert!(reaim_admits(&entering, false, area, &shot));
+        // One the motion already draws keeps going whatever it is now.
+        assert!(reaim_admits(&entering, true, area, &blank));
+        assert!(reaim_admits(&far, true, area, none));
+        drop(shot);
+        assert_eq!(freed(), vec![0x3A]);
+    }
+
+    #[test]
+    fn rect_helpers_union_contain_and_offset() {
+        let a = rc(0, 0, 10, 10);
+        let b = rc(5, -5, 20, 8);
+        assert_eq!(rect_union(a, b), rc(0, -5, 20, 10));
+        assert!(rect_contains(&rect_union(a, b), &a));
+        assert!(!rect_contains(&a, &b));
+        assert!(rect_contains(&a, &a));
+        assert_eq!(rect_offset(a, -3, 4), rc(-3, 4, 7, 14));
+        let it = item(a, rc(100, 0, 110, 10), MotionKind::Move);
+        assert_eq!(motion_swept(&it), rc(0, 0, 110, 10));
     }
 
     #[test]
@@ -17854,7 +22957,7 @@ mod tests {
         add(&mut mgr, 1, 0, 0xB, false);
         add(&mut mgr, 1, 0, 0xC, false);
         add(&mut mgr, 0, 0, 0xA, false);
-        assert!(mgr.move_window(0xA, 1, 0, Some(1)));
+        assert!(mgr.move_window(0xA, 1, 0, Some(DropAt::Index(1))));
         assert_eq!(mgr.monitors[1].workspaces[0].windows, vec![0xB, 0xA, 0xC]);
         assert_model_sound(&mgr, &[0xA, 0xB, 0xC]);
     }
@@ -18371,11 +23474,919 @@ mod tests {
                 config::BAR_LIGHT[3]
             )
         );
-        assert_eq!(seed.layout, cfg.layout);
         assert!(seed.left == zone_widgets(&cfg.bar_left, &cfg));
         // An explicit colour still wins over the theme preset.
         cfg.bar_bg = Some(0x0012_3456);
         assert_eq!(bar_data_from(&cfg, true, true, Vec::new()).bg, 0x0012_3456);
+    }
+
+    // ---- per-monitor layout + skip-unchanged placement (scrolling slice 3) ----
+
+    #[test]
+    fn layouts_resolve_per_monitor_and_survive_a_display_change() {
+        let mut cfg = Config::defaults();
+        cfg.layout = "master".into();
+        cfg.monitor_layouts = vec!["scrolling".into(), String::new()];
+        let layouts = |m: &[Monitor]| m.iter().map(|m| m.layout.clone()).collect::<Vec<_>>();
+        let mut mgr = test_manager(3, 1);
+        assert!(resolve_layouts(&mut mgr.monitors, &cfg, &[]));
+        assert_eq!(layouts(&mgr.monitors), ["scrolling", "master", "master"]);
+        assert!(!resolve_layouts(&mut mgr.monitors, &cfg, &[]), "no change");
+        // A runtime switch on monitor 2; a reload (no keep) resets it.
+        mgr.monitors[1].layout = "grid".into();
+        assert!(resolve_layouts(&mut mgr.monitors, &cfg, &[]));
+        assert_eq!(mgr.monitors[1].layout, "master");
+        // A display change: a new monitor appears leftmost. Survivors keep
+        // their current layout (runtime switch included) by HMONITOR; the new
+        // one resolves from config by its position.
+        mgr.monitors[1].layout = "grid".into();
+        let mut fresh = vec![
+            Monitor::new(0x9000, RECT::default(), 1),
+            Monitor::new(0x1000, RECT::default(), 1),
+            Monitor::new(0x1001, RECT::default(), 1),
+            Monitor::new(0x1002, RECT::default(), 1),
+        ];
+        resolve_layouts(&mut fresh, &cfg, &mgr.monitors);
+        assert_eq!(
+            layouts(&fresh),
+            ["scrolling", "scrolling", "grid", "master"]
+        );
+    }
+
+    #[test]
+    fn placement_skips_only_when_live_and_last_sent_both_match() {
+        let t = RECT {
+            left: 10,
+            top: 20,
+            right: 810,
+            bottom: 620,
+        };
+        let other = RECT { left: 0, ..t };
+        assert!(placement_unchanged(Some(t), Some(t), t));
+        // Live matches, but Astur's last request differs: it may still be in
+        // flight (posted placement), so the skip would strand it.
+        assert!(!placement_unchanged(Some(t), Some(other), t));
+        assert!(!placement_unchanged(Some(t), None, t));
+        // Astur sent it there, but the app or the user moved it since.
+        assert!(!placement_unchanged(Some(other), Some(t), t));
+        // Unreadable window: always send.
+        assert!(!placement_unchanged(None, Some(t), t));
+    }
+
+    // ---- scrolling strip model + placement + safety (scrolling slice 4) ----
+
+    const A: isize = 0xA;
+    const B: isize = 0xB;
+    const C: isize = 0xC;
+    const D: isize = 0xD;
+    const F: isize = 0xF;
+
+    fn meta(width: f32) -> ColMeta {
+        ColMeta {
+            width,
+            tabbed: false,
+            active: 0,
+            restore_width: None,
+        }
+    }
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> RECT {
+        RECT {
+            left,
+            top,
+            right,
+            bottom,
+        }
+    }
+
+    /// A workspace over `windows` (all tiled) with `ids` as column ids.
+    fn strip_ws(windows: &[isize], ids: &[(isize, u32)]) -> Workspace {
+        let mut ws = Workspace::new();
+        ws.windows = windows.to_vec();
+        ws.strip.col_of.extend(ids.iter().copied());
+        ws.strip.next_id = 100;
+        ws
+    }
+
+    fn cols_of(ws: &Workspace) -> Vec<Vec<isize>> {
+        let tiled: Vec<isize> = ws
+            .windows
+            .iter()
+            .copied()
+            .filter(|w| !ws.floating.contains(w))
+            .collect();
+        ws.strip.columns(&tiled)
+    }
+
+    #[test]
+    fn strip_columns_are_runs_of_a_shared_id() {
+        let s = strip_ws(&[], &[(B, 1), (C, 1), (0xE, 2), (F, 1)]).strip;
+        // No id = a column of its own; F shares B's id but is not next to it.
+        assert_eq!(
+            s.columns(&[A, B, C, D, 0xE, F]),
+            vec![vec![A], vec![B, C], vec![D], vec![0xE], vec![F]]
+        );
+        assert!(s.columns(&[]).is_empty());
+    }
+
+    #[test]
+    fn strip_tidy_prunes_and_splits_a_column_a_reorder_broke() {
+        let mut ws = strip_ws(&[A, B, C, D], &[(A, 1), (B, 1), (D, 1), (0x99, 7)]);
+        ws.strip.cols.insert(1, meta(0.7));
+        ws.strip.cols.insert(7, meta(0.3));
+        ws.strip.weights.insert(0x99, 0.5);
+        let tiled = ws.windows.clone();
+        let cols = ws.tidy_columns(&tiled);
+        assert_eq!(cols, vec![vec![A, B], vec![C], vec![D]]);
+        // 0x99 left the workspace: its id, height and column are gone.
+        assert!(!ws.strip.col_of.contains_key(&0x99));
+        assert!(ws.strip.weights.is_empty());
+        assert!(!ws.strip.cols.contains_key(&7));
+        // D's run shared id 1 with A..B: it keeps the look under a fresh id.
+        let d = ws.strip.col_of[&D];
+        assert_ne!(d, 1);
+        assert_eq!(ws.strip.cols[&d].width, 0.7);
+        assert_eq!(ws.strip.cols[&1].width, 0.7);
+    }
+
+    #[test]
+    fn a_new_column_lands_right_of_the_focused_column() {
+        let mut ws = strip_ws(&[A, F, B, C, D], &[(B, 1), (C, 1)]);
+        ws.floating = vec![F];
+        // After the focused column's LAST tile, so [B, C] stays one column.
+        ws.insert_column(&[A, B, C, D], B, 0xE);
+        assert_eq!(ws.windows, vec![A, F, B, C, 0xE, D]);
+        assert!(!ws.strip.col_of.contains_key(&0xE));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B, C], vec![0xE], vec![D]]);
+        // Focus outside the strip (floating, none): the end.
+        ws.insert_column(&[A, B, C, 0xE, D], F, 0x10);
+        assert_eq!(ws.windows.last(), Some(&0x10));
+        // A stale id from an earlier stay does not glue it to a neighbour.
+        let mut ws = strip_ws(&[A, B], &[(A, 1), (B, 1)]);
+        ws.insert_column(&[A], A, B);
+        assert_eq!(ws.windows, vec![A, B]);
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B]]);
+    }
+
+    #[test]
+    fn consume_joins_the_near_edge_and_expel_leaves_on_that_side() {
+        let mut ws = strip_ws(&[A, B, C], &[]);
+        let t = [A, B, C];
+        ws.strip.weights.insert(A, 0.3);
+        // B alone, Alt+[: bottom of A's column, no reorder; heights equal.
+        assert!(ws.consume_or_expel(&t, B, -1));
+        assert_eq!(ws.windows, vec![A, B, C]);
+        assert_eq!(cols_of(&ws), vec![vec![A, B], vec![C]]);
+        assert!(ws.strip.weights.is_empty());
+        // Nothing to the right of C; a zero direction does nothing.
+        assert!(!ws.consume_or_expel(&t, C, 1));
+        assert!(!ws.consume_or_expel(&t, C, 0));
+        // B shares a column, Alt+]: out into its own column right of it.
+        assert!(ws.consume_or_expel(&t, B, 1));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B], vec![C]]);
+        // A alone, Alt+]: top of B's column.
+        assert!(ws.consume_or_expel(&t, A, 1));
+        assert_eq!(ws.windows, vec![A, B, C]);
+        assert_eq!(cols_of(&ws), vec![vec![A, B], vec![C]]);
+        // B shares, Alt+[: out to the LEFT of its column.
+        assert!(ws.consume_or_expel(&t, B, -1));
+        assert_eq!(ws.windows, vec![B, A, C]);
+        assert_eq!(cols_of(&ws), vec![vec![B], vec![A], vec![C]]);
+        // Not in the strip.
+        assert!(!ws.consume_or_expel(&t, 0x99, 1));
+    }
+
+    #[test]
+    fn column_and_tile_moves_leave_untiled_windows_in_place() {
+        let mut ws = strip_ws(&[A, F, B, C, D], &[(B, 1), (C, 1)]);
+        ws.floating = vec![F];
+        let t = |ws: &Workspace| -> Vec<isize> {
+            ws.windows.iter().copied().filter(|&w| w != F).collect()
+        };
+        // [A] [B C] [D]: move [B C] left.
+        assert!(ws.move_column(&t(&ws), C, -1));
+        assert_eq!(ws.windows, vec![B, F, C, A, D]);
+        assert_eq!(cols_of(&ws), vec![vec![B, C], vec![A], vec![D]]);
+        assert!(!ws.move_column(&t(&ws), B, -1), "already first");
+        assert!(!ws.move_column(&t(&ws), A, 0));
+        assert!(ws.move_column_to_edge(&t(&ws), B, true));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![D], vec![B, C]]);
+        assert!(!ws.move_column_to_edge(&t(&ws), C, true), "already last");
+        assert!(ws.move_column_to_edge(&t(&ws), D, false));
+        assert_eq!(cols_of(&ws), vec![vec![D], vec![A], vec![B, C]]);
+        assert!(ws.move_tile(&t(&ws), B, 1));
+        assert_eq!(cols_of(&ws), vec![vec![D], vec![A], vec![C, B]]);
+        assert!(!ws.move_tile(&t(&ws), B, 1), "already the bottom tile");
+        assert!(!ws.move_tile(&t(&ws), A, 1), "alone in its column");
+        // F never moved.
+        assert_eq!(ws.windows[1], F);
+    }
+
+    #[test]
+    fn column_widths_clamp_cycle_and_toggle_full_width() {
+        let mut s = Strip::default();
+        let w = |s: &Strip| s.col_meta(&[A]).unwrap().width;
+        s.adjust_width(A, 0.1, 0.5);
+        assert!((w(&s) - 0.6).abs() < 1e-6);
+        s.set_width(A, 3.0, 0.5);
+        assert_eq!(w(&s), 1.0);
+        s.set_width(A, -1.0, 0.5);
+        assert_eq!(w(&s), 0.1);
+        // Unsorted presets still cycle low to high.
+        let presets = [1.0, 0.333, 0.5, 0.667];
+        s.set_width(A, 0.5, 0.5);
+        s.cycle_width(A, &presets, 0.5);
+        assert_eq!(w(&s), 0.667);
+        s.cycle_width(A, &presets, 0.5);
+        assert_eq!(w(&s), 1.0);
+        s.cycle_width(A, &presets, 0.5);
+        assert_eq!(w(&s), 0.333);
+        s.toggle_maximize(A, 0.5);
+        assert_eq!(w(&s), 1.0);
+        s.toggle_maximize(A, 0.5);
+        assert_eq!(w(&s), 0.333);
+        // An explicit width ends the toggle: Alt+M then restores nothing old.
+        s.toggle_maximize(A, 0.5);
+        s.adjust_width(A, -0.1, 0.5);
+        s.toggle_maximize(A, 0.5);
+        assert_eq!(w(&s), 1.0);
+        s.toggle_maximize(A, 0.5);
+        assert!((w(&s) - 0.9).abs() < 1e-6);
+        // A new column is created at the default width.
+        s.toggle_tabbed(B, 0.4);
+        assert_eq!(s.col_meta(&[B]).unwrap().width, 0.4);
+    }
+
+    #[test]
+    fn tile_heights_share_the_column() {
+        let mut s = Strip::default();
+        s.col_of.extend([(A, 1), (B, 1), (C, 1)]);
+        let t = [A, B, C, D];
+        let share = |s: &Strip, h| s.tile_share(&t, h).unwrap().1;
+        assert!(s.set_tile_height(&t, A, 0.5));
+        assert!((share(&s, A) - 0.5).abs() < 1e-6);
+        assert!((share(&s, B) - 0.25).abs() < 1e-6);
+        // +0.1: the others keep their proportions among themselves.
+        assert!(s.adjust_tile_height(&t, A, 0.1));
+        assert!((share(&s, A) - 0.6).abs() < 1e-5);
+        assert!((share(&s, B) - 0.2).abs() < 1e-5);
+        assert!((share(&s, C) - 0.2).abs() < 1e-5);
+        assert!(s.cycle_tile_height(&t, A, &[0.333, 0.5, 0.667]));
+        assert!((share(&s, A) - 0.667).abs() < 1e-5);
+        assert!(s.adjust_tile_height(&t, A, 0.5));
+        assert!((share(&s, A) - 0.9).abs() < 1e-5, "clamped");
+        // Alone in its column, or not in the strip: nothing to share.
+        assert!(!s.set_tile_height(&t, D, 0.5));
+        assert!(!s.adjust_tile_height(&t, 0x99, 0.1));
+    }
+
+    #[test]
+    fn a_tabbed_column_shows_the_focused_or_last_focused_tab() {
+        let mut s = Strip::default();
+        s.col_of.extend([(A, 1), (B, 1), (C, 1)]);
+        let t = [A, B, C, D];
+        s.toggle_tabbed(B, 0.5);
+        // Focus elsewhere: the tab it was toggled on shows.
+        assert_eq!(s.hidden_tabs(&t, D), vec![A, C]);
+        // A focused tab always shows (it is never parked).
+        assert_eq!(s.hidden_tabs(&t, C), vec![A, B]);
+        s.note_focus(A);
+        assert_eq!(s.hidden_tabs(&t, D), vec![B, C]);
+        assert_eq!(s.strip_cols(&s.columns(&t), D, 0.5)[0].active, 0);
+        s.toggle_tabbed(A, 0.5);
+        assert!(s.hidden_tabs(&t, D).is_empty(), "stacked again");
+    }
+
+    #[test]
+    fn focus_after_a_removal_follows_the_spec_order() {
+        let mut ws = strip_ws(&[A, B, C, D], &[(B, 1), (C, 1)]);
+        let t = [A, B, C, D];
+        // Same column: the next tile, or the previous one from the bottom.
+        assert_eq!(ws.focus_after_removal(&t, B), Some(C));
+        assert_eq!(ws.focus_after_removal(&t, C), Some(B));
+        // Else the column to the left, at its last-focused tile.
+        assert_eq!(ws.focus_after_removal(&t, D), Some(B));
+        ws.strip.cols.insert(
+            1,
+            ColMeta {
+                active: C,
+                ..meta(0.5)
+            },
+        );
+        assert_eq!(ws.focus_after_removal(&t, D), Some(C));
+        // Else the one to the right.
+        assert_eq!(ws.focus_after_removal(&t, A), Some(C));
+        assert_eq!(ws.focus_after_removal(&[A], A), None);
+        assert_eq!(ws.focus_after_removal(&t, 0x99), None);
+    }
+
+    #[test]
+    fn writing_a_tiled_order_keeps_every_other_window_at_its_index() {
+        let mut w = vec![A, F, B, 0xE, C];
+        write_tiled_order(&mut w, &[C, A, B]);
+        assert_eq!(w, vec![C, F, A, 0xE, B]);
+    }
+
+    #[test]
+    fn strip_rects_follow_tiled_order_at_a_clamped_offset() {
+        let mut cfg = Config::defaults();
+        cfg.outer_gap = 8;
+        cfg.inner_gap = 8;
+        cfg.scroll_default_width = 0.5;
+        let area = rect(0, 0, 1920, 1080);
+        let mut s = strip_ws(&[], &[(B, 1), (C, 1)]).strip;
+        let t = [A, B, C, D];
+        // col_px(1920, 0.5, 8, 8) = 948: spans 8..956, 964..1912, 1920..2868.
+        let r = strip_rects(&s, &t, A, area, &cfg, 26);
+        assert_eq!(r.len(), 4);
+        assert_eq!((r[0].left, r[0].right), (8, 956));
+        assert_eq!((r[1].left, r[1].right), (r[2].left, r[2].right));
+        assert!(r[1].bottom <= r[2].top, "B above C");
+        assert_eq!(r[3].left, 1920, "D starts off-screen right");
+        // Past the end clamps to the last full view; before 0 clamps to 0.
+        s.offset = 100_000;
+        let r = strip_rects(&s, &t, A, area, &cfg, 26);
+        assert_eq!((r[3].left, r[3].right), (964, 1912));
+        assert_eq!(r[0].right, 956 - 956);
+        s.offset = -50;
+        assert_eq!(strip_rects(&s, &t, A, area, &cfg, 26)[0].left, 8);
+        // Tabbed: every tab on one rect, below the tab bar.
+        s.cols.insert(
+            1,
+            ColMeta {
+                tabbed: true,
+                ..meta(0.5)
+            },
+        );
+        let r = strip_rects(&s, &t, A, area, &cfg, 26);
+        assert_eq!(r[1], r[2]);
+        assert_eq!(r[1].top, 8 + 26);
+        // Degenerate area: no rects, windows stay where they are.
+        assert!(strip_rects(&s, &t, A, rect(0, 0, 10, 10), &cfg, 26).is_empty());
+    }
+
+    // ---- tab bars (scrolling slice 6) ----
+
+    #[test]
+    fn tab_bars_show_only_for_on_screen_tabbed_columns() {
+        let mut cfg = Config::defaults();
+        cfg.outer_gap = 8;
+        cfg.inner_gap = 8;
+        let area = rect(0, 0, 1920, 1080);
+        let right = rect(1920, 0, 3840, 1080);
+        // A at 0.75 (8..1434), then B+C tabbed at 0.5 (1442..2390): peeking
+        // past the right edge at offset 0.
+        let mut s = strip_ws(&[], &[(A, 2), (B, 1), (C, 1)]).strip;
+        s.cols.insert(2, meta(0.75));
+        s.cols.insert(
+            1,
+            ColMeta {
+                tabbed: true,
+                active: B,
+                ..meta(0.5)
+            },
+        );
+        let t = [A, B, C];
+        let cols = s.columns(&t);
+        let map_for = |s: &Strip, others: Vec<RECT>, focused| PlaceMap {
+            own: Some(area),
+            all: [vec![area], others.clone()].concat(),
+            others,
+            hidden: s.hidden_tabs(&t, focused),
+        };
+        let slots = |s: &Strip, focused, others: Vec<RECT>, tab_h| {
+            let out = strip_out(s, &t, focused, area, &cfg, tab_h);
+            tab_bar_slots(s, &cols, focused, &out, &map_for(s, others, focused))
+        };
+        let bar = rect(1442, 8, 2390, 34);
+        // One monitor: the column peeks, so its bar shows, at the rect the
+        // layout left above the tile, on the last-focused tab.
+        assert_eq!(slots(&s, A, vec![], 26), vec![(1, bar, 0)]);
+        // The focused tab is the shown one.
+        assert_eq!(slots(&s, C, vec![], 26), vec![(1, bar, 1)]);
+        // A monitor on the right: the column would bleed, so it parks, and
+        // its bar goes with it.
+        assert!(slots(&s, A, vec![right], 26).is_empty());
+        // Scrolled so the column is fully on screen: back, moved with it.
+        s.offset = 100_000;
+        let shown = slots(&s, A, vec![right], 26);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(shown[0].1.right, 1912, "clamped to the last full view");
+        // No area, no bar; nor off scrolling; nor on a degenerate view.
+        assert!(slots(&s, A, vec![], 0).is_empty());
+        let out = strip_out(&s, &t, A, area, &cfg, 26);
+        assert!(tab_bar_slots(&s, &cols, A, &out, &PlaceMap::default()).is_empty());
+        let out = strip_out(&s, &t, A, rect(0, 0, 10, 10), &cfg, 26);
+        assert!(tab_bar_slots(&s, &cols, A, &out, &map_for(&s, vec![], A)).is_empty());
+        // Untabbed: no bar.
+        s.cols.get_mut(&1).unwrap().tabbed = false;
+        assert!(slots(&s, A, vec![], 26).is_empty());
+    }
+
+    #[test]
+    fn tab_bar_diff_moves_on_scroll_and_repaints_on_content() {
+        let tab = |hwnd, title: &str| TabInfo {
+            hwnd,
+            title: title.to_string(),
+            exe: String::new(),
+            icon: -1,
+        };
+        let bar = TabBarData {
+            rect: rect(0, 0, 300, 26),
+            tabs: vec![tab(A, "a"), tab(B, "b")],
+            active: 0,
+            dpi: 96,
+            tab_h: 26,
+            icon_px: 20,
+            colors: (1, 2, 3, 4),
+        };
+        let with = |f: &dyn Fn(&mut TabBarData)| {
+            let mut b = bar.clone();
+            f(&mut b);
+            b
+        };
+        assert_eq!(tab_bar_diff(None, &bar), (true, true), "fresh window");
+        assert_eq!(tab_bar_diff(Some(&bar), &bar), (false, false));
+        let scrolled = with(&|b| b.rect = rect(-100, 0, 200, 26));
+        assert_eq!(tab_bar_diff(Some(&bar), &scrolled), (true, false));
+        let renamed = with(&|b| b.tabs[1].title = "b2".into());
+        assert_eq!(tab_bar_diff(Some(&bar), &renamed), (false, true));
+        let switched = with(&|b| b.active = 1);
+        assert_eq!(tab_bar_diff(Some(&bar), &switched), (false, true));
+        let icon = with(&|b| b.tabs[0].icon = 0x77);
+        assert_eq!(tab_bar_diff(Some(&bar), &icon), (false, true));
+        let themed = with(&|b| b.colors.2 = 9);
+        assert_eq!(tab_bar_diff(Some(&bar), &themed), (false, true));
+        let resized = with(&|b| b.rect = rect(0, 0, 400, 26));
+        assert_eq!(tab_bar_diff(Some(&bar), &resized), (true, true));
+    }
+
+    #[test]
+    fn tab_bar_pick_keeps_each_window_on_its_column() {
+        let bar = |tabs: &[isize]| TabBarData {
+            rect: rect(0, 0, 300, 26),
+            tabs: tabs
+                .iter()
+                .map(|&hwnd| TabInfo {
+                    hwnd,
+                    title: String::new(),
+                    exe: String::new(),
+                    icon: -1,
+                })
+                .collect(),
+            active: 0,
+            dpi: 96,
+            tab_h: 26,
+            icon_px: 0,
+            colors: (1, 2, 3, 4),
+        };
+        // Windows showing A (column [A, B]) and C (column [C, D]). The first
+        // column goes (untabbed): the second keeps its window, not the first
+        // one's by index; the first's is destroyed (no pick).
+        assert_eq!(tab_bar_pick(&[A, C], &[bar(&[C, D])]), vec![Some(1)]);
+        // A tab switch (the column now shows B) and a new column ahead.
+        assert_eq!(
+            tab_bar_pick(&[A, C], &[bar(&[F]), bar(&[C, D]), bar(&[B, A])]),
+            vec![None, Some(1), Some(0)]
+        );
+        // The shown tab expelled: that window is not repurposed for the rest
+        // of its column; a just-created window (0) matches nothing.
+        assert_eq!(tab_bar_pick(&[A, 0], &[bar(&[B, D])]), vec![None]);
+        // Two windows whose tabs met in one column: one keeps it.
+        assert_eq!(tab_bar_pick(&[A, C], &[bar(&[C, A])]), vec![Some(0)]);
+    }
+
+    #[test]
+    fn a_tab_click_hits_exactly_the_span_painted_for_it() {
+        for (n, w) in [(1, 300), (2, 7), (3, 100), (7, 1000), (4, 3)] {
+            let mut prev = 0;
+            for i in 0..n {
+                let (a, b) = tab_span(i, n, w);
+                assert_eq!(a, prev, "contiguous");
+                assert!(b >= a);
+                for x in a..b {
+                    assert_eq!(tab_at(x, n, w), Some(i), "x {x} of {n} tabs in {w}");
+                }
+                prev = b;
+            }
+            assert_eq!(prev, w, "the last tab ends at the edge");
+            assert_eq!(tab_at(-1, n, w), None);
+            assert_eq!(tab_at(w, n, w), None);
+        }
+        assert_eq!(tab_at(5, 0, 100), None);
+    }
+
+    #[test]
+    fn ensure_visible_scrolls_per_scroll_center() {
+        let mut cfg = Config::defaults();
+        cfg.outer_gap = 8;
+        cfg.inner_gap = 8;
+        cfg.scroll_default_width = 0.5;
+        let mut s = Strip::default();
+        let t = [A, B, C];
+        let show = |s: &Strip, cfg: &Config, h| {
+            strip_show_offset(s, &t, h, 1920, cfg, center_mode(&cfg.scroll_center))
+        };
+        // never: the least scroll that shows the column whole.
+        assert_eq!(show(&s, &cfg, C), Some(2868 + 8 - 1920));
+        assert_eq!(show(&s, &cfg, B), Some(0), "already fits");
+        s.offset = 956;
+        assert_eq!(show(&s, &cfg, A), Some(0));
+        s.offset = 0;
+        cfg.scroll_center = "always".into();
+        assert_eq!(show(&s, &cfg, B), Some((964 + 1912) / 2 - 960));
+        cfg.scroll_center = "on-overflow".into();
+        assert_eq!(show(&s, &cfg, B), Some(0));
+        assert_eq!(show(&s, &cfg, C), Some(956), "centred, then clamped");
+        assert_eq!(show(&s, &cfg, 0x99), None);
+    }
+
+    #[test]
+    fn placement_parks_only_off_monitor_bleeding_or_hidden_tabs() {
+        let left = rect(0, 0, 1920, 1080);
+        let right = rect(1920, 0, 3840, 1080);
+        let map = PlaceMap {
+            own: Some(left),
+            others: vec![right],
+            all: vec![left, right],
+            hidden: vec![B],
+        };
+        let inside = rect(100, 8, 1000, 1072);
+        assert!(!map.parks(A, inside));
+        assert!(
+            !map.parks(A, rect(-500, 8, 400, 1072)),
+            "peek: nothing left of own"
+        );
+        assert!(
+            map.parks(A, rect(1500, 8, 2400, 1072)),
+            "bleeds onto the right monitor"
+        );
+        assert!(map.parks(A, rect(-2000, 8, -1000, 1072)), "fully off");
+        assert!(map.parks(B, inside), "inactive tab");
+        assert!(!PlaceMap::default().parks(B, rect(-2000, 8, -1000, 1072)));
+        // The park spot keeps the size and touches no monitor.
+        let p = park_rect(rect(1500, 8, 2400, 1072), left, &map.all);
+        assert_eq!((p.right - p.left, p.bottom - p.top), (900, 1064));
+        assert!(!map.all.iter().any(|m| rects_overlap(&p, m)));
+    }
+
+    #[test]
+    fn rescue_lines_mark_parked_windows_and_old_lines_read_as_hidden() {
+        assert_eq!(rescue_line(false, 4660, 42, "Notepad"), "4660 42 Notepad\n");
+        let parked = rescue_line(true, 4660, 42, "My Class");
+        assert_eq!(
+            parse_rescue_line(parked.lines().next().unwrap()),
+            Some((true, 4660, 42, "My Class"))
+        );
+        // A list from before parking existed.
+        assert_eq!(
+            parse_rescue_line("4660 42 Chrome_WidgetWin_1"),
+            Some((false, 4660, 42, "Chrome_WidgetWin_1"))
+        );
+        assert_eq!(parse_rescue_line("1 2 "), Some((false, 1, 2, "")));
+        assert_eq!(parse_rescue_line("P x 1 c"), None);
+        assert_eq!(parse_rescue_line("garbage"), None);
+        // A window changing list rewrites the file.
+        assert_ne!(rescue_hash(&[A], &[]), rescue_hash(&[], &[A]));
+        assert_ne!(rescue_hash(&[A], &[B]), rescue_hash(&[A], &[]));
+        assert_eq!(rescue_hash(&[A], &[B]), rescue_hash(&[A], &[B]));
+    }
+
+    #[test]
+    fn an_unparked_window_keeps_its_size_inside_the_work_area() {
+        let work = rect(0, 0, 1920, 1040);
+        // Parked below the screens: up onto the bottom edge, x kept.
+        assert_eq!(
+            clamp_into(rect(500, 1300, 1400, 2000), work),
+            rect(500, 340, 1400, 1040)
+        );
+        // Bigger than the area: shrunk to it.
+        assert_eq!(clamp_into(rect(-5000, 0, 0, 3000), work), work);
+        let second = rect(1920, 0, 3840, 1040);
+        assert_eq!(
+            clamp_into(rect(4100, 10, 4600, 510), second),
+            rect(3340, 10, 3840, 510)
+        );
+    }
+
+    #[test]
+    fn slide_rects_are_clipped_to_the_work_area() {
+        let origin = rect(1920, 40, 3840, 1080);
+        let clip = |r| clip_local(r, origin, 1920, 1040);
+        assert_eq!(
+            clip(rect(2000, 100, 2500, 600)),
+            Some(rect(80, 60, 580, 560))
+        );
+        // Peeking past the right edge: only the part inside the capture.
+        assert_eq!(
+            clip(rect(3500, 100, 4500, 600)),
+            Some(rect(1580, 60, 1920, 560))
+        );
+        // Parked below every monitor: nothing to blit.
+        assert_eq!(clip(rect(2000, 1300, 2500, 1800)), None);
+    }
+
+    #[test]
+    fn leaving_a_scrolling_workspace_takes_the_strip_entries_along() {
+        let mut mgr = test_manager(1, 2);
+        mgr.monitors[0].layout = "scrolling".into();
+        {
+            let ws = &mut mgr.monitors[0].workspaces[0];
+            ws.windows = vec![A, B, C];
+            ws.focused = A;
+            ws.strip.col_of.extend([(A, 1), (B, 1)]);
+            ws.strip.weights.insert(A, 0.3);
+        }
+        assert_eq!(mgr.detach_window(A), Some((0, 0, false)));
+        let ws = &mgr.monitors[0].workspaces[0];
+        assert!(!ws.strip.col_of.contains_key(&A));
+        assert!(!ws.strip.weights.contains_key(&A));
+        assert_ne!(ws.focused, A);
+        // Moved into another scrolling workspace: a column of its own there.
+        assert!(mgr.move_window(B, 0, 1, Some(DropAt::Index(0))));
+        let dst = &mgr.monitors[0].workspaces[1];
+        assert_eq!((dst.windows.clone(), dst.focused), (vec![B], B));
+        assert!(!dst.strip.col_of.contains_key(&B));
+        assert!(!mgr.monitors[0].workspaces[0].strip.col_of.contains_key(&B));
+    }
+
+    // ---- scrolling keys, mouse, focus, drag (scrolling slice 5) ----
+
+    #[test]
+    fn the_new_keys_map_to_strip_commands_and_shift_variants() {
+        // Default binds: R, C, [, ], H/L, T, Home/End.
+        assert!(matches!(map_hotkey(0x52, false), Some(Cmd::CycleWidth)));
+        assert!(matches!(map_hotkey(0x52, true), Some(Cmd::CycleHeight)));
+        assert!(matches!(map_hotkey(0x43, false), Some(Cmd::CenterColumn)));
+        assert!(matches!(
+            map_hotkey(0xDB, false),
+            Some(Cmd::ConsumeOrExpel(-1))
+        ));
+        assert!(matches!(
+            map_hotkey(0xDD, false),
+            Some(Cmd::ConsumeOrExpel(1))
+        ));
+        // Shift+H/L is the tile height; plain H/L unchanged.
+        assert!(matches!(map_hotkey(0x48, true), Some(Cmd::ResizeTile(d)) if d < 0.0));
+        assert!(matches!(map_hotkey(0x4C, true), Some(Cmd::ResizeTile(d)) if d > 0.0));
+        assert!(matches!(map_hotkey(0x48, false), Some(Cmd::ResizeMaster(d)) if d < 0.0));
+        // Alt+Shift+T no longer toggles tiling.
+        assert!(matches!(map_hotkey(0x54, true), Some(Cmd::ToggleTabbed)));
+        assert!(matches!(map_hotkey(0x54, false), Some(Cmd::ToggleTiling)));
+        assert!(matches!(
+            map_hotkey(0x24, false),
+            Some(Cmd::ColumnEdge {
+                last: false,
+                carry: false
+            })
+        ));
+        assert!(matches!(
+            map_hotkey(0x23, true),
+            Some(Cmd::ColumnEdge {
+                last: true,
+                carry: true
+            })
+        ));
+    }
+
+    #[test]
+    fn every_spec_scroll_action_resolves_and_nothing_else_does() {
+        for name in [
+            "focus_column_left",
+            "focus_column_right",
+            "move_column_left",
+            "move_column_right",
+            "cycle_width",
+            "cycle_height",
+            "center_column",
+            "consume_left",
+            "consume_right",
+            "toggle_tabbed",
+            "maximize_column",
+            "first_column",
+            "last_column",
+        ] {
+            assert!(scroll_action(name).is_some(), "{name}");
+        }
+        assert!(matches!(
+            scroll_action("focus_column_left"),
+            Some(Cmd::ScrollFocus(-1))
+        ));
+        assert!(matches!(
+            scroll_action("last_column"),
+            Some(Cmd::ColumnEdge {
+                last: true,
+                carry: false
+            })
+        ));
+        assert!(scroll_action("focus_next").is_none());
+        assert!(scroll_action("").is_none());
+    }
+
+    #[test]
+    fn alt_wheel_steps_per_notch_once_per_swipe_and_forgets_after_a_pause() {
+        let (mut acc, mut latch) = (0, 0);
+        let mut s = |last, now, delta| scroll_wheel_steps(&mut acc, &mut latch, last, now, delta);
+        // A notch is a column, and a fast spin can carry two in one event.
+        assert_eq!(s(0, 10, 120), 1);
+        assert_eq!(s(10, 20, 120), 1);
+        assert_eq!(s(20, 30, -240), -2);
+        // A swipe's small deltas add up to one column, and the rest of the
+        // swipe steps no further, however long it runs...
+        assert_eq!(s(30, 40, 40), 0);
+        assert_eq!(s(40, 50, 40), 0);
+        assert_eq!(s(50, 60, 40), 1);
+        for t in 0..20 {
+            assert_eq!(s(60 + t * 10, 70 + t * 10, 40), 0);
+        }
+        // ...until a pause over 300 ms: the next swipe steps again.
+        assert_eq!(s(260, 600, 130), 1);
+        // A reversal ends a swipe too, and drops its remainder.
+        assert_eq!(s(600, 610, 60), 0);
+        assert_eq!(s(610, 620, -60), 0);
+        assert_eq!(s(620, 630, -60), -1);
+        // A partial delta is dropped after a pause, kept inside one.
+        assert_eq!(s(630, 640, 100), 0);
+        assert_eq!(s(640, 1000, 100), 0);
+        assert_eq!(s(1000, 1010, 20), 1);
+        // The hook clock wraps (GetTickCount-style).
+        assert_eq!(s(u32::MAX - 5, 10, -130), -1);
+    }
+
+    #[test]
+    fn queued_alt_wheel_scrolls_fold_only_with_the_same_kind_direction_and_strip() {
+        let wheel = |steps, carry, x| Cmd::ScrollWheel {
+            steps,
+            carry,
+            x,
+            y: 0,
+        };
+        // Two strips: x < 1000 and x >= 1000.
+        let mon_of = |x: i32, _y: i32| Some((x >= 1000) as usize);
+        let mut q: VecDeque<Cmd> = [
+            wheel(1, false, 10),
+            wheel(2, false, 20),
+            wheel(-1, false, 30), // reversal: stops the fold
+            wheel(1, false, 40),
+        ]
+        .into();
+        let mut c = wheel(1, false, 0);
+        assert_eq!(fold_scrolls(&mut c, &mut q, mon_of), 2);
+        assert!(matches!(c, Cmd::ScrollWheel { steps: 4, .. }));
+        assert_eq!(q.len(), 2);
+        // Another strip, or a move instead of a focus, is not folded either.
+        let mut q: VecDeque<Cmd> = [wheel(1, false, 1500), wheel(1, true, 10)].into();
+        let mut c = wheel(1, false, 0);
+        assert_eq!(fold_scrolls(&mut c, &mut q, mon_of), 0);
+        let mut c = wheel(1, true, 1200);
+        q.pop_front();
+        assert_eq!(fold_scrolls(&mut c, &mut q, mon_of), 0);
+        // Any other command folds nothing.
+        let mut c = Cmd::ScrollFocus(1);
+        assert_eq!(fold_scrolls(&mut c, &mut q, mon_of), 0);
+    }
+
+    #[test]
+    fn scrolling_monitors_publish_for_the_hook_only_on_a_change() {
+        let left = rect(0, 0, 1920, 1080);
+        let right = rect(1920, -200, 4480, 1240);
+        scrollmon_publish(&[right]);
+        assert!(scrollmon_at(POINT { x: 2000, y: -100 }));
+        assert!(!scrollmon_at(POINT { x: 100, y: 100 }), "not scrolling");
+        assert!(
+            !scrollmon_at(POINT { x: 4480, y: 0 }),
+            "right edge is outside"
+        );
+        scrollmon_publish(&[left, right]);
+        assert!(scrollmon_at(POINT { x: 100, y: 100 }));
+        scrollmon_publish(&[]);
+        assert!(!scrollmon_at(POINT { x: 2000, y: 0 }));
+        // More monitors than slots: the extra ones are not routed, no panic.
+        scrollmon_publish(&[left; MAX_SCROLLMONS + 2]);
+        assert_eq!(SCROLLMON_N.load(Ordering::Relaxed) as usize, MAX_SCROLLMONS);
+        scrollmon_publish(&[]);
+    }
+
+    #[test]
+    fn column_steps_clamp_and_start_from_outside_the_strip() {
+        assert_eq!(column_target(Some(1), 1, 3), Some(2));
+        assert_eq!(column_target(Some(1), -5, 3), Some(0), "clamped");
+        assert_eq!(column_target(Some(2), 1, 3), None, "strip end");
+        assert_eq!(column_target(Some(0), -1, 3), None);
+        assert_eq!(column_target(Some(1), 0, 3), None);
+        assert_eq!(column_target(None, 1, 3), Some(0));
+        assert_eq!(column_target(None, -1, 3), Some(2));
+        assert_eq!(column_target(None, 1, 0), None, "empty strip");
+    }
+
+    #[test]
+    fn a_drop_picks_the_window_quarter_its_own_slot_or_a_strip_end() {
+        let view = rect(0, 0, 1920, 1080);
+        let t = Some((A, rect(400, 0, 800, 1080)));
+        let at = |x, y, own| drop_zone(POINT { x, y }, t, own, view);
+        assert_eq!(at(450, 500, None), Some(DropAt::Before(A)));
+        assert_eq!(at(700, 500, None), Some(DropAt::After(A)));
+        assert_eq!(at(799, 500, None), Some(DropAt::After(A)));
+        assert_eq!(at(600, 500, None), Some(DropAt::Below(A)));
+        let none = |x, own| drop_zone(POINT { x, y: 500 }, None, own, view);
+        assert_eq!(none(100, None), Some(DropAt::First));
+        assert_eq!(none(1500, None), Some(DropAt::Last));
+        // Back in its own slot: stay put, never a reorder.
+        assert_eq!(none(1500, Some(rect(1000, 0, 1900, 1080))), None);
+        assert_eq!(
+            none(100, Some(rect(1000, 0, 1900, 1080))),
+            Some(DropAt::First)
+        );
+    }
+
+    #[test]
+    fn a_dropped_window_lands_in_its_zone_without_splitting_a_column() {
+        // [A] [B C] [D], F floating between.
+        let fresh = || {
+            let mut ws = strip_ws(&[A, F, B, C, D], &[(B, 1), (C, 1)]);
+            ws.floating = vec![F];
+            ws.strip.weights.insert(B, 0.3);
+            ws.focused = A;
+            ws
+        };
+        let t = [A, B, C, D];
+        const E: isize = 0xE;
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::Before(C)));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![E], vec![B, C], vec![D]]);
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::After(B)));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B, C], vec![E], vec![D]]);
+        // Below joins the column right under the target, heights equal again.
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::Below(B)));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B, E, C], vec![D]]);
+        assert!(ws.strip.weights.is_empty());
+        // A lone target becomes a column of two.
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::Below(D)));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B, C], vec![D, E]]);
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::First));
+        assert_eq!(cols_of(&ws), vec![vec![E], vec![A], vec![B, C], vec![D]]);
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::Last));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![B, C], vec![D], vec![E]]);
+        // No zone (or an index): right of the focused column, the default.
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::Index(0)));
+        assert_eq!(cols_of(&ws), vec![vec![A], vec![E], vec![B, C], vec![D]]);
+        // Right after the column's last window, so the floating one between
+        // columns keeps its place in the order.
+        assert_eq!(ws.windows, vec![A, E, F, B, C, D]);
+        // A target that left the strip meanwhile: the end, nothing lost.
+        let mut ws = fresh();
+        ws.insert_in_strip(&t, E, Some(DropAt::Below(0x99)));
+        assert_eq!(ws.windows.last(), Some(&E));
+    }
+
+    #[test]
+    fn a_resize_release_reports_only_the_edges_that_moved() {
+        // Window rects carry 7 px invisible borders around the visible slot.
+        let slot = rect(100, 8, 1000, 1072);
+        let placed = rect(93, 8, 1007, 1079);
+        let moved = |l, t, r, b| strip_resize(rect(l, t, r, b), placed, slot);
+        assert_eq!(moved(93, 8, 1207, 1079), (Some(1100), None), "wider");
+        assert_eq!(moved(93, 208, 1007, 1079), (None, Some(864)), "shorter");
+        assert_eq!(moved(93, 8, 1009, 1079), (None, None), "within the slop");
+        assert_eq!(moved(-7, 8, 1007, 879), (Some(1000), Some(864)));
+    }
+
+    #[test]
+    fn the_bar_shows_the_focused_column_of_a_scrolling_strip() {
+        assert_eq!(scroll_label(Some(1), 5), "scrolling 2/5");
+        assert_eq!(scroll_label(None, 3), "scrolling -/3", "focus floating");
+        assert_eq!(scroll_label(None, 0), "scrolling");
+    }
+
+    #[test]
+    fn only_a_tile_wholly_on_its_monitor_is_full() {
+        let left = rect(0, 0, 1920, 1080);
+        let right = rect(1920, 0, 3840, 1080);
+        let map = PlaceMap {
+            own: Some(left),
+            others: vec![right],
+            all: vec![left, right],
+            hidden: vec![B],
+        };
+        assert_eq!(map.vis(A, rect(100, 8, 1000, 1072)), Vis::Full);
+        assert_eq!(map.vis(A, rect(-500, 8, 400, 1072)), Vis::Peek);
+        assert_eq!(map.vis(A, rect(1500, 8, 2400, 1072)), Vis::Park);
+        assert_eq!(
+            map.vis(B, rect(100, 8, 1000, 1072)),
+            Vis::Park,
+            "hidden tab"
+        );
+        // Off scrolling every tile is Full, wherever it is.
+        assert_eq!(
+            PlaceMap::default().vis(A, rect(-500, 8, 400, 1072)),
+            Vis::Full
+        );
     }
 
     // ---- bar visuals (batch 20, BAR-3 / BAR-9 / BAR-19) -------------------------
