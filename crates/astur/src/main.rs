@@ -19198,13 +19198,24 @@ const PAL_LIGHT: Pal = Pal {
 };
 static THEME_LIGHT: AtomicBool = AtomicBool::new(false);
 fn pal() -> Pal {
-    let base = if THEME_LIGHT.load(Ordering::Relaxed) {
-        PAL_LIGHT
-    } else {
-        PAL_DARK
-    };
+    let light = THEME_LIGHT.load(Ordering::Relaxed);
+    let builtin = if light { PAL_LIGHT } else { PAL_DARK };
     let cfg = UI_CFG.lock().unwrap();
-    let Some(cfg) = cfg.as_ref() else { return base };
+    let Some(cfg) = cfg.as_ref() else {
+        return builtin;
+    };
+    // The bar's palette (navbar.conf) recolours the popups too, except
+    // classic, which keeps the built-in look above.
+    let sys = Some(SYS_ACCENT.load(Ordering::Relaxed)).filter(|&a| a != NO_ACCENT);
+    let base = cfg.popup_palette(light, sys).map_or(builtin, |r| Pal {
+        bg: r.bg,
+        fg: r.fg,
+        dim: r.muted,
+        selbg: r.accent,
+        selfg: r.accent_fg,
+        frame: r.surface,
+        divider: r.surface,
+    });
     Pal {
         bg: cfg.popup_bg.unwrap_or(base.bg),
         fg: cfg.popup_fg.unwrap_or(base.fg),
