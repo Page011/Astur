@@ -1389,6 +1389,25 @@ impl Config {
         }
     }
 
+    /// The colours the launcher and system menu start from for one theme:
+    /// None under `palette = classic`, which keeps the WM's own popup look,
+    /// else the palette's own roles. The bar's pinned keys are not applied:
+    /// they style the bar, and the popups have their own `popup_*` keys,
+    /// which the WM lays on top of this. `sys_accent` is the Windows accent
+    /// for `palette = system` (None when unknown), with text by `text_on`.
+    pub fn popup_palette(&self, light: bool, sys_accent: Option<u32>) -> Option<BarRoles> {
+        if self.bar_palette == "classic" {
+            return None;
+        }
+        let p = palette(&self.bar_palette);
+        let mut r = if light { p.light } else { p.dark };
+        if let Some(sys) = sys_accent.filter(|_| self.bar_palette == "system") {
+            r.accent = sys;
+            r.accent_fg = text_on(sys);
+        }
+        Some(r)
+    }
+
     /// The capsule colour `widget_colors` gives `widget` under the roles `r`:
     /// a swatch (so a palette or theme switch recolours it) or a pinned #hex.
     /// None = the surface, also for `surface` itself. The last entry wins.
@@ -1652,7 +1671,8 @@ popup_font_weight = 400
 popup_radius = 16
 popup_border_width = 1
 popup_opacity = 94
-# Set colours to auto to follow theme, or explicit #RRGGBB.
+# Set colours to auto to follow theme, or explicit #RRGGBB. Auto also follows
+# navbar.conf's palette, unless that palette is classic.
 popup_bg = auto
 popup_fg = auto
 popup_muted = auto
@@ -2170,7 +2190,8 @@ custom_interval = 10
 # Colour palette the 'auto' colours come from: classic (the default),
 # catppuccin, nord, gruvbox, rosepine, mono, or system (Windows neutrals and
 # your Windows accent colour, read at start and on reload). Each has a dark
-# and a light variant; astur.conf 'theme' picks which.
+# and a light variant; astur.conf 'theme' picks which. Any palette but classic
+# also colours the launcher and system menu (astur.conf popup_* colours win).
 palette = classic
 # Colours: 'auto' follows the palette and theme, or set an explicit #RRGGBB to
 # override that colour permanently.
@@ -5259,6 +5280,53 @@ surface = #010203",
                 parse_text(&format!("palette = {}", p.name)).bar_palette,
                 p.name
             );
+        }
+    }
+
+    #[test]
+    fn popups_follow_the_palette_except_classic() {
+        let mut c = parse_text("");
+        assert_eq!(c.bar_palette, "classic");
+        assert_eq!(c.popup_palette(false, None), None);
+        assert_eq!(c.popup_palette(true, None), None);
+        parse_into(&mut c, "palette = catppuccin");
+        let mocha = c.popup_palette(false, None).unwrap();
+        assert_eq!((mocha.bg, mocha.accent), (rgb(0x1E1E2E), rgb(0xCBA6F7)));
+        let latte = c.popup_palette(true, None).unwrap();
+        assert_eq!((latte.bg, latte.accent), (rgb(0xEFF1F5), rgb(0x8839EF)));
+        // The bar's pinned colours style the bar only.
+        parse_into(
+            &mut c,
+            "bg = #202122
+accent = #123456",
+        );
+        assert_eq!(c.popup_palette(false, None), Some(mocha));
+        // The Windows accent applies to palette = system only.
+        let blue = rgb(0x0078D4);
+        assert_eq!(c.popup_palette(false, Some(blue)), Some(mocha));
+        parse_into(&mut c, "palette = system");
+        let s = c.popup_palette(false, Some(blue)).unwrap();
+        assert_eq!((s.accent, s.accent_fg), (blue, text_on(blue)));
+        assert_eq!(
+            c.popup_palette(false, None).unwrap().accent,
+            palette("system").dark.accent
+        );
+    }
+
+    #[test]
+    fn every_palette_keeps_popup_text_readable() {
+        for p in PALETTES.iter().filter(|p| p.name != "classic") {
+            let c = parse_text(&format!("palette = {}", p.name));
+            for light in [false, true] {
+                let r = c.popup_palette(light, None).unwrap();
+                let (body, on_accent) = (contrast(r.fg, r.bg), contrast(r.accent_fg, r.accent));
+                assert!(body >= 4.5, "{} light={light}: text {body:.2}:1", p.name);
+                assert!(
+                    on_accent >= 3.0,
+                    "{} light={light}: selection {on_accent:.2}:1",
+                    p.name
+                );
+            }
         }
     }
 
