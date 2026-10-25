@@ -19,7 +19,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::sync::atomic::{
-    AtomicBool, AtomicI32, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering,
+    AtomicBool, AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, AtomicU8, Ordering,
 };
 use std::sync::{Condvar, LazyLock, Mutex, OnceLock};
 use std::time::Instant;
@@ -134,9 +134,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
     SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
     SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDOWN,
-    WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WNDCLASSW, WS_EX_LAYERED,
-    WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WNDCLASSW,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -144,10 +144,11 @@ use core::ffi::c_void;
 use std::collections::{HashMap, VecDeque};
 use windows::core::s;
 use windows::Win32::Graphics::Dwm::{
-    DwmFlush, DwmGetWindowAttribute, DwmRegisterThumbnail, DwmSetWindowAttribute,
-    DwmUnregisterThumbnail, DwmUpdateThumbnailProperties, DWMWA_BORDER_COLOR, DWMWA_CLOAKED,
-    DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND,
-    DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION, DWM_TNP_VISIBLE,
+    DwmFlush, DwmGetColorizationColor, DwmGetWindowAttribute, DwmRegisterThumbnail,
+    DwmSetWindowAttribute, DwmUnregisterThumbnail, DwmUpdateThumbnailProperties,
+    DWMWA_BORDER_COLOR, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS, DWMWA_WINDOW_CORNER_PREFERENCE,
+    DWMWCP_ROUND, DWM_THUMBNAIL_PROPERTIES, DWM_TNP_OPACITY, DWM_TNP_RECTDESTINATION,
+    DWM_TNP_VISIBLE,
 };
 use windows::Win32::Storage::Xps::{PrintWindow, PRINT_WINDOW_FLAGS};
 use windows::Win32::System::Threading::{
@@ -165,6 +166,9 @@ use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, MDT_EFFECTIVE_DPI,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::VK_SHIFT;
+use windows::Win32::UI::Input::KeyboardAndMouse::{VK_LWIN, VK_RWIN};
+use windows::Win32::UI::WindowsAndMessaging::ShowWindowAsync;
+use windows::Win32::UI::WindowsAndMessaging::WPF_ASYNCWINDOWPLACEMENT;
 use windows::Win32::UI::WindowsAndMessaging::{
     BringWindowToTop, ChangeWindowMessageFilterEx, EnumWindows, FindWindowExW, FindWindowW,
     GetClassNameW, GetClientRect, GetCursorPos, GetForegroundWindow, GetSystemMetrics,
@@ -174,15 +178,17 @@ use windows::Win32::UI::WindowsAndMessaging::{
     RegisterWindowMessageW, SendMessageTimeoutW, SetForegroundWindow, SetTimer, SetWindowLongPtrW,
     SetWindowLongW, SetWindowPlacement, SystemParametersInfoW, EVENT_OBJECT_DESTROY,
     EVENT_OBJECT_HIDE, EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_NAMECHANGE, EVENT_OBJECT_SHOW,
-    EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART,
-    EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART, GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE,
-    GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, HWND_TOP, MB_ICONERROR, MB_OK, MSGFLT_ALLOW, OBJID_CURSOR,
-    PM_REMOVE, PW_RENDERFULLCONTENT, SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE,
-    SPIF_UPDATEINIFILE, SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA, SPI_SETDESKWALLPAPER,
+    EVENT_OBJECT_UNCLOAKED, EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_MINIMIZEEND,
+    EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND, EVENT_SYSTEM_MOVESIZESTART,
+    GWLP_USERDATA, GWL_EXSTYLE, GWL_STYLE, GW_HWNDNEXT, GW_HWNDPREV, GW_OWNER, HWND_TOP,
+    MB_ICONERROR, MB_OK, MSGFLT_ALLOW, OBJID_CURSOR, PM_REMOVE, PW_RENDERFULLCONTENT,
+    SMTO_ABORTIFHUNG, SM_CXSCREEN, SM_CYSCREEN, SPIF_SENDCHANGE, SPIF_UPDATEINIFILE,
+    SPI_GETFOREGROUNDLOCKTIMEOUT, SPI_GETWORKAREA, SPI_SETDESKWALLPAPER,
     SPI_SETFOREGROUNDLOCKTIMEOUT, SPI_SETWORKAREA, SW_SHOW, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL,
     SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, WINDOWPLACEMENT, WINDOW_EX_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WM_CLIPBOARDUPDATE, WM_CLOSE, WM_DISPLAYCHANGE, WM_DPICHANGED,
-    WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_SETTINGCHANGE, WM_TIMER, WM_USER, WS_CHILD,
+    WM_ENDSESSION, WM_ERASEBKGND, WM_PAINT, WM_SETTINGCHANGE, WM_TIMER, WM_USER, WS_CAPTION,
+    WS_CHILD,
 };
 
 // =========================================================================
@@ -281,7 +287,8 @@ fn log_push(level: u8, msg: &str) {
 }
 
 /// Write one line straight to the log file, bypassing the queue. For the panic
-/// hook only: `panic = "abort"` means the worker thread never runs again.
+/// hook (`panic = "abort"` means the worker thread never runs again) and the
+/// exit watchdog (TerminateProcess next) only.
 fn log_sync(msg: &str) {
     use std::io::Write;
     let path = log_path();
@@ -445,7 +452,10 @@ const EVC_ADD: usize = 7;
 const EVC_SHOW_STYLE: usize = 8;
 /// NAMECHANGE refreshes folded into one already queued (BAR-10).
 const EVC_BAR_REFRESH_FOLDED: usize = 9;
-const EVC_NAMES: [&str; 10] = [
+/// Top-level UNCLOAKEDs, counted before the foreground gate (#16): a
+/// virtual-desktop switch adds one per window on the new desktop.
+const EVC_UNCLOAKED: usize = 10;
+const EVC_NAMES: [&str; 11] = [
     "show",
     "hide",
     "destroy",
@@ -456,8 +466,9 @@ const EVC_NAMES: [&str; 10] = [
     "add",
     "show_style_skipped",
     "bar_refresh_folded",
+    "uncloaked",
 ];
-static EV_COUNTS: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+static EV_COUNTS: [AtomicU64; 11] = [const { AtomicU64::new(0) }; 11];
 
 #[inline]
 fn ev_count(slot: usize) {
@@ -907,6 +918,9 @@ unsafe fn place_drag_frame(last: &mut Option<DragPlacement>, generation: u64) {
 }
 
 fn begin_drag(src: isize, generation: u64) {
+    // The click is swallowed: with a passed-through Win or Alt held, its
+    // release would open Start or a menu bar.
+    unsafe { mask_main() };
     cancel_glide();
     // Wakes the idle manager; subsequent mouse moves only replace STATE.
     push_cmd(Cmd::DragStarted(src, generation));
@@ -964,7 +978,11 @@ static ASYNC_WINDOW_POS: AtomicBool = AtomicBool::new(true);
 /// one window gets are all posted, FIFO in its queue, or all synchronous:
 /// mixing the two could land an older rect after a newer one. ShowWindow and
 /// SetWindowPlacement stay synchronous; each is followed, in the same call, by
-/// a posted SetWindowPos, so the newest rect still lands last.
+/// a posted SetWindowPos, so the newest rect still lands last. Exception:
+/// unpark_window with `reveal` (exit restore, rescue of a hidden entry)
+/// always posts, move and placement alike. Nothing places after an exit, and
+/// a rescued hidden window is adopted only once its posted show (queued
+/// ahead of the move) has run.
 fn foreign_swp_flags(base: SET_WINDOW_POS_FLAGS, async_on: bool) -> SET_WINDOW_POS_FLAGS {
     if async_on {
         base | SWP_ASYNCWINDOWPOS
@@ -1168,9 +1186,10 @@ unsafe fn set_pos_raw(h: isize, r: RECT) {
     );
 }
 
-// Set by the keyboard hook while physical Left Alt is held (Alt is blocked from
-// apps and reserved as Astur's modifier).
-static ALT_DOWN: AtomicBool = AtomicBool::new(false);
+// Set by the keyboard hook while the reserved main key (MAIN_VK: Left Alt or
+// Caps Lock) is physically held; it is blocked from apps. Never set when the
+// main key is passed through (Win, Alt, Ctrl+Win).
+static MAIN_DOWN: AtomicBool = AtomicBool::new(false);
 // True while we are feeding the system a synthetic Alt so Alt+Tab keeps working
 // despite the physical Alt being blocked from everything.
 static FAKE_ALT: AtomicBool = AtomicBool::new(false);
@@ -1194,6 +1213,10 @@ unsafe fn vk_down(vk: VIRTUAL_KEY) -> bool {
 /// `GetAsyncKeyState` reads) reporting that modifier stuck down — the "phantom
 /// Shift" bug when a menu is opened with Alt+Shift+Space and Shift is released
 /// before the menu closes. Includes the generic codes for injected events too.
+/// Win and a reserved Caps Lock count too: Win can be the main key, and the
+/// reserved key's own tracking runs after the capture modes, which would
+/// otherwise eat its release and leave it held for good. A Win press while
+/// a popup is open reaches the shell (it may open Start over the launcher).
 #[inline]
 fn is_modifier_vk(vk: u32) -> bool {
     vk == VK_SHIFT.0 as u32
@@ -1205,13 +1228,311 @@ fn is_modifier_vk(vk: u32) -> bool {
         || vk == VK_CONTROL.0 as u32
         || vk == VK_LCONTROL.0 as u32
         || vk == VK_RCONTROL.0 as u32
+        || vk == VK_LWIN.0 as u32
+        || vk == VK_RWIN.0 as u32
+        || vk == MAIN_VK.load(Ordering::Relaxed)
 }
 
+/// Does a reserved Left Alt swallow this key when no hotkey claims it? Apps
+/// never see Left Alt, so Alt+key arrived as the bare key: Alt+D typed 'd',
+/// Alt+Delete deleted the selection, Alt+F4 sent F4. Yes for keys that type,
+/// edit or navigate. No for modifiers and Win (a swallowed modifier up sticks
+/// it down, see `is_modifier_vk`), Tab (the Alt+Tab path owns it), PrintScreen,
+/// Pause, the lock and IME keys, F13-F24 (macro keys), and the volume, media,
+/// browser and launch keys: they act system-wide and type nothing, and an
+/// unknown key keeps today's pass-through. Keyed by VK only, so a configurable
+/// reserved main key reuses it as is.
 #[inline]
-unsafe fn left_alt_down() -> bool {
-    // Trust the hook flag, but fall back to the live key state so a missed
-    // key-down (e.g. Alt held before the hook saw it) can't wedge the modifier.
-    ALT_DOWN.load(Ordering::Relaxed) || vk_down(VK_LMENU)
+fn swallow_unbound(vk: u32) -> bool {
+    match vk {
+        0x08 | 0x0C | 0x0D | 0x1B => true, // Backspace, Clear (numpad 5), Enter, Esc
+        0x20..=0x28 | 0x2D | 0x2E => true, // Space, PgUp/Dn, End, Home, arrows, Ins, Del
+        0x30..=0x39 | 0x41..=0x5A => true, // digits, letters
+        0x5D | 0x60..=0x6F | 0x70..=0x7B => true, // Apps, numpad, F1-F12
+        0xBA..=0xC2 | 0xDB..=0xDF | 0xE2 => true, // OEM punctuation, ABNT, ISO < > key
+        _ => false,
+    }
+}
+
+/// Per VK, the fate of its last down that would have reached an app (the end
+/// of `keyboard_proc`; every other path swallows its down): 0 none, 1 passed,
+/// 2 swallowed by `swallow_unbound`. Its up is swallowed exactly when that
+/// down was, Alt released or not. A key already passed stays passed through
+/// its auto-repeats, or a repeat under a fresh Left Alt would eat the up and
+/// leave the key stuck down in the app. Hook thread only. A stale 2 (an up the
+/// hook never saw) clears on the next press that passes, or is spent by the
+/// next up the hook sees, which still passes if the OS holds the key (a down
+/// it took while the hook was blind). main_reset zeroes every slot.
+static UNBOUND_KEY: [AtomicU8; 256] = [const { AtomicU8::new(0) }; 256];
+
+/// Is the main key held? For the mouse (move, resize, Alt+wheel) and the
+/// focus-follows-mouse pause.
+#[inline]
+unsafe fn main_held() -> bool {
+    let vk = MAIN_VK.load(Ordering::Relaxed);
+    if vk != 0 {
+        // Trust the hook flag, but fall back to the live key state: a down the
+        // hook missed (held at startup, an elevated foreground, unhooked) went
+        // to the OS, so its async state is down. A swallowed one never is.
+        return MAIN_DOWN.load(Ordering::Relaxed) || vk_down(VIRTUAL_KEY(vk as u16));
+    }
+    // Passed through to apps, so the async state is right.
+    let bits = MAIN_BITS.load(Ordering::Relaxed);
+    (bits & config::MOD_ALT == 0 || vk_down(VK_MENU))
+        && (bits & config::MOD_WIN == 0 || vk_down(VK_LWIN) || vk_down(VK_RWIN))
+        && (bits & config::MOD_CTRL == 0 || vk_down(VK_CONTROL))
+}
+
+// ---- hotkey table (the keyboard hook's whole lookup) ----
+
+/// Every hotkey, indexed by `config::Bind::slot` (modifier set << 8 | VK);
+/// a value is `config::Bind::entry`, 0 = unbound. 32 KiB of .bss. A key press
+/// costs one atomic load here: no lock, no allocation, no scan (it replaced
+/// three Mutexes and their linear scans). Written only by `publish_binds`.
+static BINDS: [AtomicU32; 32 * 256] = [const { AtomicU32::new(0) }; 32 * 256];
+/// VK of the reserved main key (VK_LMENU 0xA4, VK_CAPITAL 0x14), 0 when the
+/// main key is passed through to apps. Left Alt until the first config
+/// applies, which is today's default.
+static MAIN_VK: AtomicU32 = AtomicU32::new(0xA4);
+/// `MainKey::bits` of the main key, for `main_held` and the mouse mask.
+static MAIN_BITS: AtomicU8 = AtomicU8::new(config::MOD_ALT);
+/// Look chords up even while no reserved main key is held: the main key is
+/// passed through, or some bind holds no reserved key (WIN+G under Left
+/// Alt). False in the default config, so a key press with Left Alt up costs
+/// what it always did: two loads.
+static BIND_LIVE: AtomicBool = AtomicBool::new(false);
+/// Read Win's state for a chord. Off under a reserved key with no Win bind:
+/// Left Alt always ignored a held Win (LAlt+Win+J ran LAlt+J's action), and
+/// it saves two calls per press.
+static WIN_LIVE: AtomicBool = AtomicBool::new(false);
+/// Serialises `publish_binds` (the watcher, IPC and manager reloads can
+/// overlap). Never taken by a hook.
+static BINDS_WRITE: Mutex<()> = Mutex::new(());
+/// Sent to the marker window when the main key changes: the hold state of
+/// the old one is meaningless (`main_reset` on the hooks' thread).
+const WM_KEYS_RESET: u32 = WM_USER + 9;
+/// The mask key: an unassigned VK. See `needs_mask`.
+const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+
+/// Fill the hook's table from compiled binds and switch the main key. Each
+/// slot goes straight from its old value to its new one (no zeroing pass),
+/// so a press that lands mid-rewrite runs its key's old or new action, never
+/// nothing. The flags follow with Release; the hook reads them with Acquire.
+fn publish_binds(main: config::MainKey, binds: &[config::Bind]) {
+    let mut table = vec![0u32; BINDS.len()];
+    for b in binds {
+        table[b.slot()] = b.entry();
+    }
+    let reserved = main.reserved_vk();
+    // The bit only a held reserved key sets (Left Alt's ALT, Caps Lock's HYPER).
+    let held_bit = if reserved == 0 { 0 } else { main.bits() };
+    let _w = BINDS_WRITE.lock().unwrap();
+    for (slot, &e) in BINDS.iter().zip(&table) {
+        if slot.load(Ordering::Relaxed) != e {
+            slot.store(e, Ordering::Release);
+        }
+    }
+    let live = reserved == 0 || binds.iter().any(|b| b.mods & held_bit == 0);
+    let win = reserved == 0 || binds.iter().any(|b| b.mods & config::MOD_WIN != 0);
+    BIND_LIVE.store(live, Ordering::Release);
+    WIN_LIVE.store(win, Ordering::Release);
+    MAIN_BITS.store(main.bits(), Ordering::Release);
+    if MAIN_VK.swap(reserved, Ordering::AcqRel) != reserved {
+        let marker = MARKER_HWND.load(Ordering::Relaxed);
+        if marker != 0 {
+            unsafe {
+                let _ = PostMessageW(hwnd_from(marker), WM_KEYS_RESET, WPARAM(0), LPARAM(0));
+            }
+        }
+    }
+}
+
+/// The modifier set of a key press, spelled as `config::Bind::mods`. 0 when
+/// no Alt, Win or reserved key is held: every bind holds one (compile_keys
+/// refuses the rest), so plain typing stops after the first checks.
+/// GetAsyncKeyState only for keys that reach the OS: a reserved key's own
+/// presses are swallowed, so its async state never changes (MAIN_DOWN does).
+#[inline]
+unsafe fn live_mods(main_vk: u32, held: bool) -> u8 {
+    let mut m = 0;
+    if main_vk == VK_LMENU.0 as u32 {
+        if held {
+            m |= config::MOD_ALT; // Right Alt stays the apps' Alt
+        }
+    } else if vk_down(VK_MENU) {
+        m |= config::MOD_ALT;
+    }
+    if WIN_LIVE.load(Ordering::Acquire) && (vk_down(VK_LWIN) || vk_down(VK_RWIN)) {
+        m |= config::MOD_WIN;
+    }
+    if held && main_vk == VK_CAPITAL.0 as u32 {
+        m |= config::MOD_HYPER;
+    }
+    if m == 0 {
+        return 0;
+    }
+    if vk_down(VK_CONTROL) {
+        m |= config::MOD_CTRL;
+    }
+    if vk_down(VK_SHIFT) {
+        m |= config::MOD_SHIFT;
+    }
+    m
+}
+
+/// Must a bound chord (or a main-key drag / wheel) inject the mask key? Yes
+/// when it holds a Win or Alt that apps see: on release the shell would open
+/// Start, or the app its menu bar, as it saw a lone Win / Alt press. Any key
+/// event in between stops that, and VK 0xE8 is unassigned, so nothing acts
+/// on it (AutoHotkey's #MenuMaskKey; win-hotkeys, behind komorebi's whkd and
+/// Seelen, sends 0xE8 when it blocks a key). Sent at the trigger, as
+/// win-hotkeys does, which also covers a mouse drag. Reserved Left Alt never
+/// reaches apps, so its ALT needs none.
+fn needs_mask(alt_reserved: bool, mods: u8) -> bool {
+    mods & config::MOD_WIN != 0 || (mods & config::MOD_ALT != 0 && !alt_reserved)
+}
+
+unsafe fn inject_mask() {
+    inject_key(VK_MASK, false);
+    inject_key(VK_MASK, true);
+}
+
+/// A drag or wheel took a click under a passed-through Win or Alt main key:
+/// mask it, as a bound chord does (`needs_mask`).
+unsafe fn mask_main() {
+    let mods = MAIN_BITS.load(Ordering::Relaxed);
+    if MAIN_VK.load(Ordering::Relaxed) == 0 && needs_mask(false, mods) {
+        inject_mask();
+    }
+}
+
+/// A wheel the hook eats (bar, launcher, power menu) under a held
+/// passed-through Win or Alt main key: mask it, as the strip wheel and a drag
+/// do, or the shell sees a lone Win press and release and opens Start (an
+/// app its menu bar). The MAIN_VK load first, so a reserved key (nothing to
+/// mask) costs no key-state reads.
+#[inline]
+unsafe fn mask_eaten_wheel() {
+    if MAIN_VK.load(Ordering::Relaxed) == 0 && main_held() {
+        mask_main();
+    }
+}
+
+/// Run a bound chord (keyboard hook, first press only). The launcher and
+/// power menu open right here, as they always did; the rest is a command.
+unsafe fn run_bind(e: u32) {
+    let Some((action, arg)) = config::decode_bind(e) else {
+        return;
+    };
+    let post = |hwnd: &AtomicIsize, open: &AtomicBool, other: &AtomicBool, msg, a| {
+        let h = hwnd.load(Ordering::Relaxed);
+        if h != 0 && !other.load(Ordering::Relaxed) && !open.swap(true, Ordering::Relaxed) {
+            let _ = PostMessageW(hwnd_from(h), msg, WPARAM(a), LPARAM(0));
+        }
+    };
+    match action {
+        config::Action::Launcher => post(
+            &LAUNCHER_HWND,
+            &LAUNCHER_OPEN,
+            &SYSMENU_OPEN,
+            WM_LAUNCHER,
+            LA_OPEN,
+        ),
+        config::Action::SystemMenu => post(
+            &SYSMENU_HWND,
+            &SYSMENU_OPEN,
+            &LAUNCHER_OPEN,
+            WM_SYSMENU,
+            SM_OPEN,
+        ),
+        _ => {
+            if let Some(c) = bind_cmd(action, arg) {
+                push_cmd(c);
+            }
+        }
+    }
+}
+
+/// A hotkey action's manager command. None for the two the hook runs itself.
+fn bind_cmd(action: config::Action, arg: u16) -> Option<Cmd> {
+    use config::Action as A;
+    let edge = |last, carry| Cmd::ColumnEdge { last, carry };
+    Some(match action {
+        A::Launcher | A::SystemMenu => return None,
+        A::FocusNext => Cmd::FocusDir(1),
+        A::FocusPrev => Cmd::FocusDir(-1),
+        A::SwapNext => Cmd::SwapDir(1),
+        A::SwapPrev => Cmd::SwapDir(-1),
+        A::ShrinkMaster => Cmd::ResizeMaster(-0.05),
+        A::GrowMaster => Cmd::ResizeMaster(0.05),
+        // The manager turns ResizeTile back into ResizeMaster off scrolling.
+        A::ShrinkTile => Cmd::ResizeTile(-0.1),
+        A::GrowTile => Cmd::ResizeTile(0.1),
+        A::PromoteMaster => Cmd::PromoteMaster,
+        A::ToggleTiling => Cmd::ToggleTiling,
+        A::ToggleTabbed => Cmd::ToggleTabbed,
+        A::ToggleFloat => Cmd::ToggleFloat,
+        A::CloseWindow => Cmd::CloseFocused,
+        A::CycleWidth => Cmd::CycleWidth,
+        A::CycleHeight => Cmd::CycleHeight,
+        A::CenterColumn => Cmd::CenterColumn,
+        A::ConsumeLeft => Cmd::ConsumeOrExpel(-1),
+        A::ConsumeRight => Cmd::ConsumeOrExpel(1),
+        A::FirstColumn => edge(false, false),
+        A::LastColumn => edge(true, false),
+        A::MoveFirstColumn => edge(false, true),
+        A::MoveLastColumn => edge(true, true),
+        A::Terminal => Cmd::LaunchTerminal,
+        A::Browser => Cmd::LaunchBrowser,
+        A::FocusLeft => Cmd::FocusGeo(Dir::Left),
+        A::FocusUp => Cmd::FocusGeo(Dir::Up),
+        A::FocusRight => Cmd::FocusGeo(Dir::Right),
+        A::FocusDown => Cmd::FocusGeo(Dir::Down),
+        A::MoveLeft => Cmd::MoveGeo(Dir::Left),
+        A::MoveUp => Cmd::MoveGeo(Dir::Up),
+        A::MoveRight => Cmd::MoveGeo(Dir::Right),
+        A::MoveDown => Cmd::MoveGeo(Dir::Down),
+        A::SwitchWorkspace => Cmd::Switch(arg as usize),
+        A::MoveToWorkspace => Cmd::MoveToWs(arg as usize),
+        A::Extra => Cmd::Extra(arg as usize),
+    })
+}
+
+/// Forget a main-key hold whose release the hook cannot see: it lands on
+/// another desktop (UAC, Ctrl+Alt+Del, lock screen), on an elevated
+/// foreground (UIPI) or while the hooks are gone; or the main key changed.
+/// A latched MAIN_DOWN turns every left click into a suppressed drag, every
+/// Tab into Alt+Tab, and eats J/K/digits (and, via swallow_unbound, all
+/// typing) until the key is pressed again. Nothing is injected: the release
+/// the hook missed went to the OS, and one still to come is passed through by
+/// keyboard_proc while the OS has the key down. Main thread only (the hooks'
+/// own thread), so it never interleaves with keyboard_proc.
+unsafe fn main_reset(why: &str) {
+    if MAIN_DOWN.swap(false, Ordering::Relaxed) {
+        log_info!("main key hold forgotten ({why})");
+    }
+    FAKE_ALT.store(false, Ordering::Relaxed);
+    // The switcher commits on a Left Alt release that will never come.
+    if ALT_SWITCHER_MODE.swap(false, Ordering::Relaxed) {
+        let h = LAUNCHER_HWND.load(Ordering::Relaxed);
+        if h != 0 {
+            let _ = PostMessageW(hwnd_from(h), WM_LAUNCHER, WPARAM(LA_CLOSE), LPARAM(0));
+        }
+    }
+    // A hotkey whose key-up was missed would eat its next press, and a
+    // passed key's missed up would let its next Left Alt chord through bare.
+    for p in &PRESSED {
+        p.store(false, Ordering::Relaxed);
+    }
+    for k in &UNBOUND_KEY {
+        k.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Is a bound chord's key down as far as the hook knows (its PRESSED slot
+/// set, its key-up not seen yet)?
+fn hotkey_held() -> bool {
+    PRESSED.iter().any(|p| p.load(Ordering::Relaxed))
 }
 
 #[inline]
@@ -1307,9 +1628,12 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
                 let _ = ShowWindow(hwnd_from(b.hwnd), SW_HIDE);
             }
         }
-    } else if msg == WM_REARM_HOOKS {
+    } else if msg == WM_REARM_HOOKS && !EXITING.load(Ordering::Relaxed) {
         // Watchdog says the OS dropped our hooks. Re-install on this thread —
         // low-level hooks belong to the thread that pumps their messages.
+        // Never once an exit restore began: it removed them on purpose
+        // (unhook_input), and a request posted before that is still queued
+        // ahead of WM_QUIT. Falls through to DefWindowProc then.
         let hinst = HINSTANCE(
             GetModuleHandleW(None)
                 .map(|m| m.0)
@@ -1326,6 +1650,12 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
         } else {
             log_error!("input hooks re-arm FAILED; Astur is deaf until restart");
         }
+
+        // A main-key release while unhooked may have been missed.
+        main_reset("hooks re-armed");
+    } else if msg == WM_KEYS_RESET {
+        main_reset("main key changed");
+        return LRESULT(0);
     } else if msg == WM_BAR_MODE_CHANGED {
         // A maximized/fullscreen app entered or left one monitor. Rebuild only
         // bar runtime geometry; manager/window layout must not disturb the app.
@@ -1337,7 +1667,8 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
 }
 
 /// Inject one synthetic key event. Used to feed the system a real Alt (and Tab)
-/// for the Alt+Tab passthrough while the physical Left Alt is blocked from apps.
+/// for the Alt+Tab passthrough while the physical Left Alt is blocked from
+/// apps, and the mask key. Our own hook skips injected input.
 unsafe fn inject_key(vk: VIRTUAL_KEY, up: bool) {
     let input = INPUT {
         r#type: INPUT_KEYBOARD,
@@ -1358,10 +1689,12 @@ unsafe fn inject_key(vk: VIRTUAL_KEY, up: bool) {
     SendInput(&[input], core::mem::size_of::<INPUT>() as i32);
 }
 
-/// Low-level keyboard hook. Left Alt is reserved as Astur's modifier: it is
-/// blocked from every application so it never triggers menus or Alt shortcuts.
-/// Alt+Tab is preserved by synthesizing an injected Alt+Tab for the system while
-/// swallowing the physical keys.
+/// Low-level keyboard hook. A reserved main key (Left Alt, the default, or
+/// Caps Lock) is blocked from every application so it never triggers menus
+/// or Alt shortcuts; under reserved Left Alt, Alt+Tab is preserved by
+/// synthesizing an injected Alt+Tab for the system while swallowing the
+/// physical keys. A passed-through main key (Win, Alt, Ctrl+Win) reaches apps;
+/// only bound keys are swallowed, with the mask key (`needs_mask`).
 unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     hook_alive_stamp();
     if code == HC_ACTION as i32 {
@@ -1422,8 +1755,8 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             }
 
             // Launcher capture mode: while the picker is open, route keys to it
-            // and swallow them from the system. Modifiers fall through so Left
-            // Alt's own bookkeeping (ALT_DOWN / FAKE_ALT) still runs.
+            // and swallow them from the system. Modifiers fall through so the
+            // main key's own bookkeeping (MAIN_DOWN / FAKE_ALT) still runs.
             if LAUNCHER_OPEN.load(Ordering::Relaxed) {
                 let vk = kb.vkCode;
                 if !is_modifier_vk(vk) {
@@ -1479,11 +1812,15 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 }
             }
 
-            if kb.vkCode == VK_LMENU.0 as u32 {
+            // The reserved main key (Left Alt or Caps Lock): tracked here and
+            // never shown to apps. Runs after the capture modes, which pass it
+            // (is_modifier_vk), so an open popup can't eat its release.
+            let main_vk = MAIN_VK.load(Ordering::Acquire);
+            if main_vk != 0 && kb.vkCode == main_vk {
                 if down {
-                    ALT_DOWN.store(true, Ordering::Relaxed);
+                    MAIN_DOWN.store(true, Ordering::Relaxed);
                 } else if up {
-                    ALT_DOWN.store(false, Ordering::Relaxed);
+                    MAIN_DOWN.store(false, Ordering::Relaxed);
                     if ALT_SWITCHER_MODE.swap(false, Ordering::Relaxed) {
                         let h = LAUNCHER_HWND.load(Ordering::Relaxed);
                         if h != 0 {
@@ -1498,14 +1835,27 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                     // Release the synthetic Alt so the system task switcher commits.
                     if FAKE_ALT.swap(false, Ordering::Relaxed) {
                         inject_key(VK_MENU, true);
+                    } else if vk_down(VIRTUAL_KEY(main_vk as u16)) {
+                        // The OS took this key's down (the hook was blind:
+                        // elevated foreground, secure desktop (Alt+Y on UAC),
+                        // unhooked, or held at startup). Swallowing the up
+                        // would leave it down for every app and main_held()
+                        // true for good: the phantom-Shift bug, for the main
+                        // key. The hook runs before the async state updates,
+                        // so this reads the state before this release.
+                        return CallNextHookEx(None, code, wparam, lparam);
                     }
                 }
-                return LRESULT(1); // never let apps see Left Alt
+                return LRESULT(1); // apps never see the reserved main key
             }
+            let held = MAIN_DOWN.load(Ordering::Relaxed);
+            let alt_reserved = main_vk == VK_LMENU.0 as u32;
 
-            // Alt+Tab (and Alt+Shift+Tab): drive the switcher with injected keys
-            // and swallow the physical Tab so it isn't counted twice.
-            if kb.vkCode == VK_TAB.0 as u32 && ALT_DOWN.load(Ordering::Relaxed) {
+            // Alt+Tab (and Alt+Shift+Tab) under reserved Left Alt: drive the
+            // switcher with injected keys and swallow the physical Tab so it
+            // isn't counted twice. Before the bind lookup: compile_keys
+            // refuses any Left Alt + Tab bind.
+            if kb.vkCode == VK_TAB.0 as u32 && held && alt_reserved {
                 if ALT_TAB_REPLACE.load(Ordering::Relaxed) {
                     if down && !LAUNCHER_OPEN.swap(true, Ordering::Relaxed) {
                         ALT_SWITCHER_MODE.store(true, Ordering::Relaxed);
@@ -1532,54 +1882,72 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                 return LRESULT(1);
             }
 
-            // Alt+Shift+Space: system/power menu. Checked BEFORE the launcher so the
-            // shift variant doesn't open the app picker.
+            // A bound chord (launcher, power menu, tiling keys, workspaces,
+            // extra_hotkeys): one table load, swallowed from apps. With the
+            // default config and Left Alt up this is two atomic loads.
+            let vk = kb.vkCode as usize;
             if down
-                && ALT_DOWN.load(Ordering::Relaxed)
-                && kb.vkCode == VK_SPACE.0 as u32
-                && vk_down(VK_SHIFT)
-                && SYSMENU_ENABLED.load(Ordering::Relaxed)
-                && !SYSMENU_OPEN.load(Ordering::Relaxed)
-                && !LAUNCHER_OPEN.load(Ordering::Relaxed)
+                && vk < 256
+                && (held || BIND_LIVE.load(Ordering::Acquire))
+                && !is_modifier_vk(kb.vkCode)
             {
-                SYSMENU_OPEN.store(true, Ordering::Relaxed);
-                let hs = SYSMENU_HWND.load(Ordering::Relaxed);
-                if hs != 0 {
-                    let _ = PostMessageW(hwnd_from(hs), WM_SYSMENU, WPARAM(SM_OPEN), LPARAM(0));
-                }
-                return LRESULT(1);
-            }
-
-            // Alt+Space: open the app launcher (no Shift — Shift is the system menu).
-            // Not Win+Space — that's the system layout toggle. Left Alt is already
-            // Astur's reserved modifier, so this never reaches apps.
-            if down
-                && ALT_DOWN.load(Ordering::Relaxed)
-                && kb.vkCode == VK_SPACE.0 as u32
-                && !vk_down(VK_SHIFT)
-                && LAUNCHER_ENABLED.load(Ordering::Relaxed)
-                && !LAUNCHER_OPEN.load(Ordering::Relaxed)
-                && !SYSMENU_OPEN.load(Ordering::Relaxed)
-            {
-                LAUNCHER_OPEN.store(true, Ordering::Relaxed);
-                let hl = LAUNCHER_HWND.load(Ordering::Relaxed);
-                if hl != 0 {
-                    let _ = PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_OPEN), LPARAM(0));
-                }
-                return LRESULT(1);
-            }
-
-            // Tiling hotkeys: Alt + key. Swallowed from apps (Alt is reserved).
-            if down && ALT_DOWN.load(Ordering::Relaxed) {
-                let shift = vk_down(VK_SHIFT);
-                if let Some(cmd) = resolve_hotkey(kb.vkCode, shift, vk_down(VK_CONTROL)) {
+                let m = live_mods(main_vk, held);
+                let e = if m == 0 {
+                    0
+                } else {
+                    BINDS[(m as usize) << 8 | vk].load(Ordering::Acquire)
+                };
+                if e != 0 {
                     reveal.0 = false;
-                    let vk = kb.vkCode as usize;
-                    // swap(true): push only on the first down (debounce auto-repeat),
-                    // re-armed by the key-up store above. Lockless on the hot path.
-                    if vk < 256 && !PRESSED[vk].swap(true, Ordering::Relaxed) {
-                        push_cmd(cmd);
+                    // swap(true): run only on the first down (debounce
+                    // auto-repeat), re-armed by the key-up store above.
+                    if !PRESSED[vk].swap(true, Ordering::Relaxed) {
+                        if needs_mask(alt_reserved, m) {
+                            inject_mask();
+                        }
+                        run_bind(e);
                     }
+                    return LRESULT(1);
+                }
+            }
+
+            // Reserved main key + a key no hotkey claimed: the app would get it
+            // bare (Alt+D typed 'd', Alt+Delete deleted), so typing, editing and
+            // navigation keys are swallowed (swallow_unbound). Not while the
+            // system Alt+Tab switcher holds the synthetic Alt (FAKE_ALT): keys
+            // pressed there are its own. See UNBOUND_KEY for the matching ups.
+            // A passed-through main key never swallows an unbound key (held
+            // is never set then).
+            if vk < 256 {
+                if down {
+                    let eat = UNBOUND_KEY[vk].load(Ordering::Relaxed) != 1
+                        && held
+                        && !FAKE_ALT.load(Ordering::Relaxed)
+                        && swallow_unbound(kb.vkCode);
+                    UNBOUND_KEY[vk].store(if eat { 2 } else { 1 }, Ordering::Relaxed);
+                    if eat {
+                        // Like a hotkey: nothing reaches a window, so a running
+                        // motion has no reason to be cut.
+                        reveal.0 = false;
+                        // A Win, or an Alt apps see, held as well would see a
+                        // lone press and release once this key is gone: Start
+                        // (or the app's menu bar) opens. Masked as a hotkey
+                        // is; the reads run on this eat path only, never
+                        // while typing.
+                        if vk_down(VK_LWIN)
+                            || vk_down(VK_RWIN)
+                            || (!alt_reserved && vk_down(VK_MENU))
+                        {
+                            inject_mask();
+                        }
+                        return LRESULT(1);
+                    }
+                } else if up
+                    && UNBOUND_KEY[vk].swap(0, Ordering::Relaxed) == 2
+                    && !vk_down(VIRTUAL_KEY(kb.vkCode as u16))
+                {
+                    // vk_down: the OS holds the key (a down it took while the
+                    // hook was blind), so its up must pass or the key sticks.
                     return LRESULT(1);
                 }
             }
@@ -1665,21 +2033,39 @@ unsafe fn root_window_at(pt: POINT) -> Option<HWND> {
 /// Alt-dragging a tabbed column by its bar drags the column, and the bar
 /// itself is never dragged off its column. A slide or motion overlay still
 /// up (one longer than CLICK_THROUGH_MAX_MS takes clicks) is never dragged:
-/// None, the click only reveals it. Hook-legal: user32 reads into a stack
-/// buffer, no lock, no allocation; and only on an Alt+click.
+/// None, the click only reveals it. Neither is a shell surface (Start, Quick
+/// Settings, the notification centre, the taskbar), which used to move and
+/// resize like an app: None, so the Alt+click reaches it as a plain click.
+/// Hook-legal: user32 reads into a stack buffer, no lock, no allocation; and
+/// only on an Alt+click.
 unsafe fn drag_root_at(pt: POINT) -> Option<HWND> {
     let h = root_window_at(pt)?;
-    let mut buf = [0u16; 16];
+    let mut buf = [0u16; 64];
     let n = (GetClassNameW(h, &mut buf).max(0) as usize).min(buf.len());
     let class = &buf[..n];
     if class.iter().copied().eq("astur_tabs".encode_utf16()) {
         let shown = GetWindowLongPtrW(h, GWLP_USERDATA);
         return (shown != 0).then(|| hwnd_from(shown));
     }
-    if class.iter().copied().eq("astur_slide".encode_utf16()) {
-        return None;
-    }
-    Some(h)
+    let style = GetWindowLongW(h, GWL_STYLE) as u32;
+    let ex = GetWindowLongW(h, GWL_EXSTYLE) as u32;
+    (!never_dragged(style, ex, class)).then_some(h)
+}
+
+/// Is this window off limits to Alt-drag? The same windows tiling refuses
+/// by style or class (show_rejected_by_style, BLOCK_CLASSES): shell flyouts,
+/// tooltips, the taskbar, and Astur's own surfaces (the slide overlay among
+/// them). Allocation-free, for the mouse hook.
+fn never_dragged(style: u32, ex: u32, class: &[u16]) -> bool {
+    // A captioned tool window is an app's own palette (an OBS dock, a
+    // Paint.NET tool window): it still drags, or the refused Alt+press would
+    // land on the app as a real click-drag. Flyouts, tooltips and OSDs have
+    // no caption.
+    let captioned = style & WS_CAPTION.0 == WS_CAPTION.0;
+    (show_rejected_by_style(style, ex) && !captioned)
+        || BLOCK_CLASSES
+            .iter()
+            .any(|c| class.iter().copied().eq(c.encode_utf16()))
 }
 
 /// Work area (excludes taskbar) of the monitor under a screen point.
@@ -1723,10 +2109,7 @@ unsafe fn work_area_at(pt: POINT) -> RECT {
 /// published rects. Hook-legal.
 #[inline]
 unsafe fn alt_wheel_scrolls(pt: POINT) -> bool {
-    SCROLLMON_N.load(Ordering::Relaxed) != 0
-        && !drag_active()
-        && left_alt_down()
-        && scrollmon_at(pt)
+    SCROLLMON_N.load(Ordering::Relaxed) != 0 && !drag_active() && main_held() && scrollmon_at(pt)
 }
 
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -1778,6 +2161,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
                 let step: isize = if delta > 0 { 1 } else { -1 };
                 let _ = PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_SCROLL), LPARAM(step));
+                mask_eaten_wheel();
                 return suppress;
             }
         }
@@ -1797,6 +2181,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
                 let act = if delta > 0 { SM_UP } else { SM_DOWN };
                 let _ = PostMessageW(hwnd_from(hs), WM_SYSMENU, WPARAM(act), LPARAM(0));
+                mask_eaten_wheel();
                 return suppress;
             }
         }
@@ -1825,6 +2210,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     WPARAM(delta as usize),
                     LPARAM(pt.x as isize),
                 );
+                mask_eaten_wheel();
                 return suppress;
             }
         }
@@ -1855,6 +2241,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         SCROLL_WHEEL_ACC.store(acc, Ordering::Relaxed);
         SCROLL_WHEEL_LATCH.store(latch, Ordering::Relaxed);
         SCROLL_WHEEL_T.store(info.time, Ordering::Relaxed);
+        mask_main();
         if steps != 0 {
             push_cmd(Cmd::ScrollWheel {
                 steps,
@@ -1867,7 +2254,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
     }
 
     match msg {
-        WM_LBUTTONDOWN if left_alt_down() && !drag_active() => {
+        WM_LBUTTONDOWN if main_held() && !drag_active() => {
             // Sample the scale once per drag; the overlay sizes below read it.
             DRAG_DPI.store(dpi_at(pt), Ordering::Relaxed);
             if let Some(hwnd) = drag_root_at(pt) {
@@ -1940,7 +2327,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 }
             }
         }
-        WM_RBUTTONDOWN if left_alt_down() && !drag_active() => {
+        WM_RBUTTONDOWN if main_held() && !drag_active() => {
             DRAG_DPI.store(dpi_at(pt), Ordering::Relaxed);
             if let Some(hwnd) = drag_root_at(pt) {
                 let mut rect = RECT::default();
@@ -2161,7 +2548,17 @@ enum Cmd {
     BarClick(isize, usize),           // bar pill clicked: (monitor hmon, local workspace)
     BarFocus(isize),                  // bar app-button clicked: focus this window
     BarCycle(isize, i32),             // bar wheel: (monitor hmon, +1 next / -1 prev workspace)
-    Extra(usize),                     // compiled extra-hotkey index; strings stay off the hook path
+    /// A bar widget clicked with a click action: which bar, widget
+    /// (BarWidget as u8), button (0 left, 1 right, 2 middle) and music
+    /// button (`sub`). The manager reads the action from its config, so the
+    /// bar never carries a string.
+    BarAction {
+        hmon: isize,
+        wgt: u8,
+        button: u8,
+        sub: u8,
+    },
+    Extra(usize), // compiled extra-hotkey index; strings stay off the hook path
     SetLayout(String),
     ToggleScratchpad,
     /// Config changed; apply live. true = full (an explicit reload redoes
@@ -2241,6 +2638,7 @@ impl Cmd {
             Cmd::BarClick(..) => "BarClick",
             Cmd::BarFocus(_) => "BarFocus",
             Cmd::BarCycle(..) => "BarCycle",
+            Cmd::BarAction { .. } => "BarAction",
             Cmd::Extra(_) => "Extra",
             Cmd::SetLayout(_) => "SetLayout",
             Cmd::ToggleScratchpad => "ToggleScratchpad",
@@ -2330,84 +2728,6 @@ static MRU_REQ: Mutex<Option<String>> = Mutex::new(None);
 static MRU_CV: Condvar = Condvar::new();
 static LAUNCHER_MRU: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
 static MRU_TICK: AtomicU64 = AtomicU64::new(0);
-// VK code per workspace (index = workspace), read by the keyboard hook.
-static WORKSPACE_KEYS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
-/// Rebindable single-letter hotkeys (config keys `key_*`); defaults match the
-/// historical hardcoded J/K/H/L/M/T/F/W binds.
-struct HotkeyBinds {
-    focus_next: u32,
-    focus_prev: u32,
-    shrink_master: u32,
-    grow_master: u32,
-    promote_master: u32,
-    toggle_tiling: u32,
-    toggle_float: u32,
-    close_window: u32,
-    // Scrolling layout (R, C, [, ]); no-ops on other layouts.
-    cycle_width: u32,
-    center_column: u32,
-    consume_left: u32,
-    consume_right: u32,
-}
-static HOTKEYS: Mutex<HotkeyBinds> = Mutex::new(HotkeyBinds {
-    focus_next: 0x4A,
-    focus_prev: 0x4B,
-    shrink_master: 0x48,
-    grow_master: 0x4C,
-    promote_master: 0x4D,
-    toggle_tiling: 0x54,
-    toggle_float: 0x46,
-    close_window: 0x57,
-    cycle_width: 0x52,
-    center_column: 0x43,
-    consume_left: 0xDB,
-    consume_right: 0xDD,
-});
-
-#[derive(Clone, Copy)]
-struct ExtraBind {
-    vk: u32,
-    shift: bool,
-    ctrl: bool,
-    index: usize,
-}
-static EXTRA_HOTKEYS: Mutex<Vec<ExtraBind>> = Mutex::new(Vec::new());
-
-fn chord_vk(name: &str) -> Option<u32> {
-    config::key_to_vk(name).or_else(|| match name.trim().to_ascii_uppercase().as_str() {
-        "SPACE" => Some(0x20),
-        "TAB" => Some(0x09),
-        "ENTER" | "RETURN" => Some(0x0D),
-        "BACKSPACE" | "BACK" => Some(0x08),
-        "GRAVE" | "BACKTICK" | "OEM_3" => Some(0xC0),
-        "MINUS" | "OEM_MINUS" => Some(0xBD),
-        "EQUAL" | "OEM_PLUS" => Some(0xBB),
-        _ => None,
-    })
-}
-
-fn compile_extra_hotkeys(cfg: &Config) -> Vec<ExtraBind> {
-    cfg.extra_hotkeys
-        .iter()
-        .enumerate()
-        .filter_map(|(index, def)| {
-            if def.action == "scratchpad" && !cfg.scratchpad_enabled {
-                return None;
-            }
-            let parts: Vec<&str> = def.chord.split('+').collect();
-            let has_alt = parts.iter().any(|p| p.eq_ignore_ascii_case("ALT"));
-            let key = parts.iter().rev().find_map(|p| chord_vk(p))?;
-            has_alt.then_some(ExtraBind {
-                vk: key,
-                shift: parts.iter().any(|p| p.eq_ignore_ascii_case("SHIFT")),
-                ctrl: parts.iter().any(|p| p.eq_ignore_ascii_case("CTRL")),
-                index,
-            })
-        })
-        .collect()
-}
-
 fn apply_hook_config(cfg: &Config) {
     // Every startup and every reload comes through here, so this is the one
     // place the log level has to be applied.
@@ -2433,32 +2753,23 @@ fn apply_hook_config(cfg: &Config) {
     *IGNORE_CLASSES.lock().unwrap() = cfg.ignore_classes.clone();
     *FLOAT_CLASSES.lock().unwrap() = cfg.float_classes.clone();
     *WINDOW_RULES.lock().unwrap() = cfg.window_rules.clone();
-    *WORKSPACE_KEYS.lock().unwrap() = cfg.workspace_keys.clone();
-    *EXTRA_HOTKEYS.lock().unwrap() = compile_extra_hotkeys(cfg);
-    let mut hk = HOTKEYS.lock().unwrap();
-    hk.focus_next = cfg.key_focus_next;
-    hk.focus_prev = cfg.key_focus_prev;
-    hk.shrink_master = cfg.key_shrink_master;
-    hk.grow_master = cfg.key_grow_master;
-    hk.promote_master = cfg.key_promote_master;
-    hk.toggle_tiling = cfg.key_toggle_tiling;
-    hk.toggle_float = cfg.key_toggle_float;
-    hk.close_window = cfg.key_close_window;
-    hk.cycle_width = cfg.key_cycle_width;
-    hk.center_column = cfg.key_center_column;
-    hk.consume_left = cfg.key_consume_left;
-    hk.consume_right = cfg.key_consume_right;
-    drop(hk);
-    // A built-in bind wins over a workspace key (resolve_hotkey), leaving that
-    // workspace without one: say so rather than swallow the key silently.
-    for (i, &k) in cfg.workspace_keys.iter().enumerate() {
-        if map_hotkey(k, false).is_some() {
-            log_error!(
-                "workspace_keys: key 0x{k:02X} of workspace {} is a built-in Astur bind; that workspace has no key",
-                i + 1
-            );
+    // Hotkeys: a shortcut that does nothing or costs something is a setting
+    // the user believes is in effect, so errors and warnings log at ERROR
+    // (the default level); a replaced Windows shortcut is only INFO.
+    let keys = config::compile_keys(cfg);
+    for i in &keys.issues {
+        let what = i.action.label();
+        if i.level == config::Level::Info {
+            log_info!("hotkey {} ({what}): {}", i.chord, i.text);
+        } else {
+            log_error!("hotkey {} ({what}): {}", i.chord, i.text);
         }
     }
+    if cfg.alt_tab_replacement && cfg.main_key != config::MainKey::LAlt {
+        // Its Tab path needs the reserved Left Alt (keyboard_proc).
+        log_error!("alt_tab_replacement works only with main_key = lalt; Windows' Alt+Tab runs");
+    }
+    publish_binds(cfg.main_key, &keys.binds);
 }
 
 // ---- status bar (one per monitor) ----
@@ -2479,6 +2790,8 @@ static BAR_FONT_SIZE: AtomicIsize = AtomicIsize::new(0); // 0 = auto from height
 static BAR_CELL: AtomicIsize = AtomicIsize::new(34);
 // Font family name, read on the main thread when (re)building the font.
 static BAR_FONT_NAME: Mutex<String> = Mutex::new(String::new());
+// navbar `font_weight` (bar and tab-bar fonts), read when building a font.
+static BAR_FONT_WEIGHT: AtomicIsize = AtomicIsize::new(600);
 // Horizontal padding from each screen edge (px), read at paint time.
 static BAR_PADDING: AtomicIsize = AtomicIsize::new(8);
 // Live system stats (percent 0..100, or -1 = unavailable), filled by stats_worker
@@ -2488,6 +2801,11 @@ static STATS_ON: AtomicBool = AtomicBool::new(false);
 static STAT_CPU: AtomicIsize = AtomicIsize::new(-1);
 static STAT_MEM: AtomicIsize = AtomicIsize::new(-1);
 static STAT_BAT: AtomicIsize = AtomicIsize::new(-1);
+// On mains power (ACLineStatus = 1): the battery glyph shows charging and a
+// low level is not an alert.
+static STAT_BAT_AC: AtomicBool = AtomicBool::new(false);
+// An up 802.11 interface exists: the net glyph is wifi, else ethernet.
+static STAT_NET_WIFI: AtomicBool = AtomicBool::new(false);
 // Network rates in bytes/s (-1 = unavailable) and speaker volume (0..100 / -1),
 // polled by stats_worker; volume also updates instantly on a bar wheel/click.
 static NET_ON: AtomicBool = AtomicBool::new(false);
@@ -2498,6 +2816,27 @@ static STAT_VOL: AtomicIsize = AtomicIsize::new(-1);
 static STAT_MUTE: AtomicBool = AtomicBool::new(false);
 static MEDIA_TEXT: Mutex<String> = Mutex::new(String::new());
 static MEDIA_ON: AtomicBool = AtomicBool::new(false);
+// The disk and custom widgets' values, filled by slow_worker (its own thread:
+// a dead network share can block GetDiskFreeSpaceExW and a command can run
+// for seconds, neither of which may stall the stats worker's volume
+// changes). u64::MAX = unknown: the disk widget hides.
+static DISK_ON: AtomicBool = AtomicBool::new(false);
+static DISK_ROOT: Mutex<String> = Mutex::new(String::new());
+static STAT_DISK_FREE: AtomicU64 = AtomicU64::new(u64::MAX);
+static STAT_DISK_TOTAL: AtomicU64 = AtomicU64::new(u64::MAX);
+static CUSTOM_ON: AtomicBool = AtomicBool::new(false);
+static CUSTOM_CMD: Mutex<String> = Mutex::new(String::new());
+static CUSTOM_EVERY: AtomicU32 = AtomicU32::new(10); // seconds
+static CUSTOM_TEXT: Mutex<String> = Mutex::new(String::new());
+/// apply_bar_statics wakes slow_worker: a changed drive or command runs now.
+static SLOW_WAKE: LazyLock<(Mutex<bool>, Condvar)> =
+    LazyLock::new(|| (Mutex::new(false), Condvar::new()));
+/// `monitors` as config::bar_monitor_mask: which screens get a bar
+/// (ensure_bars_inner; reserve_bar reads the same mask from the config).
+static BAR_MON_MASK: AtomicU64 = AtomicU64::new(!config::BAR_PRIMARY_ONLY);
+/// The clock format shows seconds: the clock tick lands just after each
+/// second instead of every 1000 ms from whenever the bar was made.
+static BAR_SECONDS: AtomicBool = AtomicBool::new(false);
 
 // ---- bar v2 style/behaviour (ensure_bars + the mouse hook read these) ----
 static BAR_FLOATING: AtomicBool = AtomicBool::new(false);
@@ -2552,16 +2891,39 @@ fn barhit_publish(hwnd: isize, r: Option<RECT>) {
     }
 }
 
-/// Per-bar paint layout published for same-thread mouse hit-testing (pill /
-/// app-button / volume-widget ranges move with the configurable zones).
+/// Per-bar paint layout published for same-thread mouse hit-testing (mark /
+/// app-button / widget ranges move with the configurable zones). Built by
+/// `bar_hits` from the same layout paint draws.
 #[derive(Default, Clone)]
 struct BarLayout {
-    pills_x0: i32,
-    cell: i32,
-    npills: usize,
+    pills: Vec<(i32, i32)>,       // each workspace mark's x-range
     apps: Vec<(i32, i32, isize)>, // (x0, x1, hwnd)
     vol: (i32, i32),              // volume widget x-range (0,0 = not shown)
+    hits: Vec<BarHit>,            // widgets with a click action
+    hover: bool,                  // `hover` was on for this layout
+    pill_under: u32,              // the colour under the marks / app buttons,
+    app_under: u32,               // which a hover highlight tints
 }
+
+/// One clickable widget (or music button) on a bar: its x-range, the range
+/// its hover highlight covers, which widget (BarWidget as u8) and button
+/// (`sub`, the music buttons 0..3), its [left, right, middle] actions
+/// (BAR_ACTIONS indices) and the colour under it.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct BarHit {
+    x0: i32,
+    x1: i32,
+    vis: (i32, i32),
+    wgt: u8,
+    sub: u8,
+    acts: [u8; 3],
+    under: u32,
+}
+/// BAR_HOVER_ID with nothing under the pointer.
+const NO_HOVER: i64 = i64::MIN;
+/// The hover target's key (`hover_target`) on the bar in BAR_HOVER_HWND.
+/// Main thread only (bar_wndproc): a move repaints only when it changes.
+static BAR_HOVER_ID: AtomicI64 = AtomicI64::new(NO_HOVER);
 static BAR_LAYOUTS: Mutex<Option<HashMap<isize, BarLayout>>> = Mutex::new(None);
 static BAR_HOVER_HWND: AtomicIsize = AtomicIsize::new(0);
 static BAR_HOVER_APP: AtomicIsize = AtomicIsize::new(0);
@@ -2809,10 +3171,22 @@ struct MonBar {
     title: String,
     apps: Vec<BarApp>,
     layout: String, // this monitor's own layout (layouts are per monitor)
+    /// `workspace_apps`: per mark, up to 3 cached app icons (WS_ICON_PX;
+    /// 0 / -1 = placeholder) of that workspace's windows. Empty when off.
+    ws_icons: Vec<Vec<isize>>,
 }
 
+/// Logical size of a workspace mark's app icons (`workspace_apps`): small
+/// enough for a 24 px bar, and one more size in BAR_ICON_CACHE.
+const WS_ICON_PX: i32 = 16;
+
+/// `MonBar::occupied` holds one bit per pill, and a monitor never has more
+/// pills than `workspaces`: a cap past 64 needs a wider mask.
+const _: () = assert!(config::MAX_WORKSPACES <= u64::BITS as usize);
+
 /// One bar widget slot; the navbar zone lists resolve to these at update time.
-#[derive(Clone, Copy, PartialEq)]
+/// In `config::BAR_WIDGETS` order, so `w as usize` indexes both (tested).
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum BarWidget {
     Workspaces,
     Apps,
@@ -2828,10 +3202,18 @@ enum BarWidget {
     Media,
     Separator,
     Spacer,
+    Keyboard,
+    Disk,
+    Uptime,
+    Custom,
+    MediaControls,
+    Logo,
 }
+const WIDGETS_N: usize = BarWidget::Logo as usize + 1;
 
 /// Resolve one configured zone: widget names -> widgets, honouring the show_*
-/// toggles (a widget must be listed AND enabled to draw).
+/// toggles (a widget must be listed AND enabled to draw). The widgets from
+/// keyboard on have no toggle: listed is shown.
 fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
     names
         .iter()
@@ -2850,6 +3232,12 @@ fn zone_widgets(names: &[String], cfg: &Config) -> Vec<BarWidget> {
             "media" if cfg.bar_show_media => Some(BarWidget::Media),
             "separator" => Some(BarWidget::Separator),
             "spacer" => Some(BarWidget::Spacer),
+            "keyboard" => Some(BarWidget::Keyboard),
+            "disk" => Some(BarWidget::Disk),
+            "uptime" => Some(BarWidget::Uptime),
+            "custom" => Some(BarWidget::Custom),
+            "media_controls" => Some(BarWidget::MediaControls),
+            "logo" => Some(BarWidget::Logo),
             _ => None,
         })
         .collect()
@@ -2867,17 +3255,169 @@ fn themed_bar_colors(cfg: &Config) -> (u32, u32, u32, u32) {
 
 /// `themed_bar_colors` for an explicit theme.
 fn bar_colors(cfg: &Config, light: bool) -> (u32, u32, u32, u32) {
-    let preset = if light {
-        config::BAR_LIGHT
-    } else {
-        config::BAR_DARK
-    };
-    (
-        cfg.bar_bg.unwrap_or(preset[0]),
-        cfg.bar_fg.unwrap_or(preset[1]),
-        cfg.bar_accent.unwrap_or(preset[2]),
-        cfg.bar_inactive.unwrap_or(preset[3]),
+    let r = bar_roles(cfg, light);
+    (r.bg, r.fg, r.accent, r.muted)
+}
+
+/// The Windows accent colour (COLORREF) for `palette = system`; NO_ACCENT
+/// until read or when DWM does not say. apply_theme reads it, at startup and
+/// on every reload, as `theme = auto` reads the light/dark switch: neither
+/// follows a later change in Windows by itself.
+static SYS_ACCENT: AtomicU32 = AtomicU32::new(NO_ACCENT);
+const NO_ACCENT: u32 = u32::MAX;
+
+/// DwmGetColorizationColor as a COLORREF (it answers 0xAARRGGBB; the alpha
+/// is a blend weight for the frame, not part of the colour).
+fn read_sys_accent() -> u32 {
+    let mut argb = 0u32;
+    let mut opaque = BOOL(0);
+    // SAFETY: both out-params point at live locals.
+    match unsafe { DwmGetColorizationColor(&mut argb, &mut opaque) } {
+        Ok(()) => ((argb & 0xFF) << 16) | (argb & 0xFF00) | ((argb >> 16) & 0xFF),
+        Err(_) => NO_ACCENT,
+    }
+}
+
+/// Every bar colour for `cfg` at a theme: the palette's roles under the
+/// pinned keys (astur-config), then the Windows accent for `palette = system`.
+fn bar_roles(cfg: &Config, light: bool) -> config::BarRoles {
+    system_roles(
+        cfg,
+        cfg.bar_roles(light),
+        SYS_ACCENT.load(Ordering::Relaxed),
     )
+}
+
+/// `palette = system` with the Windows accent `sys` known: it replaces the
+/// palette's accent unless `accent` is pinned, and the text on it is black
+/// or white by its luminance unless `accent_fg` is pinned. Pure.
+fn system_roles(cfg: &Config, mut r: config::BarRoles, sys: u32) -> config::BarRoles {
+    if cfg.bar_palette != "system" || sys == NO_ACCENT {
+        return r;
+    }
+    if cfg.bar_accent.is_none() {
+        r.accent = sys;
+    }
+    if cfg.bar_accent_fg.is_none() {
+        r.accent_fg = config::text_on(r.accent);
+    }
+    r
+}
+
+/// How the active workspace is marked (navbar `workspace_style`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum WsStyle {
+    Box,
+    Pill,
+    Underline,
+    Dot,
+}
+
+/// navbar `shape` (through `effective_bar_shape`, so `floating` still works).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum BarShape {
+    Strip,
+    Floating,
+    Islands,
+    Pills,
+}
+
+/// The look paint needs beyond the four classic colours, resolved once per
+/// snapshot so paint parses nothing. Sizes are logical px.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct BarStyle {
+    surface: u32,
+    accent_fg: u32,
+    border: u32,
+    alert: u32, // low battery: the palette's red swatch
+    border_w: i32,
+    radius: i32,
+    island_pad: i32,
+    ws: WsStyle,
+    shape: BarShape,
+    /// Each widget's own pill colour (`widget_colors`, pills shape only),
+    /// indexed by BarWidget: None = the surface.
+    fills: [Option<u32>; WIDGETS_N],
+    /// A pinned `accent_fg`: the text on every coloured pill. None = black
+    /// or white per fill (`config::text_on`), because one auto colour per
+    /// theme was unreadable on some fills (Nord light yellow: 1.4:1).
+    pill_fg: Option<u32>,
+    sep: SepStyle,
+    /// `hover`: a soft highlight behind the clickable item under the pointer.
+    hover: bool,
+    title_bold: bool,
+    /// Each widget's click actions [left, right, middle] as indices into
+    /// config::BAR_ACTIONS (0 = none), resolved once per snapshot so the
+    /// bar's mouse handling compares bytes and never parses on the main
+    /// thread. The manager resolves the action's argument itself.
+    clicks: [[u8; 3]; WIDGETS_N],
+}
+
+/// navbar `separator_style`.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SepStyle {
+    Line,
+    Dot,
+    Powerline,
+}
+
+/// The BAR_ACTIONS index of action `name` (0 = none for an unknown one).
+fn action_index(name: &str) -> u8 {
+    config::BAR_ACTIONS
+        .iter()
+        .position(|a| a.0 == name)
+        .unwrap_or(0) as u8
+}
+
+fn bar_style(cfg: &Config, r: &config::BarRoles) -> BarStyle {
+    let mut clicks = [[0u8; 3]; WIDGETS_N];
+    for (i, name) in config::BAR_WIDGETS.iter().enumerate().take(WIDGETS_N) {
+        for (b, slot) in clicks[i].iter_mut().enumerate() {
+            *slot = action_index(cfg.bar_click(name, b).0);
+        }
+    }
+    let mut fills = [None; WIDGETS_N];
+    for (name, _) in &cfg.bar_widget_colors {
+        // zone_widgets is the name -> widget map; a widget it drops is
+        // switched off, never drawn, so it needs no colour.
+        match zone_widgets(std::slice::from_ref(name), cfg).first() {
+            Some(&w) if cfg.effective_bar_shape() == "pills" => {
+                fills[w as usize] = cfg.bar_widget_fill(name, r)
+            }
+            _ => {}
+        }
+    }
+    BarStyle {
+        surface: r.surface,
+        accent_fg: r.accent_fg,
+        border: cfg.bar_border.unwrap_or(r.muted),
+        alert: r.swatches[0],
+        fills,
+        pill_fg: cfg.bar_accent_fg,
+        border_w: cfg.bar_border_width,
+        radius: cfg.bar_radius,
+        island_pad: cfg.bar_island_padding,
+        ws: match cfg.bar_workspace_style.as_str() {
+            "pill" => WsStyle::Pill,
+            "underline" => WsStyle::Underline,
+            "dot" => WsStyle::Dot,
+            _ => WsStyle::Box,
+        },
+        shape: match cfg.effective_bar_shape() {
+            "floating" => BarShape::Floating,
+            "islands" => BarShape::Islands,
+            "pills" => BarShape::Pills,
+            _ => BarShape::Strip,
+        },
+        sep: match cfg.bar_separator_style.as_str() {
+            "dot" => SepStyle::Dot,
+            "powerline" => SepStyle::Powerline,
+            _ => SepStyle::Line,
+        },
+        hover: cfg.bar_hover,
+        title_bold: cfg.bar_title_bold,
+        clicks,
+    }
 }
 
 /// Everything the bars paint. Replaced wholesale by the manager each update.
@@ -2887,6 +3427,7 @@ struct BarData {
     fg: u32,
     accent: u32,
     inactive: u32,
+    style: BarStyle,
     clock_24h: bool,
     date_format: String,
     clock_format: String,
@@ -2903,6 +3444,17 @@ struct BarData {
     icon_battery: String,
     icon_net: String,
     icon_volume: String,
+    keyboard_format: String,
+    disk_format: String,
+    icon_disk: String,
+    uptime_format: String,
+    custom_format: String,
+    /// Paint selects the icon font: a glyph icon mode, or the music buttons
+    /// (always glyphs) are listed. Otherwise no face check, no extra font.
+    icon_font: bool,
+    /// Workspace marks fit their labels (`mark_widths`): `workspace_label`
+    /// is not auto, or `workspace_apps` is on.
+    ws_fit: bool,
     tiling: bool,
     left: Vec<BarWidget>,
     center: Vec<BarWidget>,
@@ -2917,6 +3469,10 @@ impl BarData {
             fg: 0x00F5CAC0,
             accent: 0x00FFAA66,
             inactive: 0x00895F56,
+            style: {
+                let cfg = Config::defaults();
+                bar_style(&cfg, &cfg.bar_roles(false))
+            },
             clock_24h: true,
             date_format: String::new(),
             clock_format: "HH:mm".to_string(),
@@ -2933,6 +3489,13 @@ impl BarData {
             icon_battery: String::new(),
             icon_net: String::new(),
             icon_volume: String::new(),
+            keyboard_format: String::new(),
+            disk_format: String::new(),
+            icon_disk: String::new(),
+            uptime_format: String::new(),
+            custom_format: String::new(),
+            icon_font: false,
+            ws_fit: false,
             tiling: true,
             left: Vec::new(),
             center: Vec::new(),
@@ -2990,6 +3553,9 @@ const BAR_TIMER_ID: usize = 1;
 static HOOK_TICK: AtomicU64 = AtomicU64::new(0);
 static MOUSE_HOOK_H: AtomicIsize = AtomicIsize::new(0);
 static KBD_HOOK_H: AtomicIsize = AtomicIsize::new(0);
+/// The thread that installed them (the main thread), the only one
+/// unhook_input removes them from. 0 until install_hooks.
+static HOOK_THREAD: AtomicU32 = AtomicU32::new(0);
 /// How many times the watchdog has had to put the hooks back. Nonzero here is
 /// the single most useful number in a bug report.
 static HOOK_REARMS: AtomicU32 = AtomicU32::new(0);
@@ -3014,15 +3580,33 @@ fn hook_alive_stamp() {
     HOOK_TICK.store(unsafe { GetTickCount64() }, Ordering::Relaxed);
 }
 
+/// Remove both low-level hooks, at most once (the handles are swapped out),
+/// and only on the thread that installed them; anywhere else a no-op. Every
+/// exit restore calls it first: on that thread the MGR_BUSY wait sleeps up
+/// to 500 ms and the rescue-file removal waits on a lock and the disk, and
+/// neither runs hook callbacks, so every input event on the desktop would
+/// wait LowLevelHooksTimeout. (Its waits on apps are cross-thread sends,
+/// which do run them: SendMessage remarks.) Off that thread (Ctrl+C handler,
+/// Restart Astur, a worker's panic) the hook thread still pumps, and
+/// UnhookWindowsHookEx documents no cross-thread use (UnhookWinEvent
+/// forbids it), so nothing here relies on one.
+unsafe fn unhook_input() {
+    if GetCurrentThreadId() != HOOK_THREAD.load(Ordering::Relaxed) {
+        return;
+    }
+    for slot in [&MOUSE_HOOK_H, &KBD_HOOK_H] {
+        let h = slot.swap(0, Ordering::Relaxed);
+        if h != 0 {
+            let _ = UnhookWindowsHookEx(HHOOK(h as *mut c_void));
+        }
+    }
+}
+
 /// Install both low-level hooks, replacing any existing ones. Must run on the
 /// thread that pumps messages for them (the main thread).
 unsafe fn install_hooks(hinst: HINSTANCE) -> bool {
-    for slot in [&MOUSE_HOOK_H, &KBD_HOOK_H] {
-        let old = slot.swap(0, Ordering::Relaxed);
-        if old != 0 {
-            let _ = UnhookWindowsHookEx(HHOOK(old as *mut c_void));
-        }
-    }
+    HOOK_THREAD.store(GetCurrentThreadId(), Ordering::Relaxed);
+    unhook_input();
     let mouse = SetWindowsHookExW(WH_MOUSE_LL, Some(mouse_proc), hinst, 0);
     let kbd = SetWindowsHookExW(WH_KEYBOARD_LL, Some(keyboard_proc), hinst, 0);
     match (mouse, kbd) {
@@ -4411,6 +4995,15 @@ unsafe fn match_window_rule(hwnd: HWND) -> Option<RulePlacement> {
 /// Shell/system window classes that must never be tiled. Tooltips, the lock
 /// screen, the task-view/alt-tab surfaces, and various invisible UWP host and
 /// IME windows all show up as top-level windows and would otherwise be grabbed.
+/// Never an app framework's class: this runs before ignore_classes and
+/// window_rules, so no user rule can undo a wrong entry, and it also takes a
+/// window out of fullscreen (bar auto-hide) detection. #13:
+/// `WinUIDesktopWin32WindowClass`, the main window of every WinUI 3 app, sat
+/// here and left WhatsApp, Photos and PowerToys Settings unmanaged. WinUI
+/// transients that are tool windows or owned (Command Palette, Quick Access)
+/// stay out through the style and owner checks; ones that are neither
+/// (PowerToys Advanced Paste, Peek) tile while shown: ignore them by exe in
+/// window_rules, never by re-blocking this class.
 const BLOCK_CLASSES: &[&str] = &[
     "Shell_TrayWnd",
     "Shell_SecondaryTrayWnd",
@@ -4426,7 +5019,6 @@ const BLOCK_CLASSES: &[&str] = &[
     "tooltips_class32",        // generic Win32 tooltips
     "LockScreenBackstopFrame", // lock screen
     "LockApp",
-    "WinUIDesktopWin32WindowClass", // some transient WinUI shells
     "EdgeUiInputTopWndClass",
     "Windows.UI.Input.InputSite.WindowClass",
     "IME",
@@ -4532,6 +5124,11 @@ unsafe fn is_manageable(hwnd: HWND) -> bool {
 unsafe fn manage_reject(hwnd: HWND) -> Option<&'static str> {
     if let Some(why) = app_window_reject(hwnd) {
         return Some(why);
+    }
+    // After the cheap checks, so only a would-be tile pays the OpenProcess
+    // and token read. Startup adoption (enum_proc) runs this same chain.
+    if integrity_above_own(hwnd) {
+        return Some("elevated");
     }
     let class = window_class(hwnd);
     if IGNORE_CLASSES
@@ -4649,6 +5246,7 @@ unsafe fn request_bar_mode_refresh() {
 
 /// Should a freshly-managed window start floating? Rich rules take precedence
 /// over legacy class-only lists, so a tile rule can override a broad float list.
+/// Then the built-in floats (`floats_by_default`).
 unsafe fn should_float(hwnd: HWND, rule: Option<RulePlacement>) -> bool {
     if let Some(rule) = rule {
         return rule.action == RuleAction::Float;
@@ -4659,6 +5257,17 @@ unsafe fn should_float(hwnd: HWND, rule: Option<RulePlacement>) -> bool {
         .unwrap()
         .iter()
         .any(|c| c.eq_ignore_ascii_case(&class))
+        || window_exe(hwnd).is_some_and(|exe| floats_by_default(&exe))
+}
+
+/// Apps that float unless a window rule says otherwise. Astur's own
+/// settings window: tiled, every gap or bar edit it applies live re-tiles
+/// it under the cursor.
+fn floats_by_default(exe_path: &str) -> bool {
+    std::path::Path::new(exe_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n.eq_ignore_ascii_case("astur-settings.exe"))
 }
 
 /// Compute the visible-frame correction: Win32 GetWindowRect includes an
@@ -4859,18 +5468,25 @@ fn distribute_workspaces(
 /// area, leaving room for the status bar so tiled windows never sit under it.
 /// Idempotent — safe to call again on config reload.
 unsafe fn reserve_bar(monitors: &mut [Monitor], cfg: &Config) {
-    for m in monitors.iter_mut() {
+    let primary = primary_index(monitors);
+    let mask = cfg.bar_monitor_mask();
+    for (index, m) in monitors.iter_mut().enumerate() {
         m.work_area = m.base_work;
         // Auto-hide bars reserve nothing (they overlay on reveal). A floating
         // bar reserves its height plus the margin on both sides so tiles clear
-        // the detached pill.
-        if cfg.bar_enabled && cfg.bar_height > 0 && !cfg.bar_autohide {
+        // the detached pill. A screen `monitors` leaves out has no bar: the
+        // same bar_on as ensure_bars_inner, or its tiles would sit offset.
+        if cfg.bar_enabled
+            && cfg.bar_height > 0
+            && !cfg.bar_autohide
+            && config::bar_on(mask, index, index == primary)
+        {
             // Physical px on THIS monitor. Must match what ensure_bars actually
             // places, or every tile on a scaled screen is offset by the
             // difference — hence the shared helper.
             let reserved = bar_reserved_px(
                 cfg.bar_height,
-                cfg.bar_floating,
+                cfg.effective_bar_shape() == "floating",
                 cfg.bar_margin,
                 monitor_dpi(m.hmon),
             );
@@ -4967,13 +5583,68 @@ fn launch(cmd: &str) {
 fn launch_now(cmd: &str) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let is_path = std::path::Path::new(&expand_env(cmd, |n| std::env::var(n).ok())).exists();
     if let Err(e) = std::process::Command::new("cmd")
-        .args(["/C", "start", "", cmd])
+        .arg("/C")
+        .raw_arg(start_line(cmd, is_path))
         .creation_flags(CREATE_NO_WINDOW)
         .spawn()
     {
         log_error!("launch failed ({cmd}): {e}");
     }
+}
+
+/// What `launch_now` hands cmd.exe after `/C`, verbatim (`raw_arg`), so a
+/// command takes arguments as it does typed into cmd: `wt -p Ubuntu`,
+/// `explorer.exe "C:\Tools\rio.exe"`. std's own quoting wrapped any command
+/// with a space in quotes and escaped inner quotes as `\"`, which cmd does not
+/// read, so `start` took the whole text for one program name and nothing with
+/// arguments launched (#16). `""` is `start`'s window title, so a quoted
+/// program is not taken for one. `is_path` (the whole text, `%VAR%`s
+/// expanded, names an existing file or folder) keeps a bare path with spaces
+/// working as it did: quoted whole. cmd characters (& | < > ^ %) are live, as
+/// in a shell: callers pass config text, opt-in IPC text or a constant, and
+/// the launcher's typed web query is URL-encoded before it can get here.
+/// ponytail: `is_path` knows only real paths, not PATH/PATHEXT names or
+/// `shell:`/URI targets, so such a target with spaces, unquoted, runs split;
+/// quote it.
+fn start_line(cmd: &str, is_path: bool) -> String {
+    if is_path {
+        format!("start \"\" \"{cmd}\"")
+    } else {
+        format!("start \"\" {cmd}")
+    }
+}
+
+/// `text` with each `%NAME%` replaced by `var(NAME)`, as cmd expands a
+/// command line (an unset or invalid name stays as written), so `launch_now`
+/// probes the path cmd will run: `%ProgramFiles%\Mozilla Firefox\firefox.exe`
+/// launched unquoted before #16 and must keep doing so. Empty names and names
+/// with `=` never reach `var`, which may panic on them (and panic = abort).
+fn expand_env(text: &str, var: impl Fn(&str) -> Option<String>) -> String {
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(i) = rest.find('%') {
+        let after = &rest[i + 1..];
+        let Some(j) = after.find('%') else { break };
+        let name = &after[..j];
+        let value = (!name.is_empty() && !name.contains(['=', '\0']))
+            .then(|| var(name))
+            .flatten();
+        match value {
+            Some(v) => {
+                out.push_str(&rest[..i]);
+                out.push_str(&v);
+                rest = &after[j + 1..];
+            }
+            None => {
+                out.push_str(&rest[..=i]);
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 fn queue_wallpaper(path: &str) {
@@ -5214,6 +5885,85 @@ unsafe fn token_elevated(process: HANDLE) -> Option<bool> {
     ok.then_some(elevation.TokenIsElevated != 0)
 }
 
+/// Integrity level of `process`'s token as its mandatory-label RID (0x1000
+/// low, 0x2000 medium, 0x3000 high, 0x4000 system). None if it can't be read.
+unsafe fn token_integrity(process: HANDLE) -> Option<u32> {
+    use windows::Win32::Security::{
+        GetSidSubAuthority, GetSidSubAuthorityCount, TokenIntegrityLevel, TOKEN_MANDATORY_LABEL,
+    };
+    let mut token = HANDLE::default();
+    if OpenProcessToken(process, TOKEN_QUERY, &mut token).is_err() {
+        return None;
+    }
+    // A TOKEN_MANDATORY_LABEL, then the label SID it points at (S-1-16-<rid>,
+    // one sub-authority): 28 bytes on x64. u64s keep the pointer aligned.
+    let mut buf = [0u64; 8];
+    let mut len = 0u32;
+    let ok = GetTokenInformation(
+        token,
+        TokenIntegrityLevel,
+        Some(buf.as_mut_ptr() as *mut c_void),
+        core::mem::size_of_val(&buf) as u32,
+        &mut len,
+    )
+    .is_ok();
+    let _ = CloseHandle(token);
+    if !ok {
+        return None;
+    }
+    let sid = (*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL)).Label.Sid;
+    let count = *GetSidSubAuthorityCount(sid);
+    (count > 0).then(|| *GetSidSubAuthority(sid, u32::from(count) - 1))
+}
+
+/// SECURITY_MANDATORY_HIGH_RID, an elevated (admin) token's level. Spelled
+/// out because its windows feature (Win32_System_SystemServices) is off.
+const INTEGRITY_HIGH: u32 = 0x3000;
+
+/// UIPI's rule: we cannot move, show or hide a window whose process runs at
+/// a higher integrity level than ours. `theirs` None = the process or its
+/// token would not open: another account's process or a protected one.
+/// Below high that is a SYSTEM tool or an over-the-shoulder admin shell, out
+/// of reach (foreground_elevated reads it the same way). At high it is mostly
+/// a standard user's window seen from an admin account's Astur: their DACL
+/// grants only that user, SYSTEM and the logon session (measured), yet UIPI
+/// lets us drive it, and refusing would leave every window untiled.
+/// `own` u32::MAX (our own level unreadable) turns the check off.
+fn integrity_out_of_reach(theirs: Option<u32>, own: u32) -> bool {
+    match theirs {
+        Some(level) => level > own,
+        None => own < INTEGRITY_HIGH,
+    }
+}
+
+/// Would adopting this window leave a dead tile? An unelevated Astur cannot
+/// place or hide an admin terminal (or Task Manager on an admin account), so
+/// its tile stays empty and the window shows on every workspace. Adoption
+/// only (manage_reject): fullscreen detection still counts an elevated game.
+/// Integrity, not TokenElevation: UIPI compares levels, some unelevated
+/// processes run at high (measured: ctfmon, TabTip), and an admin Astur still
+/// cannot drive SYSTEM windows.
+unsafe fn integrity_above_own(hwnd: HWND) -> bool {
+    // A process's level never changes: read ours once.
+    static OWN: OnceLock<u32> = OnceLock::new();
+    let own = *OWN.get_or_init(|| token_integrity(GetCurrentProcess()).unwrap_or(u32::MAX));
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    // A dead window: nothing to reach, and OpenProcess(0) fails, which would
+    // read as out of reach (a spurious main_reset or pending-launch clear).
+    if pid == 0 {
+        return false;
+    }
+    let theirs = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+        .ok()
+        .and_then(|process| {
+            let level = token_integrity(process);
+            let _ = CloseHandle(process);
+            level
+        });
+    integrity_out_of_reach(theirs, own)
+}
+
 /// A security descriptor granting full access to the current user's SID and
 /// nobody else, for the IPC pipe. Leaked deliberately: it lives for the process
 /// lifetime and is handed to CreateNamedPipeW on every accept loop iteration.
@@ -5428,12 +6178,6 @@ fn ipc_worker() {
         }
     }
 }
-/// Reveal every tracked window (so nothing is left hidden on another workspace)
-/// and undo Astur's styling — but leave every window exactly where it is, so
-/// quitting doesn't disturb the current layout.
-/// Reveal + un-style a specific list of window handles. Takes the list by ref so
-/// callers control how they acquire it (the panic path must not re-lock a mutex
-/// it may already hold — see `restore_on_panic`).
 /// Undo Astur's per-window styling: full opacity, default border, and — the bit
 /// that used to be missed — REMOVE the `WS_EX_LAYERED` bit we added.
 ///
@@ -5445,11 +6189,24 @@ unsafe fn unstyle_window(hwnd: HWND) {
     if !IsWindow(hwnd).as_bool() {
         return;
     }
-    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
+    unstyle_visible(hwnd);
+    unlayer_window(hwnd);
+}
+
+/// Drop the `WS_EX_LAYERED` bit, if set. SetWindowLongW sends the window
+/// WM_STYLECHANGING / WM_STYLECHANGED and waits for its app.
+unsafe fn unlayer_window(hwnd: HWND) {
     let ex = GetWindowLongW(hwnd, GWL_EXSTYLE) as u32;
     if ex & WS_EX_LAYERED.0 != 0 {
         SetWindowLongW(hwnd, GWL_EXSTYLE, (ex & !WS_EX_LAYERED.0) as i32);
     }
+}
+
+/// The part of `unstyle_window` the user can see: full opacity and the
+/// default border. The exit restore runs it for every window before any
+/// SetWindowLongW, which waits on the app (#19).
+unsafe fn unstyle_visible(hwnd: HWND) {
+    let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA);
     let def: u32 = 0xFFFFFFFF; // DWMWA_COLOR_DEFAULT
     let _ = DwmSetWindowAttribute(
         hwnd,
@@ -5472,8 +6229,47 @@ static EXITING: AtomicBool = AtomicBool::new(false);
 /// restore waits for it to finish.
 static MGR_BUSY: AtomicBool = AtomicBool::new(false);
 
+/// How long a graceful exit may take from the start of its restore before
+/// the exit watchdog ends the process. Normal exits finish far inside it;
+/// only a busy or hung app reaches it (reasoned, not measured).
+const EXIT_WATCHDOG: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// End the process EXIT_WATCHDOG from now, whatever the exit still waits on
+/// (#19: one busy or hung app held a quit for good, tray icon gone,
+/// single-instance lock still held). Armed by restore_windows, so by every
+/// exit route, the panic hook included, and never by a cancellable
+/// WM_QUERYENDSESSION, which restores nothing. Ending mid-restore loses no
+/// window: every reveal is posted before anything waits on an app, and
+/// rescue.lst is removed only after the restore, so the next start finishes
+/// what was cut short. TerminateProcess, not exit or abort: no CRT or DLL
+/// teardown to wait on a stuck thread, no fail-fast crash report. Not
+/// spawn_named: it panics if the spawn fails, and this also runs inside the
+/// panic hook; a failed spawn here just means no watchdog.
+fn arm_exit_watchdog() {
+    let _ = std::thread::Builder::new()
+        .name("exit-watchdog".to_string())
+        .spawn(|| {
+            use windows::Win32::System::Threading::TerminateProcess;
+            std::thread::sleep(EXIT_WATCHDOG);
+            if log_on(LOG_ERROR) {
+                log_sync("exit watchdog: exit not done in 2 s (a busy or hung window); ending the process");
+            }
+            // SAFETY: this process's own pseudo-handle.
+            unsafe {
+                let _ = TerminateProcess(GetCurrentProcess(), 1);
+            }
+        });
+}
+
+/// Reveal + un-style a specific list of window handles: every tracked window
+/// on exit, so nothing is left hidden on another workspace, each left where
+/// it is (a parked tile aside) so quitting doesn't disturb the layout. Takes
+/// the list by ref so callers control how they acquire it (the panic path
+/// must not re-lock a mutex it may already hold — see `restore_on_panic`).
+/// Exit paths only: it sets EXITING and arms the exit watchdog.
 unsafe fn restore_windows(list: &[isize]) {
     EXITING.store(true, Ordering::SeqCst);
+    arm_exit_watchdog();
     // The panic path never blocks: it may have fired while this thread held
     // the lock. A graceful exit does wait (briefly; nothing holds it across a
     // window call), or a manager placing at that moment would leave the map
@@ -5486,21 +6282,49 @@ unsafe fn restore_windows(list: &[isize]) {
     .and_then(|g| g.clone())
     .unwrap_or_default();
     SUPPRESS.store(true, Ordering::Relaxed);
+    // Passes, most important first, so a call that waits on an app costs
+    // only what comes after it if the watchdog ends the exit there.
+    // Reveal: ShowWindowAsync posts the show to the window's own queue and
+    // returns; a busy or hung app shows it when it pumps again, after Astur
+    // has exited if need be. ShowWindow waited for the app, so one hung
+    // window held the quit for good and every window after it stayed hidden
+    // (#19). SHOWNA, as switch_plain: SW_SHOW activated every hidden window
+    // it showed (SWITCH-4), one FOREGROUND event each, and the manager
+    // followed the last one to its workspace, hiding the rest again.
+    let mut unposted = Vec::new();
     for &h in list {
         let hwnd = hwnd_from(h);
-        if !IsWindow(hwnd).as_bool() {
-            continue;
+        if IsWindow(hwnd).as_bool() {
+            unmark_hidden_by_us(h);
+            if !ShowWindowAsync(hwnd, SW_SHOWNA).as_bool() {
+                unposted.push(hwnd);
+            }
         }
-        unmark_hidden_by_us(h);
-        // SHOWNA, as switch_plain: SW_SHOW activated every hidden window it
-        // showed (SWITCH-4), one FOREGROUND event each, and the manager
-        // followed the last one to its workspace, hiding the rest again.
+    }
+    // Positions stay, except a parked scrolling tile's: it sits outside
+    // every monitor and comes back onto the nearest one (posted, see
+    // `reveal`: the shows above may not have landed yet).
+    for &h in list {
+        unpark_window(h, sent.get(&h).copied(), true);
+    }
+    // Undo dimming and the border for every window, a hung app's last; then
+    // the layered style, which waits on each app (unlayer_window), so a hung
+    // app's windows keep it. A watchdog cut then costs at most that
+    // invisible bit. Whether SLWA or the DWM border call waits on a hung app
+    // is unmeasured; the watchdog bounds them either way.
+    let (hung, ok): (Vec<isize>, Vec<isize>) = list
+        .iter()
+        .partition(|&&h| IsHungAppWindow(hwnd_from(h)).as_bool());
+    for &h in ok.iter().chain(&hung) {
+        unstyle_visible(hwnd_from(h));
+    }
+    // A reveal that could not be posted waits for its app, after everything
+    // else visible: a watchdog cut here keeps rescue.lst for the next start.
+    for hwnd in unposted {
         let _ = ShowWindow(hwnd, SW_SHOWNA);
-        // Undo dimming, the layered style and the border.
-        unstyle_window(hwnd);
-        // Positions stay, except a parked scrolling tile's: it sits outside
-        // every monitor and comes back onto the nearest one.
-        unpark_window(h, sent.get(&h).copied());
+    }
+    for &h in &ok {
+        unlayer_window(hwnd_from(h));
     }
     SUPPRESS.store(false, Ordering::Relaxed);
 }
@@ -5532,6 +6356,25 @@ unsafe fn nearest_monitor_info(r: &RECT) -> Option<MONITORINFO> {
         .then_some(mi)
 }
 
+/// The showCmd for unpark_window's SetWindowPlacement, which applies it as a
+/// ShowWindow, so it must name the state to keep. SW_SHOWMINNOACTIVE would
+/// SHOW a hidden (inactive workspace, float mode, untracked) window onto the
+/// taskbar; SW_HIDE on a window already hidden is a no-op that keeps its
+/// state. SW_SHOWNA keeps a visible maximised one maximised and inactive.
+/// `reveal` wants it shown whatever `visible` read: the caller's
+/// ShowWindowAsync is posted, so it can land between that read and the
+/// SetWindowPlacement, and SW_HIDE would then hide for good a window the
+/// caller had just shown.
+fn placement_show_cmd(visible: bool, iconic: bool, reveal: bool) -> u32 {
+    if !visible && !reveal {
+        SW_HIDE.0 as u32
+    } else if iconic {
+        SW_SHOWMINNOACTIVE.0 as u32
+    } else {
+        SW_SHOWNA.0 as u32
+    }
+}
+
 /// Bring a window that sits on no monitor (a parked scrolling tile) back
 /// onto the nearest monitor's work area, size kept where it fits. Win32 only,
 /// no Astur lock or state, so every exit path can call it, the panic hook
@@ -5541,8 +6384,11 @@ unsafe fn nearest_monitor_info(r: &RECT) -> Option<MONITORINFO> {
 /// last. A minimised or maximised window keeps its state but gets an on-screen
 /// restore rect, or restoring it later would put it back off screen. True when it
 /// moved the window. Manager-thread callers use unpark_tracked: this move
-/// bypasses set_pos_raw.
-unsafe fn unpark_window(h: isize, sent: Option<RECT>) -> bool {
+/// bypasses set_pos_raw. `reveal`: the caller is showing the window too, with
+/// a posted ShowWindowAsync (the exit restore, the startup rescue); see
+/// placement_show_cmd. A reveal's move or placement is posted as well, so it
+/// never waits on a hung app.
+unsafe fn unpark_window(h: isize, sent: Option<RECT>, reveal: bool) -> bool {
     let hwnd = hwnd_from(h);
     if !IsWindow(hwnd).as_bool() {
         return false;
@@ -5572,17 +6418,15 @@ unsafe fn unpark_window(h: isize, sent: Option<RECT>) -> bool {
         );
         let screen = placement_to_workspace(wp.rcNormalPosition, (-work_off.0, -work_off.1), tool);
         wp.rcNormalPosition = placement_to_workspace(clamp_into(screen, mi.rcWork), work_off, tool);
-        // Only the restore rect changes. SW_SHOWMINNOACTIVE would SHOW a hidden
-        // (inactive workspace, float mode, untracked) window onto the taskbar;
-        // SW_HIDE on a window already hidden is a no-op that keeps its state.
-        // SW_SHOWNA keeps a visible maximised one maximised and inactive.
-        wp.showCmd = if !IsWindowVisible(hwnd).as_bool() {
-            SW_HIDE.0
-        } else if iconic {
-            SW_SHOWMINNOACTIVE.0
-        } else {
-            SW_SHOWNA.0
-        } as u32;
+        // Only the restore rect changes; the show state is kept.
+        wp.showCmd = placement_show_cmd(IsWindowVisible(hwnd).as_bool(), iconic, reveal);
+        // A reveal posts it, like its show: without the flag SetWindowPlacement
+        // waits for the app (WPF_ASYNCWINDOWPLACEMENT remarks), so a hung app
+        // held the exit here. Either order with the posted show ends shown,
+        // since a reveal never picks SW_HIDE.
+        if reveal {
+            wp.flags |= WPF_ASYNCWINDOWPLACEMENT;
+        }
         return SetWindowPlacement(hwnd, &wp).is_ok();
     }
     let mut live = RECT::default();
@@ -5607,7 +6451,10 @@ unsafe fn unpark_window(h: isize, sent: Option<RECT>) -> bool {
         to.bottom - to.top,
         foreign_swp_flags(
             SWP_NOACTIVATE | SWP_NOZORDER,
-            ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+            // A reveal always posts: it must not wait on a hung app, and it
+            // still lands after any earlier move (posted ones queue ahead of
+            // it; synchronous ones have already landed).
+            reveal || ASYNC_WINDOW_POS.load(Ordering::Relaxed),
         ),
     )
     .is_ok()
@@ -5622,7 +6469,7 @@ unsafe fn unpark_tracked(h: isize) -> bool {
         .unwrap()
         .as_ref()
         .and_then(|m| m.get(&h).copied());
-    let moved = unpark_window(h, sent);
+    let moved = unpark_window(h, sent, false);
     if moved {
         last_sent_forget(h);
     }
@@ -5648,6 +6495,9 @@ unsafe fn restore_all_windows() {
     // thread's windows) cannot hold the exit; set_pos_raw and switch_plain
     // refuse once EXITING is set, which covers a command that outlives it.
     EXITING.store(true, Ordering::SeqCst);
+    // Before the wait and the restore, which can stall this thread (see
+    // unhook_input).
+    unhook_input();
     let deadline = Instant::now() + std::time::Duration::from_millis(500);
     while MGR_BUSY.load(Ordering::SeqCst) && Instant::now() < deadline {
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -5671,6 +6521,9 @@ unsafe fn restore_all_windows() {
 /// panic may have fired while this thread already held MANAGED, and std mutexes
 /// are not reentrant, so a blocking lock would deadlock instead of aborting.
 fn restore_on_panic() {
+    // A panic on the hook thread (a hook proc, a main-thread wndproc) runs the
+    // restore there: the same input stall as a graceful exit (unhook_input).
+    unsafe { unhook_input() };
     let list = MANAGED.try_lock().map(|g| g.clone()).unwrap_or_default();
     unsafe { restore_windows(&list) };
 }
@@ -6600,17 +7453,7 @@ unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
         }
     }
     if cfg.border_enabled {
-        let color = COLORREF(if focused {
-            cfg.focused_border
-        } else {
-            cfg.unfocused_border
-        });
-        let _ = DwmSetWindowAttribute(
-            hwnd,
-            DWMWA_BORDER_COLOR,
-            &color as *const _ as *const c_void,
-            core::mem::size_of::<COLORREF>() as u32,
-        );
+        set_border(hwnd, focused, cfg);
     }
 }
 
@@ -6685,8 +7528,9 @@ unsafe fn style_active(mgr: &Manager, mi: usize) {
 /// border + layered-alpha calls, so doing it for every window after every
 /// command was the dominant cost. Focus highlight only changes for at most two
 /// windows (the one losing focus and the one gaining it), so restyle exactly
-/// those. Newly-added windows always become the focused one (see Cmd::Add), so
-/// they get styled here too — nothing is left unstyled.
+/// those. A newly-added window that takes the focus is styled here too; one
+/// adopted quietly on an uncloak (#16a) does not, so Cmd::Add styles it as
+/// unfocused itself — nothing is left unstyled.
 unsafe fn apply_styles(mgr: &Manager) {
     let focused_h = global_focus(mgr);
     let prev = STYLED_FOCUS.swap(focused_h, Ordering::Relaxed);
@@ -6699,6 +7543,112 @@ unsafe fn apply_styles(mgr: &Manager) {
     if focused_h != 0 {
         style_window(hwnd_from(focused_h), true, &mgr.cfg);
     }
+}
+
+/// The DWM border colour alone: style_window's border half, and the whole of
+/// the #19.1 re-assert (reassert_borders), which must not touch the alpha.
+unsafe fn set_border(hwnd: HWND, focused: bool, cfg: &Config) {
+    // Per window, not per pass: a call that outlived the exit wait (a busy
+    // app) must not re-border what restore_windows just reset.
+    if EXITING.load(Ordering::SeqCst) {
+        return;
+    }
+    let color = COLORREF(if focused {
+        cfg.focused_border
+    } else {
+        cfg.unfocused_border
+    });
+    let _ = DwmSetWindowAttribute(
+        hwnd,
+        DWMWA_BORDER_COLOR,
+        &color as *const _ as *const c_void,
+        core::mem::size_of::<COLORREF>() as u32,
+    );
+}
+
+/// When the BorderRecheck passes run, counted from the latest focus change.
+/// The first is meant to land after the app's own write (not measured); the
+/// late one covers an app whose UI thread was busy when it was (de)activated.
+const BORDER_RECHECK: [std::time::Duration; 2] = [
+    std::time::Duration::from_millis(150),
+    std::time::Duration::from_millis(600),
+];
+
+/// #19.1: windows owed their border colour again after a focus change, and
+/// when. The DWM border is not Astur's alone: Electron (>= 36.8 / 37.3 / 38,
+/// PR #47740) writes DWMWA_BORDER_COLOR on every activation AND deactivation
+/// (NativeWindowViews::OnWidgetActivationChanged -> UpdateWindowAccentColor,
+/// Windows 11: the app's colour, the system accent, or DWMWA_COLOR_DEFAULT)
+/// on its own UI thread, so it races the colour style_window set on the flip
+/// and wipes the focused and the unfocused border alike. It also rewrites
+/// every window, focused or not, on a system accent / colour change (a
+/// light-dark switch, an Automatic accent after a wallpaper change, Astur's
+/// own workspace_wallpapers included): not covered here. Chrome shows the
+/// same symptom by a path not verified. A pass a moment later wins that race;
+/// the real fix is a border Astur draws itself (#19.2). A local of
+/// manager_loop: no thread, no Cmd, and nothing owed means the plain wait.
+#[derive(Default)]
+struct BorderRecheck {
+    windows: Vec<isize>,   // activation changed since the last late pass
+    flip: Option<Instant>, // the latest focus change; None = nothing owed
+    passes: usize,         // passes already run since `flip`
+}
+
+impl BorderRecheck {
+    /// A focus change, or a foreground change Astur's focus did not follow:
+    /// `lost` and `gained` (0 = none) are owed a pass. Restarts the passes,
+    /// so a burst of changes is rechecked once, after it settles.
+    fn note(&mut self, now: Instant, lost: isize, gained: isize) {
+        if lost == 0 && gained == 0 {
+            return;
+        }
+        for h in [lost, gained] {
+            if h != 0 && !self.windows.contains(&h) {
+                self.windows.push(h);
+            }
+        }
+        self.flip = Some(now);
+        self.passes = 0;
+    }
+
+    /// How long until the next pass (zero = run it now); None = none owed.
+    fn wait(&self, now: Instant) -> Option<std::time::Duration> {
+        let due = self.flip? + BORDER_RECHECK.get(self.passes).copied()?;
+        Some(due.saturating_duration_since(now))
+    }
+
+    /// A pass ran; after the last one the windows are no longer owed.
+    fn ran(&mut self) {
+        self.passes += 1;
+        if self.passes >= BORDER_RECHECK.len() {
+            *self = Self::default();
+        }
+    }
+}
+
+/// One BorderRecheck pass: the border colour only (the alpha is Astur's
+/// alone), for windows still tracked and shown, focused or not by
+/// STYLED_FOCUS now, not at the flip. A hidden one is left to style_active,
+/// which restyles its workspace when it is next shown (show_workspace's
+/// rule). A hung app is skipped: it has not pumped for 5 s, so it has not
+/// re-written its border, and the call may wait on it (win32-reference).
+/// Runs between commands, so it takes the exit handshake a command takes
+/// (MGR_BUSY), and set_border re-checks EXITING per window.
+unsafe fn reassert_borders(mgr: &Manager, windows: &[isize]) {
+    MGR_BUSY.store(true, Ordering::SeqCst);
+    if !EXITING.load(Ordering::SeqCst) && mgr.cfg.border_enabled {
+        let f = STYLED_FOCUS.load(Ordering::Relaxed);
+        for &h in windows {
+            let hwnd = hwnd_from(h);
+            if mgr.locate(h).is_some()
+                && IsWindowVisible(hwnd).as_bool()
+                && !IsHungAppWindow(hwnd).as_bool()
+            {
+                set_border(hwnd, h == f, &mgr.cfg);
+            }
+        }
+    }
+    MGR_BUSY.store(false, Ordering::SeqCst);
 }
 
 /// Warp the mouse cursor to the centre of a window. A tiled window is centred
@@ -10846,7 +11796,14 @@ unsafe fn process_extra(mgr: &mut Manager, index: usize) {
     else {
         return;
     };
-    let core = match action.as_str() {
+    run_action(mgr, &action, &argument);
+}
+
+/// One named action with its argument: the vocabulary extra hotkeys and
+/// bar clicks share (`switch_workspace 3`, `launch wt`, `launcher`...), so
+/// a name means the same wherever it is written. Manager thread.
+unsafe fn run_action(mgr: &mut Manager, action: &str, argument: &str) {
+    let core = match action {
         "focus_next" => Some(Cmd::FocusDir(1)),
         "focus_prev" => Some(Cmd::FocusDir(-1)),
         "swap_next" => Some(Cmd::SwapDir(1)),
@@ -10869,23 +11826,199 @@ unsafe fn process_extra(mgr: &mut Manager, index: usize) {
             .ok()
             .and_then(|n| n.checked_sub(1))
             .map(Cmd::MoveToWs),
-        "layout" => Some(Cmd::SetLayout(argument.clone())),
+        "layout" => Some(Cmd::SetLayout(argument.to_string())),
         other => scroll_action(other),
     };
     if let Some(cmd) = core {
         process(mgr, cmd);
         return;
     }
-    match action.as_str() {
+    match action {
         "launch" | "command" => {
             mgr.pending_launch_mon = cursor_hmon();
-            launch(&argument);
+            launch(argument);
         }
         "scratchpad" => toggle_scratchpad(mgr),
         "launcher" => open_launcher_popup(),
         "system_menu" => open_system_popup(),
         "reload" => reload_config_now(),
         _ => {}
+    }
+}
+
+/// A bar click (Cmd::BarAction): widget `wgt`'s action for `button` from
+/// the config (the music buttons' are fixed), run here on the manager. The
+/// shell's own flyouts (calendar, quick settings, keyboard language) and
+/// the media keys are their Windows shortcuts, sent as input; Settings
+/// pages are ms-settings: URIs through `launch`; the rest is `run_action`.
+unsafe fn run_bar_action(mgr: &mut Manager, hmon: isize, wgt: u8, button: u8, sub: u8) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        VK_A, VK_D, VK_LWIN, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_N,
+    };
+    let Some(&name) = config::BAR_WIDGETS.get(wgt as usize) else {
+        return;
+    };
+    let (act, arg) = match name {
+        "media_controls" => (
+            MEDIA_ACTIONS.get(sub as usize).copied().unwrap_or("none"),
+            "",
+        ),
+        _ => mgr.cfg.bar_click(name, button as usize),
+    };
+    let (act, arg) = (act.to_string(), arg.to_string());
+    log_debug!("bar {name} button {button}: {act} {arg}");
+    let settings = |page: &str| launch(&format!("ms-settings:{page}"));
+    match act.as_str() {
+        "none" => {}
+        // Windows 11's Win+N is "notification center and calendar"; Windows
+        // 10 has Win+Alt+D for the clock's date / time flyout.
+        "calendar" if windows_11() => send_chord(&[VK_LWIN, VK_N]),
+        "calendar" => send_chord(&[VK_LWIN, VK_MENU, VK_D]),
+        "quick_settings" => send_chord(&[VK_LWIN, VK_A]),
+        "next_input" => send_chord(&[VK_LWIN, VK_SPACE]),
+        "media_play_pause" => send_chord(&[VK_MEDIA_PLAY_PAUSE]),
+        "media_next" => send_chord(&[VK_MEDIA_NEXT_TRACK]),
+        "media_prev" => send_chord(&[VK_MEDIA_PREV_TRACK]),
+        "mute" => {
+            toggle_mute();
+            bars_repaint();
+        }
+        "volume_mixer" => settings("apps-volume"),
+        "sound_settings" => settings("sound"),
+        "network_settings" => settings("network-status"),
+        "bluetooth_settings" => settings("bluetooth"),
+        "power_settings" => settings("powersleep"),
+        "datetime_settings" => settings("dateandtime"),
+        "language_settings" => settings("regionlanguage"),
+        "storage_settings" => settings("storagesense"),
+        "display_settings" => settings("display"),
+        "windows_settings" => settings(""),
+        "astur_settings" => tray_open_settings_async(),
+        // An existing path: launch runs `start "" "C:\"`, which opens it in
+        // File Explorer.
+        "task_manager" | "open_drive" => {
+            mgr.pending_launch_mon = cursor_hmon();
+            launch(match act.as_str() {
+                "task_manager" => "taskmgr",
+                _ => &mgr.cfg.bar_disk_drive,
+            });
+        }
+        "workspace_next" => process(mgr, Cmd::BarCycle(hmon, 1)),
+        "workspace_prev" => process(mgr, Cmd::BarCycle(hmon, -1)),
+        // The clicked bar's monitor, leaving focused_mon alone: the bar is
+        // NOACTIVATE, so the real focus never moved and the next hotkey must
+        // still act on the window the user is typing in.
+        "next_layout" => {
+            if let Some(mi) = mgr.mon_by_hmon(hmon) {
+                let next = next_layout(&mgr.monitors[mi].layout);
+                set_monitor_layout(mgr, mi, next.to_string());
+            }
+        }
+        other => run_action(mgr, other, &arg),
+    }
+}
+
+/// Switch monitor `mi` to `layout` (ignored if unknown or `mi` is gone) and
+/// retile it. Takes the monitor rather than reading focused_mon so a bar
+/// click can change another screen's layout without moving the focus there.
+unsafe fn set_monitor_layout(mgr: &mut Manager, mi: usize, layout: String) {
+    if !config::LAYOUTS.contains(&layout.as_str()) || mi >= mgr.monitors.len() {
+        return;
+    }
+    // Away from scrolling the new layout's tiles are all on screen, so the
+    // retile brings every parked window back; a hidden workspace's parked
+    // windows come back when it is next shown. Nothing is parked there to
+    // need a cold snapshot.
+    if mgr.monitors[mi].layout == "scrolling" && layout != "scrolling" {
+        cold_clear();
+    }
+    mgr.monitors[mi].layout = layout;
+    let a = mgr.monitors[mi].active;
+    ensure_visible(mgr, mi, a);
+    retile_monitor(mgr, mi);
+}
+
+/// The layout after `cur` in config::LAYOUTS, wrapping (the first for an
+/// unknown one). Pure.
+fn next_layout(cur: &str) -> &'static str {
+    let i = config::LAYOUTS.iter().position(|l| *l == cur);
+    config::LAYOUTS[i.map_or(0, |i| (i + 1) % config::LAYOUTS.len())]
+}
+
+/// Repaint every bar (a value changed outside a snapshot: the mute state).
+unsafe fn bars_repaint() {
+    for b in BARS.lock().unwrap().iter() {
+        let _ = PostMessageW(hwnd_from(b.hwnd), WM_BAR_REFRESH, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Windows 11 or later (build 22000 on), read once.
+fn windows_11() -> bool {
+    static W11: OnceLock<bool> = OnceLock::new();
+    *W11.get_or_init(|| unsafe { current_build() } >= 22000)
+}
+
+/// The keys of a chord as SendInput sends them: each pressed in order, then
+/// released in reverse (Win down, N down, N up, Win up). Pure.
+fn chord_order(vks: &[u16]) -> Vec<(u16, bool)> {
+    let down = vks.iter().map(|&v| (v, false));
+    down.chain(vks.iter().rev().map(|&v| (v, true))).collect()
+}
+
+/// Press a Windows shortcut (or a media key) for a bar click, as one
+/// SendInput call: Microsoft's SendInput sample sends Win+D this way, and the
+/// events of one call are never interleaved with other input. Our own hooks
+/// pass injected keys through untouched. Skipped while the user holds a
+/// modifier, which would join the chord. UIPI drops it silently while an
+/// elevated app has the foreground (documented); that is only logged.
+unsafe fn send_chord(vks: &[VIRTUAL_KEY]) {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{
+        KEYEVENTF_EXTENDEDKEY, VK_LWIN, VK_RWIN, VK_SHIFT,
+    };
+    let held = [VK_SHIFT, VK_CONTROL, VK_MENU, VK_LWIN, VK_RWIN]
+        .iter()
+        .any(|k| GetAsyncKeyState(k.0 as i32) < 0);
+    if held {
+        log_debug!("bar shortcut skipped: a modifier key is held");
+        return;
+    }
+    if foreground_elevated() {
+        log_debug!("bar shortcut may be dropped: the foreground app is elevated (UIPI)");
+    }
+    let raw: Vec<u16> = vks.iter().map(|v| v.0).collect();
+    let inputs: Vec<INPUT> = chord_order(&raw)
+        .into_iter()
+        .map(|(vk, up)| {
+            // The media keys (VK 0xB0 next .. 0xB3 play/pause) are extended
+            // (E0) keys on a real keyboard.
+            let media = (0xB0..=0xB3).contains(&vk);
+            let mut flags = KEYBD_EVENT_FLAGS(0);
+            if up {
+                flags |= KEYEVENTF_KEYUP;
+            }
+            if media {
+                flags |= KEYEVENTF_EXTENDEDKEY;
+            }
+            INPUT {
+                r#type: INPUT_KEYBOARD,
+                Anonymous: INPUT_0 {
+                    ki: KEYBDINPUT {
+                        wVk: VIRTUAL_KEY(vk),
+                        wScan: 0,
+                        dwFlags: flags,
+                        time: 0,
+                        dwExtraInfo: 0,
+                    },
+                },
+            }
+        })
+        .collect();
+    let sent = SendInput(&inputs, core::mem::size_of::<INPUT>() as i32);
+    if sent as usize != inputs.len() {
+        log_debug!(
+            "bar shortcut: SendInput sent {sent} of {} events",
+            inputs.len()
+        );
     }
 }
 
@@ -10997,7 +12130,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                                 wi = rule_ws
                                     .min(mgr.monitors[mi].workspaces.len().saturating_sub(1));
                             } else {
-                                (mi, wi) = mgr.global_to_ml(rule_ws);
+                                // Clamped like the branch above: a rule naming a
+                                // workspace past `workspaces` used to index past
+                                // this monitor's list below and abort the WM.
+                                let last = mgr.cfg.workspaces.saturating_sub(1);
+                                (mi, wi) = mgr.global_to_ml(rule_ws.min(last));
                             }
                         }
                     }
@@ -11023,7 +12160,23 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     // On a scrolling monitor: a new column right of the
                     // focused one, scrolled into view.
                     let floating = scratch || should_float(hwnd, rule);
+                    // An uncloak retry (#16a) can adopt a window long after
+                    // the user moved on to another one, which keeps the OS
+                    // foreground and gets no new FOREGROUND event: tile it,
+                    // but leave Astur's focus where the keyboard is, or
+                    // Alt+W would close the newcomer. Its next FOREGROUND
+                    // focuses it as usual.
+                    let quiet = event == EVENT_OBJECT_UNCLOAKED
+                        && !scratch
+                        && GetForegroundWindow() != hwnd;
+                    let prev_focus = mgr.monitors[mi].workspaces[wi].focused;
                     mgr.insert_window(h, mi, wi, None, floating);
+                    if quiet && prev_focus != 0 {
+                        mgr.monitors[mi].workspaces[wi].focused = prev_focus;
+                        if !floating && mgr.monitors[mi].layout == "scrolling" {
+                            ensure_visible(mgr, mi, wi);
+                        }
+                    }
                     // Into MANAGED now, not at the sync after this command
                     // (the mirror of untrack_window): EVENT_OBJECT_HIDE queues
                     // RemoveHidden only for managed windows, so an app hiding
@@ -11036,7 +12189,16 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         return;
                     }
                     if visible {
-                        mgr.focused_mon = mi;
+                        if !quiet {
+                            mgr.focused_mon = mi;
+                        }
+                        // A quiet adoption is not the focus apply_styles
+                        // restyles: dim and border it as unfocused now,
+                        // before the retile, so its open motion ends on the
+                        // styled alpha instead of popping at the reveal.
+                        if global_focus(mgr) != h {
+                            style_window(hwnd, false, &mgr.cfg);
+                        }
                         retile_monitor(mgr, mi);
                     } else {
                         mark_hidden_by_us(h);
@@ -11046,6 +12208,18 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     }
                 }
                 None => {
+                    // An app Astur launched that came up elevated is refused
+                    // (manage_reject's "elevated"), so the launch monitor it
+                    // was meant to claim would wait for the next, unrelated
+                    // window and put that on the wrong monitor. Only a window
+                    // appearing (SHOW, the uncloak retry): focusing an admin
+                    // window that was already open is no launch.
+                    if mgr.pending_launch_mon != 0
+                        && event != EVENT_SYSTEM_FOREGROUND
+                        && integrity_above_own(hwnd_from(h))
+                    {
+                        mgr.pending_launch_mon = 0;
+                    }
                     // Rejection probe: which check refused the window and which
                     // event asked, so the Add rate can be attributed. Re-walks
                     // the checks (debug only); the window may have changed since
@@ -11055,6 +12229,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         let trigger = match event {
                             EVENT_OBJECT_SHOW => "show",
                             EVENT_SYSTEM_FOREGROUND => "foreground",
+                            EVENT_OBJECT_UNCLOAKED => "uncloaked",
                             _ => "other",
                         };
                         log_debug!(
@@ -11138,7 +12313,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         mgr.focused_mon = mi;
                         mgr.monitors[mi].workspaces[wi].focused = root;
                         strip_reveal(mgr, root);
-                        unpark_window(h, None);
+                        unpark_window(h, None, false);
                     }
                 }
             }
@@ -11151,6 +12326,13 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     switch_monitor_workspace(mgr, mi, wi);
                 } else {
                     strip_reveal(mgr, h);
+                }
+                // focus_window's SW_SHOW leaves a minimised window minimised.
+                // Restored here, after the switch: on a hidden workspace a
+                // restore from the caller's thread would show it on this one.
+                let hwnd = hwnd_from(h);
+                if IsIconic(hwnd).as_bool() {
+                    let _ = ShowWindow(hwnd, SW_RESTORE);
                 }
                 touch_window_mru(h);
                 focus_window(h);
@@ -11207,24 +12389,15 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
         }
         Cmd::Extra(index) => process_extra(mgr, index),
-        Cmd::SetLayout(layout) => {
-            // The focused monitor only: layouts are per monitor. The extra
-            // hotkey `layout` and the IPC verb both arrive here.
-            let mi = mgr.focused_mon;
-            if config::LAYOUTS.contains(&layout.as_str()) && mi < mgr.monitors.len() {
-                // Away from scrolling the new layout's tiles are all on screen,
-                // so the retile brings every parked window back; a hidden
-                // workspace's parked windows come back when it is next shown.
-                // Nothing is parked there to need a cold snapshot.
-                if mgr.monitors[mi].layout == "scrolling" && layout != "scrolling" {
-                    cold_clear();
-                }
-                mgr.monitors[mi].layout = layout;
-                let a = mgr.monitors[mi].active;
-                ensure_visible(mgr, mi, a);
-                retile_monitor(mgr, mi);
-            }
-        }
+        Cmd::BarAction {
+            hmon,
+            wgt,
+            button,
+            sub,
+        } => run_bar_action(mgr, hmon, wgt, button, sub),
+        // The focused monitor only: layouts are per monitor. The extra
+        // hotkey `layout` and the IPC verb both arrive here.
+        Cmd::SetLayout(layout) => set_monitor_layout(mgr, mgr.focused_mon, layout),
         Cmd::ToggleScratchpad => toggle_scratchpad(mgr),
         Cmd::BarCycle(hmon, dir) => {
             // Wheel over the bar: previous/next workspace on that monitor (wraps).
@@ -12221,7 +13394,74 @@ unsafe fn tab_font_for(dpi: u32, tab_h: i32) -> isize {
     cached_font(((tab_h.max(1) as u32) << 16) | dpi, tab_h, size, dpi)
 }
 
-/// BAR_FONTS[key], made with make_bar_font on a miss. Main thread only.
+/// The `icon_mode = glyph` icon font for one DPI: the icon face at the bar
+/// text's size, cached beside the bar fonts under a key with the top bit set
+/// (above every DPI and tab-font key), so bar_fonts_clear frees it too.
+/// Main thread only.
+unsafe fn bar_icon_font_for(dpi: u32) -> isize {
+    cached_font(
+        0x8000_0000 | dpi,
+        BAR_HEIGHT.load(Ordering::Relaxed) as i32,
+        BAR_FONT_SIZE.load(Ordering::Relaxed) as i32,
+        dpi,
+    )
+}
+
+/// The bold `title_bold` font for one DPI: the bar face at weight 700 or the
+/// bar's own if heavier, cached under bit 30 (below the icon key's bit 31,
+/// above every DPI and tab key), so bar_fonts_clear frees it. Main thread.
+unsafe fn bar_bold_font_for(dpi: u32) -> isize {
+    cached_font(
+        0x4000_0000 | dpi,
+        BAR_HEIGHT.load(Ordering::Relaxed) as i32,
+        BAR_FONT_SIZE.load(Ordering::Relaxed) as i32,
+        dpi,
+    )
+}
+
+/// Whether the icon face is Segoe Fluent Icons (Windows 11, or installed on
+/// 10); else it is Segoe MDL2 Assets, which Windows 10 and 11 both ship.
+/// Checked once: GDI silently substitutes a text font for a missing face,
+/// and every glyph would then draw as a box.
+fn icon_face_is_fluent() -> bool {
+    static FLUENT: OnceLock<bool> = OnceLock::new();
+    *FLUENT.get_or_init(|| unsafe { font_installed("Segoe Fluent Icons") })
+}
+
+/// Whether a font family named `face` is installed (EnumFontFamiliesExW).
+unsafe fn font_installed(face: &str) -> bool {
+    use windows::Win32::Graphics::Gdi::{EnumFontFamiliesExW, LOGFONTW, TEXTMETRICW};
+    unsafe extern "system" fn found(
+        _lf: *const LOGFONTW,
+        _tm: *const TEXTMETRICW,
+        _kind: u32,
+        hit: LPARAM,
+    ) -> i32 {
+        *(hit.0 as *mut bool) = true;
+        0 // one match is enough: stop
+    }
+    let mut lf = LOGFONTW {
+        lfCharSet: DEFAULT_CHARSET,
+        ..Default::default()
+    };
+    for (d, s) in lf.lfFaceName.iter_mut().zip(face.encode_utf16().take(31)) {
+        *d = s;
+    }
+    let mut hit = false;
+    let screen = GetDC(None);
+    EnumFontFamiliesExW(
+        screen,
+        &lf,
+        Some(found),
+        LPARAM(&mut hit as *mut bool as isize),
+        0,
+    );
+    ReleaseDC(None, screen);
+    hit
+}
+
+/// BAR_FONTS[key], made with make_bar_font on a miss (the icon face for a
+/// key with the top bit set, bold with bit 30). Main thread only.
 unsafe fn cached_font(key: u32, height: i32, font_size: i32, dpi: u32) -> isize {
     if let Some(f) = BAR_FONTS
         .lock()
@@ -12231,7 +13471,13 @@ unsafe fn cached_font(key: u32, height: i32, font_size: i32, dpi: u32) -> isize 
     {
         return f;
     }
-    let f = make_bar_font(height, font_size, dpi);
+    let f = make_bar_font(
+        height,
+        font_size,
+        dpi,
+        key & 0x8000_0000 != 0,
+        key & 0x4000_0000 != 0,
+    );
     BAR_FONTS
         .lock()
         .unwrap()
@@ -12240,8 +13486,10 @@ unsafe fn cached_font(key: u32, height: i32, font_size: i32, dpi: u32) -> isize 
     f
 }
 
-/// Build one bar font at `dpi`. `height`/`font_size` are logical (100%) px.
-unsafe fn make_bar_font(height: i32, font_size: i32, dpi: u32) -> isize {
+/// Build one bar font at `dpi`, the icon face when `icon` (regular weight:
+/// the icon fonts have one), at least weight 700 when `bold`.
+/// `height`/`font_size` are logical (100%) px.
+unsafe fn make_bar_font(height: i32, font_size: i32, dpi: u32, icon: bool, bold: bool) -> isize {
     let size = dpi_px(
         if font_size > 0 {
             font_size
@@ -12251,14 +13499,20 @@ unsafe fn make_bar_font(height: i32, font_size: i32, dpi: u32) -> isize {
         dpi,
     )
     .max(8);
+    // An icon fills less of its em than a capital does: a fifth more lines
+    // the icons up with the text (judged on offscreen renders).
+    let size = if icon { size * 6 / 5 } else { size };
     // Null-terminated face name; kept alive for the duration of the call.
-    let name = {
-        let n = BAR_FONT_NAME.lock().unwrap().clone();
-        if n.trim().is_empty() {
-            "Segoe UI".to_string()
-        } else {
-            n
-        }
+    let name = match BAR_FONT_NAME.lock().unwrap().clone() {
+        _ if icon && icon_face_is_fluent() => "Segoe Fluent Icons".to_string(),
+        _ if icon => "Segoe MDL2 Assets".to_string(),
+        n if n.trim().is_empty() => "Segoe UI".to_string(),
+        n => n,
+    };
+    let weight = match (icon, BAR_FONT_WEIGHT.load(Ordering::Relaxed) as i32) {
+        (true, _) => 400,
+        (false, w) if bold => w.max(700),
+        (false, w) => w, // 600 (semi-bold) by default
     };
     let mut wname: Vec<u16> = name.encode_utf16().collect();
     wname.push(0);
@@ -12267,7 +13521,7 @@ unsafe fn make_bar_font(height: i32, font_size: i32, dpi: u32) -> isize {
         0,
         0,
         0,
-        600, // semi-bold
+        weight,
         0,
         0,
         0,
@@ -12489,9 +13743,29 @@ unsafe fn ensure_bars_inner() {
         Some(bar_mon_enum),
         LPARAM(&mut raw as *mut _ as isize),
     );
+    // Numbered left to right as enumerate_monitors (and so reserve_bar and
+    // monitor_layouts) number them, for `monitors`.
+    raw.sort_by_key(|m| m.1.left);
+    let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTONEAREST).0 as isize;
+    let mask = BAR_MON_MASK.load(Ordering::Relaxed);
 
     let mut bars = BARS.lock().unwrap();
-    for &(hmon, rcm) in &raw {
+    for (index, &(hmon, rcm)) in raw.iter().enumerate() {
+        let existing = bars.iter().find(|b| b.hmon == hmon).map(|b| b.hwnd);
+        if !config::bar_on(mask, index, hmon == primary) {
+            // `monitors` leaves this screen out: as for a removed monitor,
+            // hide its bar and stop routing the wheel to it; make none.
+            // reserve_bar asks the same bar_on, so no space is kept for it.
+            if let Some(key) = existing {
+                let _ = ShowWindow(hwnd_from(key), SW_HIDE);
+                barhit_publish(key, None);
+                let _ = KillTimer(hwnd_from(key), AH_TIMER_ID);
+                if let Some(m) = AH_BARS.lock().unwrap().as_mut() {
+                    m.remove(&key);
+                }
+            }
+            continue;
+        }
         // Configured auto-hide stays global. Fullscreen override is per monitor.
         let autohide_cfg = BAR_AUTOHIDE.load(Ordering::Relaxed);
         let fullscreen = monitor_has_fullscreen(hmon);
@@ -12558,7 +13832,6 @@ unsafe fn ensure_bars_inner() {
         // final y in one move. It used to be placed shown (SWP_SHOWWINDOW) and
         // then moved to its hidden/mid-slide y: one frame of bar over a
         // fullscreen app, and over content on any rebuild while hidden.
-        let existing = bars.iter().find(|b| b.hmon == hmon).map(|b| b.hwnd);
         let mut ah = match existing {
             Some(key) if autohide => Some(ah_bar_update(key, &geo, snap)),
             _ => None,
@@ -12580,6 +13853,10 @@ unsafe fn ensure_bars_inner() {
                 height,
                 SWP_NOACTIVATE | SWP_SHOWWINDOW,
             );
+            // Back to a plain 1 s clock tick: a seconds clock re-aims its
+            // own each tick, and one that lost its seconds must not keep a
+            // short period from its last re-aim.
+            SetTimer(hb, BAR_TIMER_ID, 1000, None);
             hb
         } else {
             let hb = CreateWindowExW(
@@ -12650,57 +13927,16 @@ unsafe fn ensure_bars_inner() {
     BARS_HOT.store(!bars.is_empty(), Ordering::Relaxed);
 }
 
-/// Convert a 24-hour hour to (12-hour, "am"/"pm").
-fn to_12h(h: u16) -> (u16, &'static str) {
-    let ap = if h < 12 { "am" } else { "pm" };
-    let mut h12 = h % 12;
-    if h12 == 0 {
-        h12 = 12;
-    }
-    (h12, ap)
-}
-
-/// Render a date from a SYSTEMTIME using a small token language:
-///   yyyy/yy = year, MMM/MM = month (name/number), ddd/dd = weekday/day-of-month.
-/// Any other characters are copied verbatim. Char-based so a non-ASCII format
-/// string can't split a UTF-8 boundary.
+/// The date widget's text at `st` (config::format_date: one formatter for
+/// the bar and Settings' samples).
 fn format_date(fmt: &str, st: &SYSTEMTIME) -> String {
-    const WD: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MO: [&str; 13] = [
-        "", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-    ];
-    let chars: Vec<char> = fmt.chars().collect();
-    let at = |i: usize, tok: &str| -> bool {
-        let t: Vec<char> = tok.chars().collect();
-        i + t.len() <= chars.len() && chars[i..i + t.len()] == t[..]
-    };
-    let mut out = String::new();
-    let mut i = 0;
-    while i < chars.len() {
-        if at(i, "yyyy") {
-            out.push_str(&format!("{:04}", st.wYear));
-            i += 4;
-        } else if at(i, "yy") {
-            out.push_str(&format!("{:02}", st.wYear % 100));
-            i += 2;
-        } else if at(i, "MMM") {
-            out.push_str(MO.get(st.wMonth as usize).copied().unwrap_or(""));
-            i += 3;
-        } else if at(i, "MM") {
-            out.push_str(&format!("{:02}", st.wMonth));
-            i += 2;
-        } else if at(i, "ddd") {
-            out.push_str(WD.get(st.wDayOfWeek as usize).copied().unwrap_or(""));
-            i += 3;
-        } else if at(i, "dd") {
-            out.push_str(&format!("{:02}", st.wDay));
-            i += 2;
-        } else {
-            out.push(chars[i]);
-            i += 1;
-        }
-    }
-    out
+    config::format_date(
+        fmt,
+        st.wYear as u32,
+        st.wMonth as u32,
+        st.wDay as u32,
+        st.wDayOfWeek as u32,
+    )
 }
 
 // ---- bar app-button icons ----------------------------------------------------
@@ -12730,7 +13966,9 @@ static BAR_ICON_RETIRED: Mutex<Vec<(u64, isize)>> = Mutex::new(Vec::new());
 /// Retire every bar icon at a size no connected monitor's bar uses now
 /// (bar_icon_size changed, a monitor left or changed scale). Main thread.
 unsafe fn bar_icons_retire() {
-    let sizes = icon_sizes(BAR_ICON_PX_CFG.load(Ordering::Relaxed));
+    let mut sizes = icon_sizes(BAR_ICON_PX_CFG.load(Ordering::Relaxed));
+    // The workspace marks' icons (`workspace_apps`) share the cache.
+    sizes.extend(icon_sizes(WS_ICON_PX));
     if sizes.is_empty() {
         return; // no monitor enumerated: keep everything rather than guess
     }
@@ -12847,6 +14085,105 @@ fn bar_exe_icon(path: &str, px: i32) -> isize {
     0
 }
 
+/// The title widget's text for window `h` under `title_format`. The default
+/// `{title}` reads only the title, as before the key existed. Manager thread.
+unsafe fn bar_title(fmt: &str, h: HWND) -> String {
+    if fmt == "{title}" {
+        return window_title(h);
+    }
+    let app = match fmt.contains("{app}") {
+        true => tracked_exe(h).map(|p| app_name(&p)).unwrap_or_default(),
+        false => String::new(),
+    };
+    let title = match fmt.contains("{title}") {
+        true => window_title(h),
+        false => String::new(),
+    };
+    widget_format(fmt, &[("title", title), ("app", app)])
+}
+
+/// Exe path -> its FileDescription ("Microsoft Edge"), "" while queued or
+/// when the exe has none. Filled by the icon worker (`IconJob::Name`): a
+/// version-resource read is file I/O, never for the manager thread.
+static APP_NAMES: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+
+/// `{app}` for an exe path: its description once read, else the file name
+/// without `.exe`, first letter capitalised ("msedge" -> "Msedge"). A first
+/// sighting queues the read, which refreshes the bar when it lands.
+fn app_name(path: &str) -> String {
+    {
+        let mut names = APP_NAMES.lock().unwrap();
+        let names = names.get_or_insert_with(HashMap::new);
+        match names.get(path) {
+            Some(n) if !n.is_empty() => return n.clone(),
+            Some(_) => {}
+            None => {
+                names.insert(path.to_string(), String::new());
+                ICON_QUEUE
+                    .lock()
+                    .unwrap()
+                    .push_back(IconJob::Name(path.to_string()));
+                ICON_CV.notify_one();
+            }
+        }
+    }
+    let stem = std::path::Path::new(path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
+    let mut c = stem.chars();
+    c.next()
+        .map_or(String::new(), |f| f.to_uppercase().chain(c).collect())
+}
+
+/// An exe's FileDescription from its version resource (first translation),
+/// or None. Icon worker only: it reads the file.
+unsafe fn file_description(path: &str) -> Option<String> {
+    use windows::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+    let wpath: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    let size = GetFileVersionInfoSizeW(PCWSTR(wpath.as_ptr()), None);
+    if size == 0 {
+        return None;
+    }
+    let mut block = vec![0u8; size as usize];
+    GetFileVersionInfoW(
+        PCWSTR(wpath.as_ptr()),
+        0,
+        size,
+        block.as_mut_ptr() as *mut c_void,
+    )
+    .ok()?;
+    let query = |sub: &str| -> Option<(*const u16, usize)> {
+        let sub: Vec<u16> = sub.encode_utf16().chain([0]).collect();
+        let mut p: *mut c_void = core::ptr::null_mut();
+        let mut len = 0u32;
+        let ok = VerQueryValueW(
+            block.as_ptr() as *const c_void,
+            PCWSTR(sub.as_ptr()),
+            &mut p,
+            &mut len,
+        );
+        (ok.as_bool() && !p.is_null() && len > 0).then_some((p as *const u16, len as usize))
+    };
+    // SAFETY: VerQueryValueW points into `block`, alive for this function;
+    // Translation is at least one (language, code page) pair of WORDs.
+    let (t, n) = query("\\VarFileInfo\\Translation")?;
+    if n < 4 {
+        return None;
+    }
+    let (lang, cp) = (t.read_unaligned(), t.add(1).read_unaligned());
+    let (s, len) = query(&format!(
+        "\\StringFileInfo\\{lang:04x}{cp:04x}\\FileDescription"
+    ))?;
+    // A string value's length is in characters, its terminator included.
+    let text: Vec<u16> = (0..len).map(|i| s.add(i).read_unaligned()).collect();
+    let text = String::from_utf16_lossy(&text);
+    let text = text.trim_end_matches('\0').trim();
+    (!text.is_empty()).then(|| text.to_string())
+}
+
 /// Compact bytes/s for the net widget: 0K / 340K / 1.2M.
 fn fmt_rate(bps: isize) -> String {
     if bps < 0 {
@@ -12908,6 +14245,15 @@ fn stats_wait(timeout: std::time::Duration) {
         .wait_timeout_while(guard, timeout, |p| !*p)
         .unwrap();
     *pending = false;
+}
+
+/// Mute or unmute: queued for the stats worker (no audio COM on the main
+/// or manager thread), shown at once, corrected by the worker's next read.
+/// The caller repaints.
+fn toggle_mute() {
+    MUTE_TOGGLES.fetch_add(1, Ordering::Relaxed);
+    STAT_MUTE.fetch_xor(true, Ordering::Relaxed);
+    stats_wake();
 }
 
 /// Queued wheel steps (whole percent) and mute clicks as (level change,
@@ -13050,6 +14396,7 @@ fn stats_worker() {
             let mut ps = SYSTEM_POWER_STATUS::default();
             if GetSystemPowerStatus(&mut ps).is_ok() && ps.BatteryLifePercent <= 100 {
                 STAT_BAT.store(ps.BatteryLifePercent as isize, Ordering::Relaxed);
+                STAT_BAT_AC.store(ps.ACLineStatus == 1, Ordering::Relaxed);
             } else {
                 STAT_BAT.store(-1, Ordering::Relaxed);
             }
@@ -13062,13 +14409,16 @@ fn stats_worker() {
                     let rows = std::slice::from_raw_parts(t.Table.as_ptr(), t.NumEntries as usize);
                     let mut tin: u64 = 0;
                     let mut tout: u64 = 0;
+                    let mut wifi = false;
                     for r in rows {
                         // 6 = ethernet, 71 = 802.11; OperStatus 1 = up.
                         if r.OperStatus.0 == 1 && (r.Type == 6 || r.Type == 71) {
                             tin = tin.saturating_add(r.InOctets);
                             tout = tout.saturating_add(r.OutOctets);
+                            wifi |= r.Type == 71;
                         }
                     }
+                    STAT_NET_WIFI.store(wifi, Ordering::Relaxed);
                     FreeMibTable(table as *const c_void);
                     let now = Instant::now();
                     if let Some((pin, pout, pt)) = prev_net {
@@ -13101,6 +14451,228 @@ fn stats_worker() {
     }
 }
 
+/// The disk widget's drive (every 30 s) and the custom widget's command
+/// (every `custom_interval` s), on a thread of their own: either can block
+/// for seconds (a dead network share, a slow command), which on the stats
+/// worker would hold up the volume wheel. Idles on SLOW_WAKE while neither
+/// widget is listed; a wake (any bar reload) re-runs both at once, so a new
+/// drive or command shows without waiting out the old interval.
+fn slow_worker() {
+    use std::time::Duration;
+    let mut next_disk = Instant::now();
+    let mut next_custom = Instant::now();
+    loop {
+        let now = Instant::now();
+        if DISK_ON.load(Ordering::Relaxed) && now >= next_disk {
+            let root = DISK_ROOT.lock().unwrap().clone();
+            let (free, total) = unsafe { disk_space(&root) }.unwrap_or((u64::MAX, u64::MAX));
+            STAT_DISK_FREE.store(free, Ordering::Relaxed);
+            STAT_DISK_TOTAL.store(total, Ordering::Relaxed);
+            next_disk = Instant::now() + Duration::from_secs(30);
+        }
+        if !CUSTOM_ON.load(Ordering::Relaxed) {
+            CUSTOM_TEXT.lock().unwrap().clear();
+        } else if now >= next_custom {
+            let cmd = CUSTOM_CMD.lock().unwrap().clone();
+            let text = run_custom(&cmd, Duration::from_secs(5)).unwrap_or_default();
+            *CUSTOM_TEXT.lock().unwrap() = text;
+            let every = CUSTOM_EVERY.load(Ordering::Relaxed).clamp(1, 3600);
+            next_custom = Instant::now() + Duration::from_secs(every as u64);
+        }
+        let now = Instant::now();
+        let mut due = now + Duration::from_secs(60);
+        if DISK_ON.load(Ordering::Relaxed) {
+            due = due.min(next_disk);
+        }
+        if CUSTOM_ON.load(Ordering::Relaxed) {
+            due = due.min(next_custom);
+        }
+        let guard = SLOW_WAKE.0.lock().unwrap();
+        let (mut woken, _) = SLOW_WAKE
+            .1
+            .wait_timeout_while(guard, due.saturating_duration_since(now), |w| !*w)
+            .unwrap();
+        if *woken {
+            *woken = false;
+            next_disk = Instant::now();
+            next_custom = Instant::now();
+        }
+    }
+}
+
+/// (free bytes available to this user, total bytes) of the volume holding
+/// `root`, or None. Can block for as long as the share takes to answer.
+unsafe fn disk_space(root: &str) -> Option<(u64, u64)> {
+    use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = root.encode_utf16().chain([0]).collect();
+    let (mut free, mut total) = (0u64, 0u64);
+    GetDiskFreeSpaceExW(
+        PCWSTR(wide.as_ptr()),
+        Some(&mut free),
+        Some(&mut total),
+        None,
+    )
+    .ok()?;
+    (total > 0).then_some((free, total))
+}
+
+/// Run the custom widget's command hidden and return the first line it
+/// prints. The text goes to `cmd /S /C "<text>"`: with /S cmd strips only
+/// that outer pair, so the user's own quotes (a quoted path followed by a
+/// quoted argument) reach it exactly as typed; plain `/C` would strip the
+/// first and last quote of the user's text instead and mangle it.
+/// The whole process tree (cmd and every program it starts) sits in a
+/// kill-on-close job: after `limit` the job is terminated, which also closes
+/// the stdout pipe so the reader thread ends, and closing the job when the
+/// run is over (or when Astur exits) stops anything the command left
+/// behind. Killing only cmd.exe left powershell/curl running, holding the
+/// pipe, one orphan and one blocked thread per interval. Output past 64 KB
+/// is read and dropped so the command never blocks on a full pipe.
+/// ponytail: one run at a time on this thread; a command slower than its
+/// interval just runs back to back.
+fn run_custom(cmd: &str, limit: std::time::Duration) -> Option<String> {
+    use std::io::Read;
+    use std::os::windows::process::CommandExt;
+    use std::process::Stdio;
+    use std::time::Duration;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut child = std::process::Command::new("cmd")
+        .args(["/S", "/C"])
+        .raw_arg(format!("\"{cmd}\""))
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| log_debug!("custom widget command failed to start: {e}"))
+        .ok()?;
+    // Assigned right after spawn: cmd only starts its child after parsing
+    // the line, so the window in which a grandchild could escape is tiny.
+    // Children inherit the job. None (no job) falls back to killing cmd.
+    let job = unsafe { tree_job(&child) };
+    let out = child.stdout.take();
+    let Some(mut out) = out else {
+        unsafe { end_job(job, &mut child) };
+        return None;
+    };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new()
+        .name("custom-read".into())
+        .spawn(move || {
+            let (mut kept, mut chunk) = (Vec::new(), [0u8; 4096]);
+            while let Ok(n @ 1..) = out.read(&mut chunk) {
+                let room = (64 * 1024usize).saturating_sub(kept.len());
+                kept.extend_from_slice(&chunk[..n.min(room)]);
+            }
+            let _ = tx.send(kept);
+        });
+    let start = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(50)),
+            Ok(None) => {
+                log_debug!("custom widget command ran past {limit:?}: stopped");
+                break;
+            }
+            _ => break,
+        }
+    }
+    // Before the read: ending the job kills whatever still holds the pipe
+    // (the timed-out tree, or a background program cmd left behind), so the
+    // reader hits EOF and hands over what was printed, never blocks forever.
+    unsafe { end_job(job, &mut child) };
+    let bytes = rx.recv_timeout(Duration::from_millis(500)).ok()?;
+    Some(first_line(&bytes))
+}
+
+/// A kill-on-close job holding `child`, so terminating or closing it stops
+/// cmd and every program it started. None if the job can't be made or
+/// assigned; the caller then kills cmd alone, as before.
+unsafe fn tree_job(child: &std::process::Child) -> Option<HANDLE> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+        SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+    let mut info = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+    info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    let ok = SetInformationJobObject(
+        job,
+        JobObjectExtendedLimitInformation,
+        &info as *const _ as *const core::ffi::c_void,
+        std::mem::size_of_val(&info) as u32,
+    )
+    .is_ok()
+        && AssignProcessToJobObject(job, HANDLE(child.as_raw_handle())).is_ok();
+    if !ok {
+        let _ = CloseHandle(job);
+        return None;
+    }
+    Some(job)
+}
+
+/// Stop the custom command's tree and reap cmd. With a job: terminate it
+/// (no-op if everything already exited) and close it. Without: kill cmd.
+unsafe fn end_job(job: Option<HANDLE>, child: &mut std::process::Child) {
+    use windows::Win32::System::JobObjects::TerminateJobObject;
+    match job {
+        Some(job) => {
+            let _ = TerminateJobObject(job, 1);
+            let _ = CloseHandle(job);
+        }
+        None => {
+            let _ = child.kill();
+        }
+    }
+    let _ = child.wait();
+}
+
+/// The first line of a command's output, trimmed, at most 80 characters, so
+/// a chatty command cannot push the rest of the bar away. UTF-8 first; bytes
+/// that aren't UTF-8 are read in the OEM code page, because cmd builtins and
+/// Windows PowerShell 5.1 write a pipe in the console (OEM) code page: an
+/// accented letter or a degree sign would otherwise show as U+FFFD.
+fn first_line(bytes: &[u8]) -> String {
+    const CP_OEMCP: u32 = 1;
+    decode_output(bytes, CP_OEMCP)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(80)
+        .collect()
+}
+
+/// `bytes` as UTF-8 when they are valid UTF-8 (curl, Python, PowerShell 7),
+/// else decoded from code page `cp` (lossy either way, never fails).
+fn decode_output(bytes: &[u8], cp: u32) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_owned();
+    }
+    let n = bytes.len().min(i32::MAX as usize) as i32;
+    let mut wide = vec![0u16; n as usize];
+    // SAFETY: `wide` holds n u16s and code pages are single- or double-byte,
+    // so the output never needs more than one u16 per input byte.
+    let got = unsafe { MultiByteToWideChar(cp, 0, bytes.as_ptr(), n, wide.as_mut_ptr(), n) };
+    if got <= 0 {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    String::from_utf16_lossy(&wide[..got as usize])
+}
+
+/// Uptime as the bar shows it: 42m, 5h 12m, 3d 4h.
+fn fmt_uptime(ms: u64) -> String {
+    let m = ms / 60_000;
+    match (m / 1440, m / 60 % 24, m % 60) {
+        (0, 0, m) => format!("{m}m"),
+        (0, h, m) => format!("{h}h {m}m"),
+        (d, h, _) => format!("{d}d {h}h"),
+    }
+}
+
 /// Rebuild the per-monitor bar snapshot and repaint only the bars that changed.
 /// The clock is refreshed separately by each bar's 1s timer, so an idle desktop
 /// causes no repaints from here.
@@ -13128,7 +14700,7 @@ unsafe fn update_bar(mgr: &Manager) {
         // on the primary, 2,5,8 on the next), and every label is reachable by a
         // workspace key. Iterating cfg.workspaces here instead would invent local
         // indices the monitor doesn't have and balloon shared-mode labels past
-        // the 10 reachable keys (the old "workspace 30" bug).
+        // the workspace count (the old "workspace 30" bug).
         let count = m.workspaces.len();
         // Which local workspaces get a pill. The active one is always shown;
         // empties are dropped only when hide_empty_workspaces is set.
@@ -13152,20 +14724,47 @@ unsafe fn update_bar(mgr: &Manager) {
                 } else {
                     mgr.ml_to_global(mi, local)
                 };
-                mgr.cfg
-                    .workspace_icons
-                    .get(global)
-                    .filter(|s| !s.is_empty())
-                    .or_else(|| {
-                        mgr.cfg
-                            .workspace_names
-                            .get(global)
-                            .filter(|s| !s.is_empty())
-                    })
-                    .cloned()
-                    .unwrap_or_else(|| (global + 1).to_string())
+                fn at(v: &[String], i: usize) -> &str {
+                    v.get(i).map_or("", String::as_str)
+                }
+                config::workspace_label(
+                    &mgr.cfg.bar_workspace_label,
+                    global + 1,
+                    at(&mgr.cfg.workspace_names, global),
+                    at(&mgr.cfg.workspace_icons, global),
+                )
             })
             .collect();
+        // Each mark's app icons, one per app (an exe's windows share one
+        // cached handle), resolved at this monitor's size.
+        let ws_icons: Vec<Vec<isize>> =
+            if mgr.cfg.bar_workspace_apps && mgr.cfg.bar_workspace_style != "dot" {
+                let px = dpi_px(WS_ICON_PX, monitor_dpi(m.hmon));
+                slots
+                    .iter()
+                    .map(|&local| {
+                        let mut icons: Vec<isize> = Vec::with_capacity(3);
+                        let wins = m
+                            .workspaces
+                            .get(local)
+                            .map_or(&[][..], |ws| &ws.windows[..]);
+                        for &h in wins {
+                            if icons.len() == 3 {
+                                break;
+                            }
+                            if IsWindow(hwnd_from(h)).as_bool() {
+                                let icon = bar_app_icon(hwnd_from(h), px);
+                                if !icons.contains(&icon) {
+                                    icons.push(icon);
+                                }
+                            }
+                        }
+                        icons
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         let mut occupied: u64 = 0;
         for (pill, &local) in slots.iter().enumerate().take(64) {
             if m.workspaces
@@ -13184,7 +14783,7 @@ unsafe fn update_bar(mgr: &Manager) {
             slot.store(fh, Ordering::Relaxed);
         }
         let title = if fh != 0 {
-            window_title(hwnd_from(fh))
+            bar_title(&mgr.cfg.bar_title_format, hwnd_from(fh))
         } else {
             String::new()
         };
@@ -13230,6 +14829,7 @@ unsafe fn update_bar(mgr: &Manager) {
             occupied,
             title,
             apps,
+            ws_icons,
             layout: match m.workspaces.get(m.active) {
                 // `scrolling 2/5`: the focused column of the shown strip.
                 Some(ws) if m.layout == "scrolling" => {
@@ -13261,6 +14861,7 @@ unsafe fn update_bar(mgr: &Manager) {
             || old.fg != new.fg
             || old.accent != new.accent
             || old.inactive != new.inactive
+            || old.style != new.style
             || old.clock_24h != new.clock_24h
             || old.date_format != new.date_format
             || old.clock_format != new.clock_format
@@ -13277,6 +14878,13 @@ unsafe fn update_bar(mgr: &Manager) {
             || old.icon_battery != new.icon_battery
             || old.icon_net != new.icon_net
             || old.icon_volume != new.icon_volume
+            || old.keyboard_format != new.keyboard_format
+            || old.disk_format != new.disk_format
+            || old.icon_disk != new.icon_disk
+            || old.uptime_format != new.uptime_format
+            || old.custom_format != new.custom_format
+            || old.icon_font != new.icon_font
+            || old.ws_fit != new.ws_fit
             || old.tiling != new.tiling
             || old.left != new.left
             || old.center != new.center
@@ -13333,12 +14941,22 @@ unsafe fn update_bar(mgr: &Manager) {
 /// update_bar and the startup seed both build through here, so the seed can
 /// never disagree with the manager's first snapshot on anything but `mons`.
 fn bar_data_from(cfg: &Config, light: bool, tiling: bool, mons: Vec<MonBar>) -> BarData {
-    let (bg, fg, accent, inactive) = bar_colors(cfg, light);
+    let r = bar_roles(cfg, light);
+    let (left, center, right) = (
+        zone_widgets(&cfg.bar_left, cfg),
+        zone_widgets(&cfg.bar_center, cfg),
+        zone_widgets(&cfg.bar_right, cfg),
+    );
+    let icon_font = glyph_mode(&cfg.bar_icon_mode)
+        || [&left, &center, &right]
+            .iter()
+            .any(|z| z.contains(&BarWidget::MediaControls));
     BarData {
-        bg,
-        fg,
-        accent,
-        inactive,
+        bg: r.bg,
+        fg: r.fg,
+        accent: r.accent,
+        inactive: r.muted,
+        style: bar_style(cfg, &r),
         clock_24h: cfg.bar_clock_24h,
         date_format: cfg.bar_date_format.clone(),
         clock_format: cfg.bar_clock_format.clone(),
@@ -13355,12 +14973,24 @@ fn bar_data_from(cfg: &Config, light: bool, tiling: bool, mons: Vec<MonBar>) -> 
         icon_battery: cfg.bar_icon_battery.clone(),
         icon_net: cfg.bar_icon_net.clone(),
         icon_volume: cfg.bar_icon_volume.clone(),
+        keyboard_format: cfg.bar_keyboard_format.clone(),
+        disk_format: cfg.bar_disk_format.clone(),
+        icon_disk: cfg.bar_icon_disk.clone(),
+        uptime_format: cfg.bar_uptime_format.clone(),
+        custom_format: cfg.bar_custom_format.clone(),
+        icon_font,
+        ws_fit: cfg.bar_workspace_label != "auto" || cfg.bar_workspace_apps,
         tiling,
-        left: zone_widgets(&cfg.bar_left, cfg),
-        center: zone_widgets(&cfg.bar_center, cfg),
-        right: zone_widgets(&cfg.bar_right, cfg),
+        left,
+        center,
+        right,
         mons,
     }
+}
+
+/// `icon_mode` draws Windows icon-font glyphs (glyph, glyph_only).
+fn glyph_mode(mode: &str) -> bool {
+    mode.starts_with("glyph")
 }
 
 /// Measure the pixel width of a string in the current DC font.
@@ -13398,95 +15028,231 @@ fn widget_icon_text(mode: &str, icon: &str, text: String) -> String {
 }
 
 fn format_clock_widget(data: &BarData, st: &SYSTEMTIME) -> String {
-    let (h12, ap) = to_12h(st.wHour);
-    let mut fmt = data.clock_format.clone();
-    if fmt.is_empty() {
-        fmt = if data.clock_24h { "HH:mm" } else { "h:mm tt" }.to_string();
-    }
-    // Longest tokens first so HH is not partially consumed as H.
-    fmt.replace("HH", &format!("{:02}", st.wHour))
-        .replace("hh", &format!("{:02}", h12))
-        .replace("mm", &format!("{:02}", st.wMinute))
-        .replace("tt", ap)
-        .replace('H', &st.wHour.to_string())
-        .replace('h', &h12.to_string())
+    config::format_clock(
+        &data.clock_format,
+        data.clock_24h,
+        st.wHour as u32,
+        st.wMinute as u32,
+        st.wSecond as u32,
+    )
 }
 
-/// Text + colour-class for simple widgets. Formatting and text/icon composition
-/// are config-driven; separators/spacers and composite widgets draw elsewhere.
+/// How a text widget's value is coloured: the text colour, the dimmed
+/// `inactive` (layout, muted volume) or the palette's red (a low battery off
+/// mains power).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Tone {
+    Normal,
+    Dim,
+    Alert,
+}
+
+/// A battery at or under this percent, off mains power, is an alert.
+const BAT_LOW: isize = 15;
+
+/// The built-in icon for a stat widget under `icon_mode = glyph`. Codepoints
+/// from the Microsoft Learn tables for Segoe Fluent Icons and Segoe MDL2
+/// Assets (checked 2026-10-24; both fonts put these glyphs at the same
+/// points). CPU (EEA1) and RAM (EEA0) are in Segoe Fluent Icons only, so
+/// with MDL2 (`fluent` false) they have none and keep their text label.
+/// `bat` and `vol` are 0..=100. Pure.
+fn stat_glyph(
+    wgt: BarWidget,
+    fluent: bool,
+    bat: isize,
+    ac: bool,
+    vol: isize,
+    mute: bool,
+    wifi: bool,
+) -> Option<char> {
+    let cp = match wgt {
+        BarWidget::Cpu if fluent => 0xEEA1,
+        BarWidget::Mem if fluent => 0xEEA0,
+        BarWidget::Net if wifi => 0xE701, // Wifi
+        BarWidget::Net => 0xE839,         // Ethernet
+        BarWidget::Volume if mute => 0xE74F,
+        // Volume0..3: the speaker's waves by level.
+        BarWidget::Volume => match vol {
+            ..=0 => 0xE992,
+            1..=33 => 0xE993,
+            34..=66 => 0xE994,
+            _ => 0xE995,
+        },
+        BarWidget::Battery => {
+            // Battery0..9 and BatteryCharging0..8 run in order; full (and
+            // charging 9) sit elsewhere in the tables.
+            let level = ((bat.clamp(0, 100) + 5) / 10) as u32;
+            match (ac, level) {
+                (false, 10) => 0xE83F,
+                (false, l) => 0xE850 + l,
+                (true, 10) => 0xEA93,
+                (true, 9) => 0xE83E,
+                (true, l) => 0xE85A + l,
+            }
+        }
+        BarWidget::Disk => 0xEDA2,     // HardDrive
+        BarWidget::Keyboard => 0xE765, // KeyboardClassic
+        BarWidget::Uptime => 0xE823,   // Recent
+        _ => return None,
+    };
+    char::from_u32(cp)
+}
+
+/// The music buttons' glyphs (Previous, Play, Next): in both icon fonts.
+const MEDIA_GLYPHS: [char; 3] = ['\u{E892}', '\u{E768}', '\u{E893}'];
+/// What each music button does (`media_controls` has fixed clicks).
+const MEDIA_ACTIONS: [&str; 3] = ["media_prev", "media_play_pause", "media_next"];
+
+/// The language of the foreground window's keyboard layout: the LANGID, the
+/// low word of its thread's HKL (0 = no foreground window). GetKeyboardLayout
+/// reads thread state and sends no message, so it cannot block paint.
+unsafe fn kbd_langid() -> u16 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
+    let fg = GetForegroundWindow();
+    if fg.0.is_null() {
+        return 0;
+    }
+    (GetKeyboardLayout(GetWindowThreadProcessId(fg, None)).0 as usize & 0xFFFF) as u16
+}
+
+// Declared here rather than through the windows crate's Win32_Globalization
+// feature: two functions do not justify a feature (and its build time).
+#[link(name = "kernel32")]
+extern "system" {
+    fn GetLocaleInfoW(locale: u32, lctype: u32, data: *mut u16, len: i32) -> i32;
+    fn MultiByteToWideChar(cp: u32, flags: u32, s: *const u8, n: i32, w: *mut u16, wn: i32) -> i32;
+}
+
+/// (language "ENG", region "US") of a LANGID, upper-cased ISO codes from
+/// GetLocaleInfoW. Only the last LANGID is cached: the layout changes
+/// rarely, and paint asks every time it draws the widget. 0 keeps the last.
+fn kbd_names(langid: u16) -> (String, String) {
+    const LOCALE_SISO639LANGNAME2: u32 = 0x67;
+    const LOCALE_SISO3166CTRYNAME: u32 = 0x5A;
+    static LAST: Mutex<(u16, String, String)> = Mutex::new((0, String::new(), String::new()));
+    let mut last = LAST.lock().unwrap();
+    if langid != 0 && langid != last.0 {
+        let read = |kind: u32| {
+            let mut buf = [0u16; 16];
+            // SAFETY: buf holds 16 u16s and its length says so. A LANGID is
+            // a valid LCID (sort order 0).
+            let n = unsafe { GetLocaleInfoW(langid as u32, kind, buf.as_mut_ptr(), 16) };
+            String::from_utf16_lossy(&buf[..(n.max(1) - 1) as usize]).to_uppercase()
+        };
+        *last = (
+            langid,
+            read(LOCALE_SISO639LANGNAME2),
+            read(LOCALE_SISO3166CTRYNAME),
+        );
+    }
+    (last.1.clone(), last.2.clone())
+}
+
+/// A text widget's content: the text, its tone and, under `icon_mode =
+/// glyph`, the icon drawn before it in the icon font. Formatting and
+/// text/icon composition are config-driven; separators/spacers and
+/// composite widgets draw elsewhere.
 unsafe fn bar_widget_text(
     wgt: BarWidget,
     data: &BarData,
     mb: Option<&MonBar>,
-) -> Option<(String, bool)> {
+) -> Option<(String, Tone, Option<char>)> {
+    let (bat, ac) = (
+        STAT_BAT.load(Ordering::Relaxed),
+        STAT_BAT_AC.load(Ordering::Relaxed),
+    );
+    let (vol, mute) = (
+        STAT_VOL.load(Ordering::Relaxed),
+        STAT_MUTE.load(Ordering::Relaxed),
+    );
+    let glyphs = glyph_mode(&data.icon_mode);
+    let glyph = if glyphs {
+        let wifi = STAT_NET_WIFI.load(Ordering::Relaxed);
+        stat_glyph(wgt, icon_face_is_fluent(), bat, ac, vol, mute, wifi)
+    } else {
+        None
+    };
+    // glyph_only: a stat with a glyph shows the glyph alone.
+    let bare = data.icon_mode == "glyph_only" && glyph.is_some();
+    // With a glyph the label is the glyph; a widget without one (cpu / mem
+    // on MDL2) shows its label as `both` does (alone under glyph_only).
+    let mode = match (glyphs, glyph) {
+        (true, Some(_)) => "text",
+        (true, None) if data.icon_mode == "glyph_only" => "icon",
+        (true, None) => "both",
+        (false, _) => data.icon_mode.as_str(),
+    };
+    let value = |format: &str, values: &[(&str, String)]| match bare {
+        true => String::new(),
+        false => widget_format(format, values),
+    };
+    let stat = |v: isize, format: &str, icon: &str, tone: Tone| {
+        (v >= 0).then(|| {
+            let text = value(format, &[("value", v.to_string())]);
+            (widget_icon_text(mode, icon, text), tone, glyph)
+        })
+    };
     match wgt {
-        BarWidget::Clock => Some((format_clock_widget(data, &GetLocalTime()), false)),
-        BarWidget::Date => Some((format_date(&data.date_format, &GetLocalTime()), false)),
+        BarWidget::Clock => Some((
+            format_clock_widget(data, &GetLocalTime()),
+            Tone::Normal,
+            None,
+        )),
+        BarWidget::Date => Some((
+            format_date(&data.date_format, &GetLocalTime()),
+            Tone::Normal,
+            None,
+        )),
         BarWidget::Battery => {
-            let value = STAT_BAT.load(Ordering::Relaxed);
-            (value >= 0).then(|| {
-                let text = widget_format(&data.battery_format, &[("value", value.to_string())]);
-                (
-                    widget_icon_text(&data.icon_mode, &data.icon_battery, text),
-                    false,
-                )
-            })
+            let low = !ac && (0..=BAT_LOW).contains(&bat);
+            let tone = if low { Tone::Alert } else { Tone::Normal };
+            stat(bat, &data.battery_format, &data.icon_battery, tone)
         }
-        BarWidget::Mem => {
-            let value = STAT_MEM.load(Ordering::Relaxed);
-            (value >= 0).then(|| {
-                let text = widget_format(&data.mem_format, &[("value", value.to_string())]);
-                (
-                    widget_icon_text(&data.icon_mode, &data.icon_mem, text),
-                    false,
-                )
-            })
-        }
-        BarWidget::Cpu => {
-            let value = STAT_CPU.load(Ordering::Relaxed);
-            (value >= 0).then(|| {
-                let text = widget_format(&data.cpu_format, &[("value", value.to_string())]);
-                (
-                    widget_icon_text(&data.icon_mode, &data.icon_cpu, text),
-                    false,
-                )
-            })
-        }
+        BarWidget::Mem => stat(
+            STAT_MEM.load(Ordering::Relaxed),
+            &data.mem_format,
+            &data.icon_mem,
+            Tone::Normal,
+        ),
+        BarWidget::Cpu => stat(
+            STAT_CPU.load(Ordering::Relaxed),
+            &data.cpu_format,
+            &data.icon_cpu,
+            Tone::Normal,
+        ),
         BarWidget::Net => {
             let down = STAT_NET_D.load(Ordering::Relaxed);
             let up = STAT_NET_U.load(Ordering::Relaxed);
             (down >= 0 && up >= 0).then(|| {
-                let text = widget_format(
+                let text = value(
                     &data.net_format,
                     &[("down", fmt_rate(down)), ("up", fmt_rate(up))],
                 );
                 (
-                    widget_icon_text(&data.icon_mode, &data.icon_net, text),
-                    false,
+                    widget_icon_text(mode, &data.icon_net, text),
+                    Tone::Normal,
+                    glyph,
                 )
             })
         }
-        BarWidget::Volume => {
-            let value = STAT_VOL.load(Ordering::Relaxed);
-            if value < 0 {
-                return None;
-            }
-            if STAT_MUTE.load(Ordering::Relaxed) {
-                Some((
-                    widget_icon_text(&data.icon_mode, &data.icon_volume, "MUTE".to_string()),
-                    true,
-                ))
-            } else {
-                let text = widget_format(&data.volume_format, &[("value", value.to_string())]);
-                Some((
-                    widget_icon_text(&data.icon_mode, &data.icon_volume, text),
-                    false,
-                ))
-            }
-        }
+        // Muted: the mute glyph says so, so the level stays (dimmed);
+        // without one the text is MUTE, as before glyphs.
+        BarWidget::Volume if mute && glyph.is_none() => (vol >= 0).then(|| {
+            (
+                widget_icon_text(mode, &data.icon_volume, "MUTE".to_string()),
+                Tone::Dim,
+                None,
+            )
+        }),
+        BarWidget::Volume => stat(
+            vol,
+            &data.volume_format,
+            &data.icon_volume,
+            if mute { Tone::Dim } else { Tone::Normal },
+        ),
         BarWidget::Media => {
             let text = MEDIA_TEXT.lock().unwrap().clone();
-            (!text.is_empty()).then_some((text, false))
+            (!text.is_empty()).then_some((text, Tone::Normal, None))
         }
         BarWidget::Layout => {
             // Each bar shows its own monitor's layout; none before the
@@ -13496,30 +15262,150 @@ unsafe fn bar_widget_text(
             } else {
                 "[float]".to_string()
             };
-            Some((s, true))
+            Some((s, Tone::Dim, None))
         }
         BarWidget::Title => {
             let t = mb.map(|m| m.title.as_str()).unwrap_or("");
-            (!t.is_empty()).then(|| (t.to_string(), false))
+            (!t.is_empty()).then(|| (t.to_string(), Tone::Normal, None))
         }
-        BarWidget::Workspaces | BarWidget::Apps | BarWidget::Separator | BarWidget::Spacer => None,
+        BarWidget::Disk => {
+            let free = STAT_DISK_FREE.load(Ordering::Relaxed);
+            let total = STAT_DISK_TOTAL.load(Ordering::Relaxed);
+            (total != u64::MAX && total > 0 && free <= total).then(|| {
+                let used = total - free;
+                let size = |b: u64| fmt_size(b.min(i64::MAX as u64) as i64);
+                let text = value(
+                    &data.disk_format,
+                    &[
+                        ("free", size(free)),
+                        ("used", size(used)),
+                        ("total", size(total)),
+                        ("value", (used * 100 / total).to_string()),
+                    ],
+                );
+                (
+                    widget_icon_text(mode, &data.icon_disk, text),
+                    Tone::Normal,
+                    glyph,
+                )
+            })
+        }
+        // These show their value with the glyph under both glyph modes: a
+        // bare keyboard or clock icon would say nothing.
+        BarWidget::Keyboard => {
+            let (lang, region) = kbd_names(kbd_langid());
+            let text = widget_format(&data.keyboard_format, &[("lang", lang), ("region", region)]);
+            (!text.trim().is_empty()).then_some((text, Tone::Normal, glyph))
+        }
+        BarWidget::Uptime => {
+            let up = fmt_uptime(GetTickCount64());
+            let text = widget_format(&data.uptime_format, &[("value", up)]);
+            (!text.trim().is_empty()).then_some((text, Tone::Normal, glyph))
+        }
+        // Without a command, custom_format is plain text of the user's own.
+        BarWidget::Custom => {
+            let out = CUSTOM_TEXT.lock().unwrap().clone();
+            let text = widget_format(&data.custom_format, &[("output", out)]);
+            (!text.trim().is_empty()).then_some((text, Tone::Normal, None))
+        }
+        BarWidget::Workspaces
+        | BarWidget::Apps
+        | BarWidget::Separator
+        | BarWidget::Spacer
+        | BarWidget::MediaControls
+        | BarWidget::Logo => None,
     }
 }
-/// Width one widget will occupy (0 = skipped). `avail` caps the flexible title.
-unsafe fn bar_widget_width(
-    hdc: HDC,
+
+/// One laid-out widget: where its content starts, its width, and for a text
+/// widget the text, built once per paint (the right and centre zones used
+/// to format and measure every text twice). `glyph` is the icon and the x
+/// offset its value starts at; `fill` the widget's own pill colour; `marks`
+/// the width of each workspace mark or app button; `zone` 0 left, 1 centre,
+/// 2 right (which way a powerline arrow points).
+struct BarItem {
+    wgt: BarWidget,
+    x: i32,
+    w: i32,
+    text: Option<(String, Tone)>,
+    glyph: Option<(char, i32)>,
+    fill: Option<u32>,
+    marks: Vec<i32>,
+    zone: u8,
+}
+
+impl BarItem {
+    /// The text colour: on the widget's own pill colour (the alert red
+    /// included) black or white to suit it unless accent_fg is pinned, else
+    /// by tone.
+    fn color(&self, data: &BarData) -> u32 {
+        match (self.fill, self.text.as_ref().map(|t| t.1)) {
+            (Some(f), _) => data.style.pill_fg.unwrap_or_else(|| config::text_on(f)),
+            (None, Some(Tone::Dim)) => data.inactive,
+            (None, Some(Tone::Alert)) => data.style.alert,
+            (None, _) => data.fg,
+        }
+    }
+}
+
+/// `separator_style = powerline` on a `pills` bar: the pills join edge to
+/// edge into square segments with arrow ends, so separators and spacers
+/// have nowhere to go and the widget gap is the arrow's length.
+fn powerline_pills(st: &BarStyle) -> bool {
+    st.sep == SepStyle::Powerline && st.shape == BarShape::Pills
+}
+
+/// How far an island, pill or segment sits in from the bar's top and bottom
+/// at bar height `h`: half the workspace mark's inset, so a mark sits inside.
+fn backdrop_inset(h: i32) -> f32 {
+    ((h / 6).clamp(2, 6) / 2) as f32
+}
+
+/// A joined powerline segment's arrow length: half the segment's height, a
+/// right-angled tip. Also the gap between segments, which the arrow fills.
+fn powerline_cap(h: i32) -> i32 {
+    ((h as f32 - 2.0 * backdrop_inset(h)) / 2.0).round() as i32
+}
+
+/// The `dot` separator's diameter at bar height `h` px.
+fn sep_dot(h: i32) -> f32 {
+    (h as f32 * 0.14).max(3.0)
+}
+
+/// Lay out one widget at x = 0: its width (0 = skipped), and its content if
+/// it is a text widget. `avail` caps the text; `fonts` = [text, icon, bold
+/// title], the text font selected on entry and on return.
+unsafe fn bar_measure(
+    cv: &BarCanvas,
     wgt: BarWidget,
     data: &BarData,
     mb: Option<&MonBar>,
     cell: i32,
     avail: i32,
-) -> i32 {
-    match wgt {
-        BarWidget::Workspaces => mb.map(|m| m.labels.len() as i32 * cell).unwrap_or(0),
-        BarWidget::Apps => mb
-            .map(|m| {
-                m.apps
-                    .iter()
+    fonts: [HGDIOBJ; 3],
+) -> BarItem {
+    let hdc = cv.hdc;
+    let mut it = BarItem {
+        wgt,
+        x: 0,
+        w: 0,
+        text: None,
+        glyph: None,
+        fill: data.style.fills[wgt as usize],
+        marks: Vec::new(),
+        zone: 0,
+    };
+    it.w = match wgt {
+        BarWidget::Workspaces => match mb {
+            Some(mb) => {
+                it.marks = mark_widths(hdc, data, mb, cell);
+                it.marks.iter().sum()
+            }
+            None => 0,
+        },
+        BarWidget::Apps => match mb {
+            Some(mb) => {
+                it.marks = (mb.apps.iter())
                     .map(|app| {
                         bar_icon_px()
                             + 10
@@ -13529,113 +15415,148 @@ unsafe fn bar_widget_width(
                                 0
                             }
                     })
-                    .sum()
-            })
-            .unwrap_or(0),
-        BarWidget::Spacer => bar_widget_gap() * 2,
-        BarWidget::Separator => 1,
-        _ => match bar_widget_text(wgt, data, mb) {
-            Some((s, _)) => text_width(hdc, &s).min(avail.max(0)),
+                    .collect();
+                it.marks.iter().sum()
+            }
             None => 0,
         },
+        BarWidget::Spacer | BarWidget::Separator if powerline_pills(&data.style) => 0,
+        BarWidget::Spacer => bar_widget_gap() * 2,
+        BarWidget::Separator => match data.style.sep {
+            SepStyle::Line => 1,
+            SepStyle::Dot => sep_dot(cv.h).ceil() as i32,
+            SepStyle::Powerline => (cv.h as f32 * 0.3).round() as i32,
+        },
+        BarWidget::MediaControls => 3 * media_button_w(hdc, fonts),
+        BarWidget::Logo => logo_dims(cv.h).0,
+        _ => {
+            let Some((s, tone, glyph)) = bar_widget_text(wgt, data, mb) else {
+                return it;
+            };
+            let mut w = 0;
+            if let Some(g) = glyph {
+                // One glyph needs no DrawText layout: its extent is cheaper.
+                use windows::Win32::Graphics::Gdi::GetTextExtentPoint32W;
+                let mut size = SIZE::default();
+                SelectObject(hdc, fonts[1]);
+                let _ = GetTextExtentPoint32W(hdc, g.encode_utf16(&mut [0; 2]), &mut size);
+                SelectObject(hdc, fonts[0]);
+                let gw = size.cx;
+                // About a space between the runs, as `both` has.
+                w = if s.is_empty() {
+                    gw
+                } else {
+                    gw + dpi_px(4, bar_dpi())
+                };
+                it.glyph = Some((g, w));
+            }
+            // A low battery turns its own pill red rather than its text.
+            it.fill = it.fill.map(|f| match tone {
+                Tone::Alert => data.style.alert,
+                _ => f,
+            });
+            SelectObject(hdc, text_font(wgt, data, fonts));
+            w += text_width(hdc, &s);
+            SelectObject(hdc, fonts[0]);
+            it.text = Some((s, tone));
+            w.min(avail.max(0))
+        }
+    };
+    it
+}
+
+/// The font a text widget draws in: the bold one for a `title_bold` title.
+fn text_font(wgt: BarWidget, data: &BarData, fonts: [HGDIOBJ; 3]) -> HGDIOBJ {
+    match wgt {
+        BarWidget::Title if data.style.title_bold => fonts[2],
+        _ => fonts[0],
     }
 }
 
-/// Paint one widget with its left edge at `x`; returns the width consumed.
-/// Records hit ranges (pills / app buttons / volume) into `lay` for the
-/// wndproc's mouse handling.
-#[allow(clippy::too_many_arguments)]
+/// One music button's width: the play glyph's in the icon font, plus room.
+unsafe fn media_button_w(hdc: HDC, fonts: [HGDIOBJ; 3]) -> i32 {
+    use windows::Win32::Graphics::Gdi::GetTextExtentPoint32W;
+    let mut size = SIZE::default();
+    SelectObject(hdc, fonts[1]);
+    let _ = GetTextExtentPoint32W(hdc, MEDIA_GLYPHS[1].encode_utf16(&mut [0; 2]), &mut size);
+    SelectObject(hdc, fonts[0]);
+    size.cx + dpi_px(10, bar_dpi())
+}
+
+/// Each workspace mark's width. `cell` for all of them, as always, unless
+/// `workspace_label` is not auto or `workspace_apps` is on: then a mark
+/// widens to its label and icons, never narrower than `cell`. Gated so a
+/// bar without those keys keeps uniform cells (and its long auto names stay
+/// clipped). `dot` draws no labels, so its marks stay `cell`.
+unsafe fn mark_widths(hdc: HDC, data: &BarData, mb: &MonBar, cell: i32) -> Vec<i32> {
+    if !data.ws_fit || data.style.ws == WsStyle::Dot {
+        return vec![cell; mb.labels.len()];
+    }
+    let dpi = bar_dpi();
+    (mb.labels.iter().enumerate())
+        .map(|(i, l)| cell.max(text_width(hdc, l) + mark_icons_w(mb, i, dpi) + 2 * dpi_px(8, dpi)))
+        .collect()
+}
+
+/// The room mark `i`'s app icons take after its label (0 = none).
+fn mark_icons_w(mb: &MonBar, i: usize, dpi: u32) -> i32 {
+    match mb.ws_icons.get(i).map_or(0, Vec::len) as i32 {
+        0 => 0,
+        n => dpi_px(4, dpi) + n * dpi_px(WS_ICON_PX, dpi) + (n - 1) * dpi_px(2, dpi),
+    }
+}
+
+/// Consecutive x-ranges of `widths` from `x`. Pure.
+fn mark_spans(x: i32, widths: &[i32]) -> Vec<(i32, i32)> {
+    let mut at = x;
+    (widths.iter())
+        .map(|&w| {
+            at += w;
+            (at - w, at)
+        })
+        .collect()
+}
+
+/// Where the sliding mark is at position `f` (mark units, fractional mid-
+/// slide): each edge interpolated between the marks either side, so marks
+/// of different widths morph into each other. With uniform marks this is
+/// the old `x + f * cell`. Pure; an empty list gives (0, 0).
+fn pill_span(spans: &[(i32, i32)], f: f64) -> (f64, f64) {
+    let Some(last) = spans.len().checked_sub(1) else {
+        return (0.0, 0.0);
+    };
+    let f = f.clamp(0.0, last as f64);
+    let i = f.floor() as usize;
+    let (a, b) = (spans[i], spans[(i + 1).min(last)]);
+    let t = f - i as f64;
+    (
+        a.0 as f64 + (b.0 - a.0) as f64 * t,
+        a.1 as f64 + (b.1 - a.1) as f64 * t,
+    )
+}
+
+/// Paint one laid-out widget (its hit ranges are `bar_hits`'). `fonts` as
+/// for `bar_measure`.
 unsafe fn bar_widget_draw(
-    hdc: HDC,
-    wgt: BarWidget,
-    x: i32,
-    h_px: i32,
-    avail: i32,
+    cv: &BarCanvas,
+    it: &BarItem,
     data: &BarData,
     mb: Option<&MonBar>,
-    lay: &mut BarLayout,
-    cell: i32,
-) -> i32 {
-    match wgt {
+    fonts: [HGDIOBJ; 3],
+) {
+    let (hdc, x, h_px) = (cv.hdc, it.x, cv.h);
+    let cy = h_px as f32 / 2.0;
+    match it.wgt {
         BarWidget::Workspaces => {
-            let Some(mb) = mb else { return 0 };
-            let n = mb.labels.len() as i32;
-            if n == 0 || cell <= 0 {
-                return 0;
+            if let Some(mb) = mb {
+                draw_workspaces(cv, it, data, mb);
             }
-            lay.pills_x0 = x;
-            lay.npills = mb.labels.len();
-            // Numbers first, in their resting colours...
-            for (i, label) in mb.labels.iter().enumerate() {
-                let x0 = x + i as i32 * cell;
-                let mut cr = RECT {
-                    left: x0,
-                    top: 0,
-                    right: x0 + cell,
-                    bottom: h_px,
-                };
-                let occ = mb.occupied & (1 << i) != 0;
-                SetTextColor(hdc, COLORREF(if occ { data.fg } else { data.inactive }));
-                let mut s: Vec<u16> = label.encode_utf16().collect();
-                DrawTextW(
-                    hdc,
-                    &mut s,
-                    &mut cr,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-            }
-            // ...then the accent highlight, at the animated position while a
-            // slide is in flight, otherwise snapped to the active pill.
-            let hl = match pill_anim_pos(mb.hmon) {
-                Some((pos, _)) => Some(x + (pos * cell as f64).round() as i32),
-                None if mb.active != usize::MAX => Some(x + mb.active as i32 * cell),
-                None => None,
-            };
-            if let Some(hx) = hl {
-                let ipad = (h_px / 6).clamp(2, 6);
-                let pill = RECT {
-                    left: hx + 3,
-                    top: ipad,
-                    right: hx + cell - 3,
-                    bottom: h_px - ipad,
-                };
-                let ab = CreateSolidBrush(COLORREF(data.accent));
-                FillRect(hdc, &pill, ab);
-                let _ = DeleteObject(HGDIOBJ(ab.0));
-                let nearest =
-                    (((hx - x) as f32 / cell as f32).round() as i32).clamp(0, n - 1) as usize;
-                let mut cr = RECT {
-                    left: hx,
-                    top: 0,
-                    right: hx + cell,
-                    bottom: h_px,
-                };
-                SetTextColor(hdc, COLORREF(data.bg));
-                let mut s: Vec<u16> = mb.labels[nearest].encode_utf16().collect();
-                DrawTextW(
-                    hdc,
-                    &mut s,
-                    &mut cr,
-                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
-                );
-            }
-            n * cell
         }
         BarWidget::Apps => {
-            let Some(mb) = mb else { return 0 };
-            if mb.apps.is_empty() {
-                return 0;
-            }
+            let Some(mb) = mb else { return };
             let iy = (h_px - bar_icon_px()) / 2;
-            let mut used = 0;
-            for app in &mb.apps {
-                let label_w = if data.show_app_labels {
-                    text_width(hdc, &app.label) + 8
-                } else {
-                    0
-                };
-                let width = bar_icon_px() + 10 + label_w;
-                let bx = x + used;
+            let mut bx = x;
+            for (app, &width) in mb.apps.iter().zip(&it.marks) {
                 if app.icon > 0 {
                     let _ = DrawIconEx(
                         hdc,
@@ -13667,61 +15588,441 @@ unsafe fn bar_widget_draw(
                         DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
                     );
                 }
-                lay.apps.push((bx, bx + width, app.hwnd));
-                used += width;
+                bx += width;
             }
-            used
         }
-        BarWidget::Spacer => bar_widget_gap() * 2,
-        BarWidget::Separator => {
-            let top = (h_px / 4).max(1);
-            let line = RECT {
-                left: x,
-                top,
-                right: x + 1,
-                bottom: h_px - top,
-            };
-            let brush = CreateSolidBrush(COLORREF(data.inactive));
-            FillRect(hdc, &line, brush);
-            let _ = DeleteObject(HGDIOBJ(brush.0));
-            1
+        BarWidget::Spacer => {}
+        BarWidget::Separator => match data.style.sep {
+            SepStyle::Line => {
+                let top = (h_px / 4).max(1);
+                let line = RECT {
+                    left: x,
+                    top,
+                    right: x + 1,
+                    bottom: h_px - top,
+                };
+                let brush = CreateSolidBrush(COLORREF(data.inactive));
+                FillRect(hdc, &line, brush);
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+            }
+            SepStyle::Dot => {
+                let (d, cx) = (sep_dot(h_px), x as f32 + it.w as f32 / 2.0);
+                let dot = [cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0];
+                cv.shape(dot, d, Some(data.inactive), None);
+            }
+            SepStyle::Powerline => {
+                // A small filled arrow pointing away from the screen edge
+                // its zone hugs (left in the right zone).
+                let (l, r, half) = (x as f32, (x + it.w) as f32, h_px as f32 * 0.18);
+                let (base, tip) = if it.zone == 2 { (r, l) } else { (l, r) };
+                cv.poly(
+                    &[(base, cy - half), (tip, cy), (base, cy + half)],
+                    data.inactive,
+                );
+            }
+        },
+        BarWidget::MediaControls => {
+            let bw = it.w / 3;
+            SetTextColor(hdc, COLORREF(it.color(data)));
+            SelectObject(hdc, fonts[1]);
+            for (k, g) in MEDIA_GLYPHS.iter().enumerate() {
+                let mut r = RECT {
+                    left: x + k as i32 * bw,
+                    top: 0,
+                    right: x + (k as i32 + 1) * bw,
+                    bottom: h_px,
+                };
+                DrawTextW(
+                    hdc,
+                    g.encode_utf16(&mut [0; 2]),
+                    &mut r,
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+            }
+            SelectObject(hdc, fonts[0]);
+        }
+        BarWidget::Logo => {
+            if let Some((src, sw, sh)) = logo_alpha() {
+                let (lw, lh) = logo_dims(h_px);
+                let mask = scale_mask(src, *sw, *sh, lw as usize, lh as usize);
+                cv.mask((x, (h_px - lh) / 2), &mask, (lw, lh), it.color(data));
+            }
         }
         _ => {
-            let Some((s, dim)) = bar_widget_text(wgt, data, mb) else {
-                return 0;
-            };
-            let tw = text_width(hdc, &s).min(avail.max(0));
-            if tw <= 0 {
-                return 0;
-            }
+            let Some((s, _)) = &it.text else { return };
             let mut r = RECT {
                 left: x,
                 top: 0,
-                right: x + tw,
+                right: x + it.w,
                 bottom: h_px,
             };
-            SetTextColor(hdc, COLORREF(if dim { data.inactive } else { data.fg }));
-            let mut v: Vec<u16> = s.encode_utf16().collect();
-            DrawTextW(
-                hdc,
-                &mut v,
-                &mut r,
-                DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
-            );
-            if wgt == BarWidget::Volume {
-                lay.vol = (x, x + tw);
+            SetTextColor(hdc, COLORREF(it.color(data)));
+            if let Some((g, off)) = it.glyph {
+                // The icon in its own font, then the value after it.
+                let mut gr = RECT {
+                    right: x + off.min(it.w),
+                    ..r
+                };
+                SelectObject(hdc, fonts[1]);
+                DrawTextW(
+                    hdc,
+                    g.encode_utf16(&mut [0; 2]),
+                    &mut gr,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+                );
+                r.left += off;
             }
-            tw
+            // A glyph_only stat has no value: DrawTextW is never handed an
+            // empty run (its pointer would be a dangling one).
+            if !s.is_empty() {
+                SelectObject(hdc, text_font(it.wgt, data, fonts));
+                let mut v: Vec<u16> = s.encode_utf16().collect();
+                DrawTextW(
+                    hdc,
+                    &mut v,
+                    &mut r,
+                    DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS,
+                );
+                SelectObject(hdc, fonts[0]);
+            }
         }
     }
 }
 
-/// Paint one monitor's bar from the three configurable zones (navbar.conf
-/// `left` / `center` / `right`): the left zone flows left-to-right, the right
-/// zone hugs the right edge (listed order still reads left-to-right), and the
-/// center zone is centred in the remaining gap (the title flexes to fill).
-/// The owning monitor's HMONITOR is in GWLP_USERDATA so each bar paints its own
-/// data; the hit ranges land in BAR_LAYOUTS for the mouse handlers.
+/// The workspace marks laid out in `it` (`marks` widths from `it.x`):
+/// labels (dots for `dot`) in their resting colours, then the
+/// `workspace_style` mark at the slide position while one runs, else on the
+/// active mark. `box` is the old look pixel for pixel (a whole-pixel accent
+/// block, the label on it in accent_fg); the other marks are anti-aliased
+/// and slide at sub-pixel positions. Marks of different widths
+/// (`mark_widths`) slide by `pill_span`, still in mark units.
+unsafe fn draw_workspaces(cv: &BarCanvas, it: &BarItem, data: &BarData, mb: &MonBar) {
+    let n = mb.labels.len().min(it.marks.len());
+    if n == 0 {
+        return;
+    }
+    let spans = mark_spans(it.x, &it.marks[..n]);
+    let (hdc, h_px, ws, dpi) = (cv.hdc, cv.h, data.style.ws, bar_dpi());
+    let ipad = (h_px / 6).clamp(2, 6);
+    let pos = match pill_anim_pos(mb.hmon) {
+        Some((pos, _)) => Some(pos),
+        None if mb.active != usize::MAX => Some(mb.active as f64),
+        None => None,
+    };
+    // The mark's edges: box keeps the old whole-pixel steps.
+    let mark = pos.map(|p| {
+        let (a, b) = pill_span(&spans, p);
+        if ws == WsStyle::Box {
+            (a.round(), b.round())
+        } else {
+            (a, b)
+        }
+    });
+    // The label under the mark; it changes halfway through a slide.
+    let nearest = pos.map(|p| (p.round().max(0.0) as usize).min(n - 1));
+    let label = |i: usize, l: i32, r: i32, color: u32| {
+        let mut cr = RECT {
+            left: l,
+            top: 0,
+            right: r,
+            bottom: h_px,
+        };
+        let iw = mark_icons_w(mb, i, dpi);
+        if iw > 0 {
+            // The label then its app icons, centred together.
+            let tw = text_width(hdc, &mb.labels[i]);
+            cr.left = l + (r - l - tw - iw) / 2;
+            cr.right = cr.left + tw;
+        }
+        SetTextColor(hdc, COLORREF(color));
+        let mut s: Vec<u16> = mb.labels[i].encode_utf16().collect();
+        DrawTextW(
+            hdc,
+            &mut s,
+            &mut cr,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
+        let px = dpi_px(WS_ICON_PX, dpi);
+        let (mut ix, iy) = (cr.right + dpi_px(4, dpi), (h_px - px) / 2);
+        for &icon in mb.ws_icons.get(i).into_iter().flatten() {
+            if icon > 0 {
+                let hicon = HICON(icon as *mut c_void);
+                let _ = DrawIconEx(hdc, ix, iy, hicon, px, px, 0, None, DI_NORMAL);
+            } else {
+                draw_builtin_icon(hdc, "command", ix, iy, px, data.inactive);
+            }
+            ix += px + dpi_px(2, dpi);
+        }
+    };
+    let resting = |i: usize| {
+        if mb.occupied & (1 << i) != 0 {
+            data.fg
+        } else {
+            data.inactive
+        }
+    };
+    let cy = h_px as f32 / 2.0;
+    match ws {
+        WsStyle::Dot => {
+            let d = (h_px as f32 * 0.2).max(4.0);
+            for (i, &(a, b)) in spans.iter().enumerate() {
+                let cx = (a + b) as f32 / 2.0;
+                let dot = [cx - d / 2.0, cy - d / 2.0, cx + d / 2.0, cy + d / 2.0];
+                cv.shape(dot, d, Some(resting(i)), None);
+            }
+            if let Some((a, b)) = mark {
+                let pw = (d * 2.6).min((b - a) as f32 - 4.0).max(d);
+                let cx = ((a + b) / 2.0) as f32;
+                let mark = [cx - pw / 2.0, cy - d / 2.0, cx + pw / 2.0, cy + d / 2.0];
+                cv.shape(mark, d, Some(data.accent), None);
+            }
+        }
+        WsStyle::Underline => {
+            // The marked label is drawn once, in fg: ClearType text drawn
+            // over its own resting copy would fringe.
+            for i in (0..n).filter(|&i| Some(i) != nearest) {
+                label(i, spans[i].0, spans[i].1, resting(i));
+            }
+            if let (Some((a, b)), Some(i)) = (mark, nearest) {
+                label(i, spans[i].0, spans[i].1, data.fg);
+                let uw = ((b - a) as f32 * 0.45).max(6.0);
+                let uh = (h_px as f32 / 14.0).round().max(2.0);
+                let bottom = (h_px - (ipad / 2).max(1)) as f32;
+                let cx = ((a + b) / 2.0) as f32;
+                cv.shape(
+                    [cx - uw / 2.0, bottom - uh, cx + uw / 2.0, bottom],
+                    uh,
+                    Some(data.accent),
+                    None,
+                );
+            }
+        }
+        WsStyle::Box | WsStyle::Pill => {
+            for (i, &(a, b)) in spans.iter().enumerate() {
+                label(i, a, b, resting(i));
+            }
+            if let (Some((a, b)), Some(i)) = (mark, nearest) {
+                let mark = [
+                    a as f32 + 3.0,
+                    ipad as f32,
+                    b as f32 - 3.0,
+                    (h_px - ipad) as f32,
+                ];
+                let radius = if ws == WsStyle::Pill {
+                    h_px as f32
+                } else {
+                    0.0
+                };
+                cv.shape(mark, radius, Some(data.accent), None);
+                label(i, a.round() as i32, b.round() as i32, data.style.accent_fg);
+            }
+        }
+    }
+}
+
+/// Room a `pills`-shape capsule leaves around a widget's content. None for a
+/// separator or a spacer: they are the space between pills.
+fn pill_pad(shape: BarShape, wgt: BarWidget, ipad: i32) -> i32 {
+    match (shape, wgt) {
+        (_, BarWidget::Separator | BarWidget::Spacer) => 0,
+        (BarShape::Pills, _) => ipad,
+        _ => 0,
+    }
+}
+
+/// What sits under the widgets for the bar's shape: an island per zone
+/// (`islands`) in `surface`, or a capsule per widget (`pills`) in the
+/// widget's own colour (`widget_colors`, red for a low battery) or
+/// `surface`, and the
+/// `border` outline, round a floating bar or each island / pill (a strip
+/// gets a line along its inner edge). Islands and pills sit on the bar
+/// background: a solid rail, not the desktop (plan/decisions.md).
+#[allow(clippy::too_many_arguments)]
+unsafe fn bar_backdrop(
+    cv: &BarCanvas,
+    st: &BarStyle,
+    dpi: u32,
+    zones: [&[BarItem]; 3],
+    zone_pad: i32,
+    ipad: i32,
+) {
+    let bw = dpi_px(st.border_w, dpi).max(1) as f32;
+    let border = (st.border_w > 0).then_some((st.border, bw));
+    let radius = dpi_px(st.radius, dpi) as f32;
+    let inset = backdrop_inset(cv.h);
+    let (w, h) = (cv.w as f32, cv.h as f32);
+    let surface = |l: i32, r: i32, fill: Option<u32>| {
+        cv.shape(
+            [l as f32, inset, r as f32, h - inset],
+            radius,
+            Some(fill.unwrap_or(st.surface)),
+            border,
+        )
+    };
+    match st.shape {
+        BarShape::Strip => {
+            if let Some((c, bw)) = border {
+                let edge = if BAR_BOTTOM.load(Ordering::Relaxed) {
+                    [0.0, 0.0, w, bw]
+                } else {
+                    [0.0, h - bw, w, h]
+                };
+                cv.shape(edge, 0.0, Some(c), None);
+            }
+        }
+        BarShape::Floating => {
+            if border.is_some() {
+                cv.shape([0.0, 0.0, w, h], radius, None, border);
+            }
+        }
+        BarShape::Islands => {
+            for zone in zones {
+                if let (Some(a), Some(b)) = (zone.first(), zone.last()) {
+                    surface(a.x - zone_pad, b.x + b.w + zone_pad, None);
+                }
+            }
+        }
+        BarShape::Pills if st.sep == SepStyle::Powerline => {
+            // Joined segments, square: in the left and centre zones a
+            // segment's fill starts where the one before it ends, so the gap
+            // in between (where that one's arrow points) is in the next
+            // one's colour; the right zone mirrors it. The arrows go on
+            // after every fill, each in its own segment's colour, the last
+            // (the first, on the right) pointing into the bar background.
+            let cap = powerline_cap(cv.h) as f32;
+            for (z, zone) in zones.iter().enumerate() {
+                let segs: Vec<&BarItem> = (zone.iter())
+                    .filter(|it| !matches!(it.wgt, BarWidget::Separator | BarWidget::Spacer))
+                    .collect();
+                let edge = |it: &BarItem| (it.x - ipad, it.x + it.w + ipad);
+                let mut arrows: Vec<(f32, f32, u32)> = Vec::with_capacity(segs.len());
+                for (k, it) in segs.iter().enumerate() {
+                    let (l, r) = edge(it);
+                    let fill = it.fill.unwrap_or(st.surface);
+                    let (fl, fr, base, tip) = if z == 2 {
+                        let fr = segs.get(k + 1).map_or(r, |n| edge(n).0);
+                        (l, fr, l as f32, l as f32 - cap)
+                    } else {
+                        let fl = k.checked_sub(1).map_or(l, |p| edge(segs[p]).1);
+                        (fl, r, r as f32, r as f32 + cap)
+                    };
+                    cv.shape(
+                        [fl as f32, inset, fr as f32, h - inset],
+                        0.0,
+                        Some(fill),
+                        None,
+                    );
+                    arrows.push((base, tip, fill));
+                }
+                for (base, tip, fill) in arrows {
+                    cv.poly(&[(base, inset), (tip, h / 2.0), (base, h - inset)], fill);
+                }
+            }
+        }
+        BarShape::Pills => {
+            for it in zones.into_iter().flatten() {
+                if !matches!(it.wgt, BarWidget::Separator | BarWidget::Spacer) {
+                    surface(it.x - ipad, it.x + it.w + ipad, it.fill);
+                }
+            }
+        }
+    }
+}
+
+/// Every mouse target of a laid-out bar, before anything is drawn (the
+/// hover highlight goes under the widgets): the workspace marks, the app
+/// buttons, the volume widget's wheel range, and each widget with a click
+/// action. A widget's range runs to halfway across the gap either side, so
+/// neighbours meet without a dead strip; `hp` is how far its highlight
+/// reaches past its content (or pill). Pure.
+fn bar_hits(
+    zones: [&[BarItem]; 3],
+    data: &BarData,
+    mb: Option<&MonBar>,
+    gap: i32,
+    ipad: i32,
+    hp: i32,
+) -> BarLayout {
+    let st = &data.style;
+    let under = |fill: Option<u32>| match st.shape {
+        BarShape::Pills => fill.unwrap_or(st.surface),
+        BarShape::Islands => st.surface,
+        _ => data.bg,
+    };
+    let mut lay = BarLayout {
+        hover: st.hover,
+        ..Default::default()
+    };
+    for it in zones.into_iter().flatten() {
+        let p = pill_pad(st.shape, it.wgt, ipad);
+        match it.wgt {
+            BarWidget::Workspaces => {
+                lay.pills = mark_spans(it.x, &it.marks);
+                lay.pill_under = under(it.fill);
+            }
+            BarWidget::Apps => {
+                let spans = mark_spans(it.x, &it.marks);
+                for ((a, b), app) in spans.into_iter().zip(mb.map_or(&[][..], |m| &m.apps)) {
+                    lay.apps.push((a, b, app.hwnd));
+                }
+                lay.app_under = under(it.fill);
+            }
+            BarWidget::Separator | BarWidget::Spacer => {}
+            BarWidget::MediaControls => {
+                let bw = it.w / 3;
+                for (k, act) in MEDIA_ACTIONS.iter().enumerate() {
+                    let x0 = it.x + k as i32 * bw;
+                    lay.hits.push(BarHit {
+                        x0,
+                        x1: x0 + bw,
+                        vis: (x0, x0 + bw),
+                        wgt: it.wgt as u8,
+                        sub: k as u8,
+                        acts: [action_index(act), 0, 0],
+                        under: under(it.fill),
+                    });
+                }
+            }
+            wgt => {
+                if wgt == BarWidget::Volume {
+                    lay.vol = (it.x, it.x + it.w);
+                }
+                let acts = st.clicks[wgt as usize];
+                if acts != [0; 3] {
+                    let (l, r) = (it.x - p, it.x + it.w + p);
+                    lay.hits.push(BarHit {
+                        x0: l - gap / 2,
+                        x1: r + gap - gap / 2,
+                        vis: (l - hp, r + hp),
+                        wgt: wgt as u8,
+                        sub: 0,
+                        acts,
+                        under: under(it.fill),
+                    });
+                }
+            }
+        }
+    }
+    lay
+}
+
+/// The hover target under client x `hx`: (its key, the x-range to tint, the
+/// colour under it). The key is the target's hit-range start, unique on one
+/// bar; the mark at `active` is not a target (it is marked already), and
+/// nothing without a click is.
+fn hover_target(lay: &BarLayout, active: usize, hx: i32) -> Option<(i32, (i32, i32), u32)> {
+    if let Some(i) = lay.pills.iter().position(|&(a, b)| hx >= a && hx < b) {
+        let (a, b) = lay.pills[i];
+        return (i != active).then_some((a, (a + 3, b - 3), lay.pill_under));
+    }
+    if let Some(&(a, b, _)) = lay.apps.iter().find(|&&(a, b, _)| hx >= a && hx < b) {
+        return Some((a, (a, b), lay.app_under));
+    }
+    (lay.hits.iter())
+        .find(|h| hx >= h.x0 && hx < h.x1)
+        .map(|h| (h.x0, h.vis, h.under))
+}
+
 /// Per-bar signature of everything the 1 s tick can reveal. Returns true when it
 /// differs from the last tick for this bar (and records the new value), so an
 /// idle desktop repaints roughly once a minute per monitor instead of once a
@@ -13747,8 +16048,16 @@ unsafe fn bar_tick_changed(h: HWND) -> bool {
     ] {
         stat.load(Ordering::Relaxed).hash(&mut hasher);
     }
-    STAT_MUTE.load(Ordering::Relaxed).hash(&mut hasher);
+    for flag in [&STAT_MUTE, &STAT_BAT_AC, &STAT_NET_WIFI] {
+        flag.load(Ordering::Relaxed).hash(&mut hasher);
+    }
     MEDIA_TEXT.lock().unwrap().hash(&mut hasher);
+    // The newer widgets: a Win+Space switch shows within a second, the
+    // uptime by the minute.
+    kbd_langid().hash(&mut hasher);
+    (GetTickCount64() / 60_000).hash(&mut hasher);
+    STAT_DISK_FREE.load(Ordering::Relaxed).hash(&mut hasher);
+    CUSTOM_TEXT.lock().unwrap().hash(&mut hasher);
     let now = hasher.finish();
     let mut seen = BAR_TICK_SIG.lock().unwrap();
     seen.get_or_insert_with(HashMap::new)
@@ -13758,7 +16067,519 @@ unsafe fn bar_tick_changed(h: HWND) -> bool {
 
 static BAR_TICK_SIG: Mutex<Option<HashMap<isize, u64>>> = Mutex::new(None);
 
+/// A bar's back buffer: a 32 bpp top-down DIB section kept selected into its
+/// own memory DC, so the anti-aliased shapes write its pixels and GDI draws
+/// text into the same surface. Cached per bar window and remade only when
+/// the client size changes (a DPI change resizes the bar, so it is covered;
+/// pixels have no DPI of their own). It used to be a CreateCompatibleBitmap
+/// per paint, up to 100 a second during a pill slide. Handles as isize, as
+/// BAR_FONTS keeps them, so the map can sit in a static. Main thread only
+/// (every bar paints there); bars are never destroyed, so neither are these.
+#[derive(Clone, Copy)]
+struct BarDib {
+    dc: isize,
+    bmp: isize,
+    old: isize,
+    bits: usize,
+    w: i32,
+    h: i32,
+}
+static BAR_DIBS: Mutex<Option<HashMap<isize, BarDib>>> = Mutex::new(None);
+
+/// Bar `key`'s DIB at `w` x `h`, made (or remade) on a size change. None when
+/// GDI refuses one: paint then draws on the window DC, as it always could.
+unsafe fn bar_dib(key: isize, like: HDC, w: i32, h: i32) -> Option<BarDib> {
+    let cached = BAR_DIBS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|m| m.remove(&key));
+    let dib = match cached {
+        Some(d) if d.w == w && d.h == h => Some(d),
+        stale => {
+            if let Some(d) = stale {
+                SelectObject(HDC(d.dc as *mut c_void), HGDIOBJ(d.old as *mut c_void));
+                let _ = DeleteObject(HGDIOBJ(d.bmp as *mut c_void));
+                let _ = DeleteDC(HDC(d.dc as *mut c_void));
+            }
+            new_bar_dib(like, w, h)
+        }
+    }?;
+    BAR_DIBS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(key, dib);
+    Some(dib)
+}
+
+unsafe fn new_bar_dib(like: HDC, w: i32, h: i32) -> Option<BarDib> {
+    if w <= 0 || h <= 0 {
+        return None;
+    }
+    let bi = BITMAPINFO {
+        bmiHeader: BITMAPINFOHEADER {
+            biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+            biWidth: w,
+            biHeight: -h, // top-down: row 0 is the top, as aa_round_rect indexes
+            biPlanes: 1,
+            biBitCount: 32,
+            biCompression: BI_RGB.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let dc = CreateCompatibleDC(like);
+    if dc.0.is_null() {
+        return None;
+    }
+    let mut bits: *mut c_void = core::ptr::null_mut();
+    let bmp = match CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &mut bits, HANDLE::default(), 0) {
+        Ok(b) if !bits.is_null() => b,
+        other => {
+            if let Ok(b) = other {
+                let _ = DeleteObject(HGDIOBJ(b.0));
+            }
+            let _ = DeleteDC(dc);
+            return None;
+        }
+    };
+    let old = SelectObject(dc, HGDIOBJ(bmp.0));
+    Some(BarDib {
+        dc: dc.0 as isize,
+        bmp: bmp.0 as isize,
+        old: old.0 as isize,
+        bits: bits as usize,
+        w,
+        h,
+    })
+}
+
+/// A COLORREF (0x00BBGGRR) as a DIB pixel (0x00RRGGBB).
+fn px_color(c: u32) -> u32 {
+    ((c & 0xFF) << 16) | (c & 0xFF00) | ((c >> 16) & 0xFF)
+}
+
+/// `color` over `dst` at coverage `cov` (0..=1), both 0x00RRGGBB.
+fn blend_px(dst: u32, color: u32, cov: f32) -> u32 {
+    if cov >= 1.0 {
+        return color;
+    }
+    if cov <= 0.0 {
+        return dst;
+    }
+    let a = (cov * 256.0) as u32;
+    let ch = |shift: u32| {
+        let (d, c) = ((dst >> shift) & 0xFF, (color >> shift) & 0xFF);
+        ((d * (256 - a) + c * a + 128) >> 8) << shift
+    };
+    ch(0) | ch(8) | ch(16)
+}
+
+/// Signed distance from (x, y) to the rounded rect `r` ([left, top, right,
+/// bottom]) with corner radius `rad` (already clamped): < 0 inside.
+fn round_rect_sd(x: f32, y: f32, r: [f32; 4], rad: f32) -> f32 {
+    let qx = (x - (r[0] + r[2]) / 2.0).abs() - ((r[2] - r[0]) / 2.0 - rad);
+    let qy = (y - (r[1] + r[3]) / 2.0).abs() - ((r[3] - r[1]) / 2.0 - rad);
+    qx.max(0.0).hypot(qy.max(0.0)) + qx.max(qy).min(0.0) - rad
+}
+
+/// The pixels of the row centred at `cy` that lie wholly inside `r` with
+/// radius `rad` (coverage exactly 1), as an inclusive range of x; empty
+/// (a > b) when none do. No square root: it is the cross of `r` that the
+/// corners do not cut, so a pixel qualifies when its centre is half a pixel
+/// inside both edges of a band.
+fn solid_span(cy: f32, r: [f32; 4], rad: f32) -> (i32, i32) {
+    let within = |lo: f32, hi: f32| cy >= lo + 0.5 && cy <= hi - 0.5;
+    let (lo, hi) = if within(r[1] + rad, r[3] - rad) {
+        (r[0], r[2])
+    } else if within(r[1], r[3]) {
+        (r[0] + rad, r[2] - rad)
+    } else {
+        return (0, -1);
+    };
+    (lo.ceil() as i32, hi.floor() as i32 - 1)
+}
+
+/// Anti-aliased rounded rect into `px`, a top-down 0x00RRGGBB buffer `w`
+/// wide. `r` is [left, top, right, bottom] in px, fractional allowed; a
+/// radius past half the short side clamps to it (a capsule). `fill` paints
+/// the inside, `border` = (colour, width) an outline that wide along the
+/// inside of the edge (alone, an outline only). Coverage is the signed
+/// distance at each pixel centre over a 1 px ramp, computed only in the
+/// corner and edge rings; the rest of the inside is a plain fill. An
+/// integer rect with radius 0 is an exact fill, which keeps `box` pixel
+/// for pixel what FillRect drew. Pure: clipped to the buffer, never panics.
+fn aa_round_rect(
+    px: &mut [u32],
+    w: i32,
+    r: [f32; 4],
+    radius: f32,
+    fill: Option<u32>,
+    border: Option<(u32, f32)>,
+) {
+    if w <= 0 || !(r[2] > r[0] && r[3] > r[1]) {
+        return;
+    }
+    let h = (px.len() / w as usize) as i32;
+    let rad = radius.clamp(0.0, (r[2] - r[0]).min(r[3] - r[1]) / 2.0);
+    let bw = border.map_or(0.0, |(_, bw)| bw.max(0.0));
+    // The fill's shape: inside the outline. Equal to `r` without one.
+    let inner = [r[0] + bw, r[1] + bw, r[2] - bw, r[3] - bw];
+    let has_inner = inner[2] > inner[0] && inner[3] > inner[1];
+    let irad = (rad - bw).clamp(
+        0.0,
+        ((inner[2] - inner[0]).min(inner[3] - inner[1]) / 2.0).max(0.0),
+    );
+    let x0 = (r[0].floor() as i32).max(0);
+    let x1 = (r[2].ceil() as i32).min(w);
+    let y0 = (r[1].floor() as i32).max(0);
+    let y1 = (r[3].ceil() as i32).min(h);
+    for y in y0..y1 {
+        let cy = y as f32 + 0.5;
+        let row = &mut px[(y * w) as usize..((y + 1) * w) as usize];
+        // The solid middle of the row is a flat fill; only the pixels either
+        // side of it (the edge and corner rings) compute a distance.
+        let (mut sa, mut sb) = if has_inner {
+            solid_span(cy, inner, irad)
+        } else {
+            (0, -1)
+        };
+        (sa, sb) = (sa.max(x0), sb.min(x1 - 1));
+        if sa > sb {
+            (sa, sb) = (x1, x1 - 1);
+            // A row of an outline's top or bottom band (no inner coverage
+            // anywhere in it): its outer solid span is exactly the border
+            // colour (outer 1, inside 0), so flat-fill it. Per-pixel, a
+            // thick border on a wide bar cost two hypot per pixel of every
+            // band row, on the hook thread.
+            let no_inner = !has_inner || cy + 0.5 <= inner[1] || cy - 0.5 >= inner[3];
+            if let (Some((b, _)), true) = (border, bw > 0.0 && no_inner) {
+                let (oa, ob) = solid_span(cy, r, rad);
+                let (oa, ob) = (oa.max(x0), ob.min(x1 - 1));
+                if oa <= ob {
+                    row[oa as usize..=ob as usize].fill(b);
+                    (sa, sb) = (oa, ob);
+                }
+            }
+        } else if let Some(f) = fill {
+            row[sa as usize..=sb as usize].fill(f);
+        }
+        for x in (x0..sa).chain(sb + 1..x1) {
+            let cx = x as f32 + 0.5;
+            let p = &mut row[x as usize];
+            let outer = (0.5 - round_rect_sd(cx, cy, r, rad)).clamp(0.0, 1.0);
+            if outer <= 0.0 {
+                continue;
+            }
+            let inside = if !has_inner {
+                0.0
+            } else if bw > 0.0 {
+                (0.5 - round_rect_sd(cx, cy, inner, irad)).clamp(0.0, 1.0)
+            } else {
+                outer
+            };
+            match (fill, border) {
+                (Some(f), Some((b, _))) if bw > 0.0 => {
+                    *p = blend_px(blend_px(*p, b, outer), f, inside);
+                }
+                (None, Some((b, _))) => *p = blend_px(*p, b, outer - inside),
+                (Some(f), _) => *p = blend_px(*p, f, outer),
+                (None, None) => {}
+            }
+        }
+    }
+}
+
+/// Anti-aliased convex polygon (`pts` in order, either winding) in `color`
+/// into `px`, a top-down 0x00RRGGBB buffer `w` wide: a powerline arrow.
+/// Coverage at each pixel centre is 0.5 plus its distance inside the
+/// nearest edge, clamped to 0..=1, over the polygon's bounding box: exact
+/// along edges, a touch blunt at sharp tips. Pure: clipped, never panics.
+fn aa_convex(px: &mut [u32], w: i32, pts: &[(f32, f32)], color: u32) {
+    let n = pts.len();
+    if w <= 0 || n < 3 {
+        return;
+    }
+    let h = (px.len() / w as usize) as i32;
+    let area: f32 = (0..n)
+        .map(|i| {
+            let (a, b) = (pts[i], pts[(i + 1) % n]);
+            a.0 * b.1 - b.0 * a.1
+        })
+        .sum();
+    if area == 0.0 || area.is_nan() {
+        return;
+    }
+    // Each edge as (a, b, c): a*x + b*y + c is the distance inside it.
+    let s = area.signum();
+    let edges: Vec<(f32, f32, f32)> = (0..n)
+        .filter_map(|i| {
+            let (p, q) = (pts[i], pts[(i + 1) % n]);
+            let (dx, dy) = (q.0 - p.0, q.1 - p.1);
+            let len = dx.hypot(dy);
+            (len > 0.0).then(|| {
+                let (a, b) = (-dy * s / len, dx * s / len);
+                (a, b, -(a * p.0 + b * p.1))
+            })
+        })
+        .collect();
+    let lo = |f: fn(&(f32, f32)) -> f32| pts.iter().map(f).fold(f32::MAX, f32::min);
+    let hi = |f: fn(&(f32, f32)) -> f32| pts.iter().map(f).fold(f32::MIN, f32::max);
+    let x0 = lo(|p| p.0).floor().max(0.0) as i32;
+    let x1 = hi(|p| p.0).ceil().min(w as f32) as i32;
+    let y0 = lo(|p| p.1).floor().max(0.0) as i32;
+    let y1 = hi(|p| p.1).ceil().min(h as f32) as i32;
+    for y in y0..y1 {
+        for x in x0..x1 {
+            let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+            let d = (edges.iter())
+                .map(|&(a, b, c)| a * cx + b * cy + c)
+                .fold(f32::MAX, f32::min);
+            let cov = (0.5 + d).clamp(0.0, 1.0);
+            if cov > 0.0 {
+                let p = &mut px[(y * w + x) as usize];
+                *p = blend_px(*p, color, cov);
+            }
+        }
+    }
+}
+
+/// `src`, an `sw` x `sh` alpha mask, scaled to `dw` x `dh`: each output
+/// pixel the area-weighted mean of the source it covers (a box filter, so
+/// shrinking keeps the edges smooth; enlarging repeats the nearest). Pure;
+/// a short `src` gives a blank mask.
+fn scale_mask(src: &[u8], sw: usize, sh: usize, dw: usize, dh: usize) -> Vec<u8> {
+    let mut out = vec![0u8; dw * dh];
+    if sw == 0 || sh == 0 || dw == 0 || dh == 0 || src.len() < sw * sh {
+        return out;
+    }
+    let (fx, fy) = (sw as f32 / dw as f32, sh as f32 / dh as f32);
+    // How much of source cell `i` the output span [a, b) covers.
+    let part = |i: usize, a: f32, b: f32| (b.min(i as f32 + 1.0) - a.max(i as f32)).max(0.0);
+    for oy in 0..dh {
+        let (y0, y1) = (oy as f32 * fy, (oy + 1) as f32 * fy);
+        for ox in 0..dw {
+            let (x0, x1) = (ox as f32 * fx, (ox + 1) as f32 * fx);
+            let mut sum = 0.0;
+            for y in y0 as usize..(y1.ceil() as usize).min(sh) {
+                for x in x0 as usize..(x1.ceil() as usize).min(sw) {
+                    sum += src[y * sw + x] as f32 * part(x, x0, x1) * part(y, y0, y1);
+                }
+            }
+            out[oy * dw + ox] = (sum / (fx * fy)).round().clamp(0.0, 255.0) as u8;
+        }
+    }
+    out
+}
+
+/// `color` (0x00RRGGBB) through alpha `mask` (`size` = mw x mh) onto `px`
+/// (`w` wide) at `at`. Pure: clipped to the buffer.
+fn blend_mask(px: &mut [u32], w: i32, at: (i32, i32), mask: &[u8], size: (i32, i32), color: u32) {
+    let ((x, y), (mw, mh)) = (at, size);
+    if w <= 0 || mw <= 0 || mh <= 0 {
+        return;
+    }
+    let h = (px.len() / w as usize) as i32;
+    for (k, &a) in mask.iter().enumerate().take((mw * mh) as usize) {
+        let (dx, dy) = (x + k as i32 % mw, y + k as i32 / mw);
+        if a > 0 && (0..w).contains(&dx) && (0..h).contains(&dy) {
+            let p = &mut px[(dy * w + dx) as usize];
+            *p = blend_px(*p, color, a as f32 / 255.0);
+        }
+    }
+}
+
+/// The Astur bird's alpha (the tray icon PNG, Astur's own mark) as (mask,
+/// width, height), read once: CreateIconFromResourceEx decodes the PNG as
+/// the tray does, GetIconInfo + GetDIBits give its 32 bpp pixels. None
+/// when any step fails (the logo then draws nothing). Scaled per paint by
+/// `scale_mask`, a few hundred additions, rather than trusting the PNG
+/// scaling inside CreateIconFromResourceEx.
+fn logo_alpha() -> Option<&'static (Vec<u8>, usize, usize)> {
+    use windows::Win32::Graphics::Gdi::{GetDIBits, GetObjectW, BITMAP};
+    use windows::Win32::UI::WindowsAndMessaging::GetIconInfo;
+    static LOGO: OnceLock<Option<(Vec<u8>, usize, usize)>> = OnceLock::new();
+    LOGO.get_or_init(|| unsafe {
+        let icon =
+            CreateIconFromResourceEx(TRAY_ICON_PNG, BOOL(1), 0x0003_0000, 0, 0, LR_DEFAULTCOLOR)
+                .ok()?;
+        let mut info = ICONINFO::default();
+        let got = GetIconInfo(icon, &mut info).is_ok();
+        let _ = DestroyIcon(icon);
+        if !got {
+            return None;
+        }
+        let mut bm = BITMAP::default();
+        let ok = !info.hbmColor.is_invalid()
+            && GetObjectW(
+                HGDIOBJ(info.hbmColor.0),
+                core::mem::size_of::<BITMAP>() as i32,
+                Some(&mut bm as *mut BITMAP as *mut c_void),
+            ) != 0;
+        let (w, h) = (bm.bmWidth.max(0), bm.bmHeight.max(0));
+        let mut pixels = vec![0u32; (w * h) as usize];
+        let mut bi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: core::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h,
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let screen = GetDC(None);
+        let lines = if ok && w > 0 && h > 0 {
+            GetDIBits(
+                screen,
+                info.hbmColor,
+                0,
+                h as u32,
+                Some(pixels.as_mut_ptr() as *mut c_void),
+                &mut bi,
+                DIB_RGB_COLORS,
+            )
+        } else {
+            0
+        };
+        ReleaseDC(None, screen);
+        let _ = DeleteObject(HGDIOBJ(info.hbmColor.0));
+        let _ = DeleteObject(HGDIOBJ(info.hbmMask.0));
+        if lines == 0 {
+            return None;
+        }
+        // Trimmed to the bird itself: the 32 x 32 icon is mostly clear
+        // above and below its wings, which would shrink it in the bar.
+        let (w, h) = (w as usize, h as usize);
+        let alpha: Vec<u8> = pixels.iter().map(|p| (p >> 24) as u8).collect();
+        let solid = |i: usize| alpha[i] > 16;
+        let xs = (0..w).filter(|&x| (0..h).any(|y| solid(y * w + x)));
+        let ys = (0..h).filter(|&y| (0..w).any(|x| solid(y * w + x)));
+        let (x0, x1) = (xs.clone().min()?, xs.max()? + 1);
+        let (y0, y1) = (ys.clone().min()?, ys.max()? + 1);
+        let trimmed = (y0..y1)
+            .flat_map(|y| alpha[y * w + x0..y * w + x1].iter().copied())
+            .collect();
+        Some((trimmed, x1 - x0, y1 - y0))
+    })
+    .as_ref()
+}
+
+/// The logo's drawn size on a bar `h` px tall: the bird fitted into 1.1 h
+/// by 0.5 h, about a capital's height, and never enlarged past the 32 px
+/// source (a blurred bird looks worse than a small one). (0, 0) without it.
+fn logo_dims(h: i32) -> (i32, i32) {
+    let Some((_, w, lh)) = logo_alpha() else {
+        return (0, 0);
+    };
+    let (w, lh) = (*w as f32, *lh as f32);
+    let s = (h as f32 * 1.1 / w).min(h as f32 * 0.5 / lh).min(1.0);
+    ((w * s).round() as i32, (lh * s).round().max(1.0) as i32)
+}
+
+/// What paint_bar draws into: the bar's cached DIB, whose pixels the
+/// anti-aliased shapes write, or with no DIB the window DC itself, where a
+/// shape falls back to a square GDI fill (the rounding is lost, never the
+/// bar; outlines are skipped).
+struct BarCanvas {
+    hdc: HDC,
+    bits: *mut u32, // null = no DIB
+    w: i32,
+    h: i32,
+}
+
+impl BarCanvas {
+    /// The whole surface in `color` (a COLORREF).
+    unsafe fn clear(&self, color: u32) {
+        self.shape(
+            [0.0, 0.0, self.w as f32, self.h as f32],
+            0.0,
+            Some(color),
+            None,
+        );
+    }
+
+    /// `aa_round_rect` with COLORREF colours (see there).
+    unsafe fn shape(
+        &self,
+        r: [f32; 4],
+        radius: f32,
+        fill: Option<u32>,
+        border: Option<(u32, f32)>,
+    ) {
+        if self.bits.is_null() {
+            if let Some(c) = fill {
+                let rc = RECT {
+                    left: r[0].round() as i32,
+                    top: r[1].round() as i32,
+                    right: r[2].round() as i32,
+                    bottom: r[3].round() as i32,
+                };
+                let brush = CreateSolidBrush(COLORREF(c));
+                FillRect(self.hdc, &rc, brush);
+                let _ = DeleteObject(HGDIOBJ(brush.0));
+            }
+            return;
+        }
+        // GDI batches calls per thread: text it has queued on this DC must
+        // land before these pixels are written (CreateDIBSection remarks).
+        let _ = GdiFlush();
+        // SAFETY: bits is the live DIB of exactly w x h 32-bit pixels (bar_dib
+        // made it at this size for this paint), and nothing else touches it
+        // until the GdiFlush before the next GDI-vs-pixel switch.
+        let px = std::slice::from_raw_parts_mut(self.bits, (self.w * self.h) as usize);
+        aa_round_rect(
+            px,
+            self.w,
+            r,
+            radius,
+            fill.map(px_color),
+            border.map(|(c, bw)| (px_color(c), bw)),
+        );
+    }
+
+    /// `aa_convex` in a COLORREF. Without a DIB it draws nothing: an arrow
+    /// is decoration, and a GDI polygon there would be jagged anyway.
+    unsafe fn poly(&self, pts: &[(f32, f32)], color: u32) {
+        self.with_pixels(|px| aa_convex(px, self.w, pts, px_color(color)));
+    }
+
+    /// `blend_mask` in a COLORREF (the logo); nothing without a DIB.
+    unsafe fn mask(&self, at: (i32, i32), mask: &[u8], size: (i32, i32), color: u32) {
+        self.with_pixels(|px| blend_mask(px, self.w, at, mask, size, px_color(color)));
+    }
+
+    /// Run `f` on the DIB's pixels after a GdiFlush (see `shape`); nothing
+    /// without a DIB.
+    unsafe fn with_pixels(&self, f: impl FnOnce(&mut [u32])) {
+        if self.bits.is_null() {
+            return;
+        }
+        let _ = GdiFlush();
+        // SAFETY: as in `shape`: the live w x h DIB, untouched by GDI until
+        // the next flush.
+        f(std::slice::from_raw_parts_mut(
+            self.bits,
+            (self.w * self.h) as usize,
+        ));
+    }
+}
+
+/// Paint one monitor's bar from the three configurable zones (navbar.conf
+/// `left` / `center` / `right`): the left zone flows left-to-right, the right
+/// zone hugs the right edge (listed order still reads left-to-right), and the
+/// center zone is centred in the remaining gap (the title flexes to fill).
+/// Islands pad each zone and pills each widget (`island_padding`), inside
+/// the same layout. The owning monitor's HMONITOR is in GWLP_USERDATA so each
+/// bar paints its own data; the hit ranges land in BAR_LAYOUTS for the mouse
+/// handlers.
 unsafe fn paint_bar(h: HWND) {
+    // What a paint costs on this thread, the hook thread (debug log only):
+    // the baseline any bar change is measured against.
+    let t0 = probe_now();
     // Publish this bar's DPI for the whole paint. Every `bar_icon_px()` /
     // `bar_widget_gap()` call below it reads this, so no call site has to
     // remember to scale. Safe as a plain static: all bar painting happens on
@@ -13779,103 +16600,205 @@ unsafe fn paint_bar(h: HWND) {
     let w = rc.right - rc.left;
     // Double buffer: the pill slide repaints at up to 100 Hz (a 10 ms timer);
     // direct painting flickers.
-    let bb = backbuf_begin(win_hdc, w, h_px);
-    let hdc = bb.as_ref().map(|b| b.dc).unwrap_or(win_hdc);
-
-    let bg_brush = CreateSolidBrush(COLORREF(data.bg));
-    FillRect(hdc, &rc, bg_brush);
-    let _ = DeleteObject(HGDIOBJ(bg_brush.0));
-
-    let font_raw = bar_font_for(dpi);
-    let old_font = if font_raw != 0 {
-        Some(SelectObject(hdc, HGDIOBJ(font_raw as *mut c_void)))
-    } else {
-        Some(SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT)))
+    let dib = bar_dib(h.0 as isize, win_hdc, w, h_px);
+    let cv = BarCanvas {
+        hdc: dib.map_or(win_hdc, |d| HDC(d.dc as *mut c_void)),
+        bits: dib.map_or(core::ptr::null_mut(), |d| d.bits as *mut u32),
+        w,
+        h: h_px,
     };
-    SetBkMode(hdc, TRANSPARENT);
-
-    let cell = dpi_px(BAR_CELL.load(Ordering::Relaxed) as i32, dpi);
-    let pad = dpi_px(BAR_PADDING.load(Ordering::Relaxed) as i32, dpi);
-    let mb = data.mons.iter().find(|m| m.hmon == hmon);
-    let mut lay = BarLayout {
-        cell,
-        ..Default::default()
-    };
-
-    // ---- left zone: flows left-to-right from the padding.
-    let mut x = pad;
-    for wgt in &data.left {
-        let drew = bar_widget_draw(hdc, *wgt, x, h_px, w, &data, mb, &mut lay, cell);
-        if drew > 0 {
-            x += drew + bar_widget_gap();
-        }
-    }
-    let left_end = x;
-
-    // ---- right zone: anchored to the right edge; iterate reversed so the
-    // configured order reads left-to-right on screen.
-    let mut right = w - pad;
-    for wgt in data.right.iter().rev() {
-        let ww = bar_widget_width(hdc, *wgt, &data, mb, cell, w);
-        if ww <= 0 {
-            continue;
-        }
-        let wx = right - ww;
-        let _ = bar_widget_draw(hdc, *wgt, wx, h_px, ww, &data, mb, &mut lay, cell);
-        right = wx - bar_widget_gap();
-    }
-
-    // ---- center zone: centred in the remaining gap; the title flexes.
-    let gap_l = left_end;
-    let gap_r = right;
-    if gap_r > gap_l && !data.center.is_empty() {
-        let avail = gap_r - gap_l;
-        let mut widths: Vec<i32> = Vec::with_capacity(data.center.len());
-        let mut total = 0;
-        for wgt in &data.center {
-            let ww = bar_widget_width(hdc, *wgt, &data, mb, cell, avail - total);
-            widths.push(ww);
-            if ww > 0 {
-                total += ww + bar_widget_gap();
-            }
-        }
-        if total > 0 {
-            total -= bar_widget_gap();
-        }
-        let mut cx = gap_l + ((avail - total).max(0)) / 2;
-        for (wgt, ww) in data.center.iter().zip(widths) {
-            if ww <= 0 {
-                continue;
-            }
-            let _ = bar_widget_draw(hdc, *wgt, cx, h_px, ww, &data, mb, &mut lay, cell);
-            cx += ww + bar_widget_gap();
-        }
-    }
-
-    let pointer_over_bar = {
+    // The pointer's x on this bar (client px), if it is over it.
+    let pointer_x = {
         let mut cursor = POINT::default();
         let mut window = RECT::default();
-        GetCursorPos(&mut cursor).is_ok()
+        (GetCursorPos(&mut cursor).is_ok()
             && GetWindowRect(h, &mut window).is_ok()
             && cursor.x >= window.left
             && cursor.x < window.right
             && cursor.y >= window.top
-            && cursor.y < window.bottom
+            && cursor.y < window.bottom)
+            .then_some(cursor.x - window.left)
+    }
+    .filter(|_| BAR_HOVER_HWND.load(Ordering::Relaxed) == h.0 as isize);
+    let hovered = match pointer_x {
+        Some(_) => BAR_HOVER_APP.load(Ordering::Relaxed),
+        None => 0,
     };
-    if data.show_tooltips
-        && !data.show_app_labels
-        && pointer_over_bar
-        && BAR_HOVER_HWND.load(Ordering::Relaxed) == h.0 as isize
+    let lay = render_bar(&cv, &data, hmon, dpi, hovered, pointer_x);
+    if dib.is_some() {
+        let _ = BitBlt(win_hdc, 0, 0, w, h_px, cv.hdc, 0, 0, SRCCOPY);
+    }
+    // Publish this bar's hit ranges for the wndproc mouse handlers.
+    BAR_LAYOUTS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(h.0 as isize, lay);
+    let _ = EndPaint(h, &ps);
+    if let Some(t0) = t0 {
+        // slide=1: a pill-slide frame (100 Hz), else a tick, refresh or hover.
+        log_push(
+            LOG_DEBUG,
+            &format!(
+                "bar paint us={} size={w}x{h_px} slide={} dib={}",
+                t0.elapsed().as_micros(),
+                pill_anim_pos(hmon).is_some() as u8,
+                dib.is_some() as u8,
+            ),
+        );
+    }
+}
+
+/// Draw monitor `hmon`'s bar into `cv` (no window needed, so a test can
+/// render one offscreen) and return its hit ranges. `hovered` is the app
+/// button under the pointer (0 = none), for its tooltip; `pointer_x` the
+/// pointer's x on this bar, for the `hover` highlight.
+unsafe fn render_bar(
+    cv: &BarCanvas,
+    data: &BarData,
+    hmon: isize,
+    dpi: u32,
+    hovered: isize,
+    pointer_x: Option<i32>,
+) -> BarLayout {
+    let (hdc, w, h_px) = (cv.hdc, cv.w, cv.h);
+    cv.clear(data.bg);
+
+    let text_font = match bar_font_for(dpi) {
+        0 => GetStockObject(DEFAULT_GUI_FONT),
+        f => HGDIOBJ(f as *mut c_void),
+    };
+    // The icon font only when glyphs draw: the first one checks the face.
+    let icon_font = match data.icon_font {
+        true => match bar_icon_font_for(dpi) {
+            0 => text_font,
+            f => HGDIOBJ(f as *mut c_void),
+        },
+        false => text_font,
+    };
+    let bold_font = match data.style.title_bold {
+        true => match bar_bold_font_for(dpi) {
+            0 => text_font,
+            f => HGDIOBJ(f as *mut c_void),
+        },
+        false => text_font,
+    };
+    let fonts = [text_font, icon_font, bold_font];
+    let old_font = SelectObject(hdc, text_font);
+    SetBkMode(hdc, TRANSPARENT);
+
+    let cell = dpi_px(BAR_CELL.load(Ordering::Relaxed) as i32, dpi);
+    let pad = dpi_px(BAR_PADDING.load(Ordering::Relaxed) as i32, dpi);
+    // Joined powerline segments sit an arrow's length apart.
+    let gap = match powerline_pills(&data.style) {
+        true => powerline_cap(h_px),
+        false => bar_widget_gap(),
+    };
+    let mb = data.mons.iter().find(|m| m.hmon == hmon);
+    let shape = data.style.shape;
+    let ipad = dpi_px(data.style.island_pad, dpi);
+    let zone_pad = if shape == BarShape::Islands { ipad } else { 0 };
+    let item_pad = |wgt: BarWidget| pill_pad(shape, wgt, ipad);
+
+    // ---- right zone: anchored to the right edge; laid out reversed so the
+    // configured order reads left-to-right on screen.
+    let mut right: Vec<BarItem> = Vec::with_capacity(data.right.len());
+    let mut rx = w - pad - zone_pad;
+    for &wgt in data.right.iter().rev() {
+        let mut it = bar_measure(cv, wgt, data, mb, cell, w, fonts);
+        if it.w > 0 {
+            let p = item_pad(wgt);
+            it.x = rx - p - it.w;
+            it.zone = 2;
+            rx = it.x - p - gap;
+            right.push(it);
+        }
+    }
+    right.reverse();
+    let right_start = if right.is_empty() {
+        w - pad
+    } else {
+        rx - zone_pad
+    };
+
+    // ---- left zone: flows left-to-right from the padding, its text capped
+    // where the right zone starts (a long title here ran under it).
+    let mut left: Vec<BarItem> = Vec::with_capacity(data.left.len());
+    let mut x = pad + zone_pad;
+    for &wgt in &data.left {
+        let p = item_pad(wgt);
+        let room = right_start - zone_pad - x - 2 * p;
+        let mut it = bar_measure(cv, wgt, data, mb, cell, room, fonts);
+        if it.w > 0 {
+            it.x = x + p;
+            x += it.w + 2 * p + gap;
+            left.push(it);
+        }
+    }
+    let left_end = if left.is_empty() { pad } else { x + zone_pad };
+
+    // ---- center zone: centred in the remaining gap; the title flexes.
+    let mut center: Vec<BarItem> = Vec::with_capacity(data.center.len());
+    if right_start > left_end && !data.center.is_empty() {
+        let avail = right_start - left_end - 2 * zone_pad;
+        let mut total = 0;
+        for &wgt in &data.center {
+            let p = item_pad(wgt);
+            let mut it = bar_measure(cv, wgt, data, mb, cell, avail - total - 2 * p, fonts);
+            if it.w > 0 {
+                total += it.w + 2 * p + gap;
+                it.zone = 1;
+                center.push(it);
+            }
+        }
+        if total > 0 {
+            total -= gap;
+        }
+        let mut cx = left_end + zone_pad + (avail - total).max(0) / 2;
+        for it in &mut center {
+            let p = item_pad(it.wgt);
+            it.x = cx + p;
+            cx += it.w + 2 * p + gap;
+        }
+    }
+
+    let zones: [&[BarItem]; 3] = [&left, &center, &right];
+    // A highlight reaches a little past its widget, never into the next one
+    // (a pill's is the pill itself).
+    let hp = match shape {
+        BarShape::Pills => 0,
+        _ => dpi_px(6, dpi).min(gap / 2),
+    };
+    let lay = bar_hits(zones, data, mb, gap, ipad, hp);
+    bar_backdrop(cv, &data.style, dpi, zones, zone_pad, ipad);
+    let active = mb.map_or(usize::MAX, |m| m.active);
+    if let Some((_, (l, r), under)) = pointer_x
+        .filter(|_| data.style.hover)
+        .and_then(|x| hover_target(&lay, active, x))
     {
-        let hovered = BAR_HOVER_APP.load(Ordering::Relaxed);
+        // Under the widget, so its text stays crisp; instant, not faded
+        // (plan/animations.md).
+        let inset = (h_px / 6).clamp(2, 6) as f32;
+        cv.shape(
+            [l as f32, inset, r as f32, h_px as f32 - inset],
+            dpi_px(6, dpi) as f32,
+            Some(blend_px(under, data.fg, 0.12)),
+            None,
+        );
+    }
+    for it in left.iter().chain(&center).chain(&right) {
+        bar_widget_draw(cv, it, data, mb, fonts);
+    }
+
+    if data.show_tooltips && !data.show_app_labels && hovered != 0 {
         if let Some((_, x1, _)) = lay.apps.iter().find(|(_, _, hwnd)| *hwnd == hovered) {
             if let Some(app) = mb.and_then(|m| m.apps.iter().find(|app| app.hwnd == hovered)) {
                 let tw = text_width(hdc, &app.label);
-                let left = (*x1 + 4).min((rc.right - tw - 16).max(0));
+                let left = (*x1 + 4).min((w - tw - 16).max(0));
                 let tip = RECT {
                     left,
                     top: 2,
-                    right: (left + tw + 12).min(rc.right),
+                    right: (left + tw + 12).min(w),
                     bottom: h_px - 2,
                 };
                 let brush = CreateSolidBrush(COLORREF(data.accent));
@@ -13887,7 +16810,8 @@ unsafe fn paint_bar(h: HWND) {
                 SelectObject(hdc, old_b);
                 let _ = DeleteObject(HGDIOBJ(pen.0));
                 let _ = DeleteObject(HGDIOBJ(brush.0));
-                SetTextColor(hdc, COLORREF(data.bg));
+                // On the accent, so accent_fg (classic: still the bg).
+                SetTextColor(hdc, COLORREF(data.style.accent_fg));
                 let mut text_rect = RECT {
                     left: tip.left + 6,
                     right: tip.right - 6,
@@ -13903,19 +16827,24 @@ unsafe fn paint_bar(h: HWND) {
             }
         }
     }
-    if let Some(of) = old_font {
-        SelectObject(hdc, of);
-    }
-    if let Some(b) = bb {
-        backbuf_end(win_hdc, b);
-    }
-    // Publish this bar's hit ranges for the wndproc mouse handlers.
-    BAR_LAYOUTS
-        .lock()
-        .unwrap()
-        .get_or_insert_with(HashMap::new)
-        .insert(h.0 as isize, lay);
-    let _ = EndPaint(h, &ps);
+    SelectObject(hdc, old_font);
+    lay
+}
+
+thread_local! {
+    /// (bar hwnd, button 0 left / 1 right / 2 middle) of the last press on a
+    /// bar, taken by its release. A release runs its click action only when
+    /// it pairs with a press there, as a button does: the press of a click
+    /// that dismisses the launcher or power menu is eaten by the mouse hook,
+    /// so its release must not run the widget's action too (clicking the
+    /// logo to close the power menu reopened it). Bar thread (main) only.
+    static BAR_PRESS: std::cell::Cell<Option<(isize, u8)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Does this release on bar `h` pair with the last press (same bar, same
+/// button)? Spends the press either way, so one press runs one action.
+fn bar_release_pairs(h: isize, button: u8) -> bool {
+    BAR_PRESS.take() == Some((h, button))
 }
 
 /// Bar WndProc: paints on demand, ticks the clock, and switches that monitor's
@@ -13947,13 +16876,23 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                     let _ = KillTimer(h, PILL_TIMER_ID);
                     pill_anim_clear(hmon);
                 }
-            } else if w.0 == BAR_TIMER_ID && !bar_tick_changed(h) {
-                // The 1 s tick exists for the clock and the stats. Astur's clock
-                // format has no seconds token, so on an idle desktop this used
-                // to repaint every bar every second to draw the identical
-                // pixels — and `paint_bar` deep-clones the whole BarData each
-                // time (review P-04). Skip when nothing it shows has changed.
-                return LRESULT(0);
+            } else if w.0 == BAR_TIMER_ID {
+                // A clock with seconds: aim each tick 20 ms past the next
+                // second, so a 1000 ms timer drifting against the clock
+                // never skips or repeats a second. ensure_bars re-arms
+                // 1000 ms when the format loses its seconds.
+                if BAR_SECONDS.load(Ordering::Relaxed) {
+                    let ms = GetLocalTime().wMilliseconds.min(999) as u32;
+                    SetTimer(h, BAR_TIMER_ID, 1000 - ms + 20, None);
+                }
+                // The 1 s tick exists for the clock and the stats. Without a
+                // seconds token, on an idle desktop this used to repaint every
+                // bar every second to draw the identical pixels — and
+                // `paint_bar` deep-clones the whole BarData each time (review
+                // P-04). Skip when nothing it shows has changed.
+                if !bar_tick_changed(h) {
+                    return LRESULT(0);
+                }
             }
             let _ = InvalidateRect(h, None, BOOL(0));
             LRESULT(0)
@@ -14012,21 +16951,30 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         }
         WM_MOUSEMOVE => {
             let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
-            let app = BAR_LAYOUTS
+            // The app button under the pointer (its tooltip) and, with
+            // `hover` on, the highlight's target: a move repaints only when
+            // either changes, never per pixel.
+            let (app, target) = BAR_LAYOUTS
                 .lock()
                 .unwrap()
                 .as_ref()
                 .and_then(|m| m.get(&(h.0 as isize)))
-                .and_then(|lay| {
-                    lay.apps
-                        .iter()
+                .map(|lay| {
+                    let app = (lay.apps.iter())
                         .find(|(x0, x1, _)| x >= *x0 && x < *x1)
-                        .map(|(_, _, hwnd)| *hwnd)
+                        .map_or(0, |(_, _, hwnd)| *hwnd);
+                    let target = match lay.hover {
+                        true => hover_target(lay, usize::MAX, x).map_or(NO_HOVER, |t| t.0 as i64),
+                        false => NO_HOVER,
+                    };
+                    (app, target)
                 })
-                .unwrap_or(0);
-            let changed = BAR_HOVER_HWND.swap(h.0 as isize, Ordering::Relaxed) != h.0 as isize
-                || BAR_HOVER_APP.swap(app, Ordering::Relaxed) != app;
-            if changed {
+                .unwrap_or((0, NO_HOVER));
+            // Every swap runs: a short-circuit left the app stale for a move.
+            let bar = BAR_HOVER_HWND.swap(h.0 as isize, Ordering::Relaxed) != h.0 as isize;
+            let app = BAR_HOVER_APP.swap(app, Ordering::Relaxed) != app;
+            let target = BAR_HOVER_ID.swap(target, Ordering::Relaxed) != target;
+            if bar || app || target {
                 let _ = InvalidateRect(h, None, BOOL(0));
             }
             // Ask for a WM_MOUSELEAVE once per hover. Without one the tooltip and
@@ -14048,6 +16996,11 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
         WM_MOUSELEAVE => {
             let me = h.0 as isize;
             let _ = BAR_LEAVE_ARMED.compare_exchange(me, 0, Ordering::Relaxed, Ordering::Relaxed);
+            // A press dragged off the bar is released elsewhere (no capture):
+            // forget it, or a later unpaired release here would pair with it.
+            if BAR_PRESS.get().is_some_and(|(b, _)| b == me) {
+                BAR_PRESS.set(None);
+            }
             // Only if the hover is still ours: the pointer may already be on
             // another monitor's bar, whose move got here first.
             if BAR_HOVER_HWND
@@ -14055,13 +17008,17 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                 .is_ok()
             {
                 BAR_HOVER_APP.store(0, Ordering::Relaxed);
+                BAR_HOVER_ID.store(NO_HOVER, Ordering::Relaxed);
                 let _ = InvalidateRect(h, None, BOOL(0));
             }
             LRESULT(0)
         }
         WM_LBUTTONDOWN => {
-            // Hit-test against the painted layout: workspace pills switch, app
-            // buttons focus, the volume widget toggles mute.
+            // Hit-test against the painted layout: workspace marks switch, app
+            // buttons focus, and a widget whose left click is `mute` (the
+            // volume widget's default) toggles it at once. Every other
+            // action runs on the button's release, below.
+            BAR_PRESS.set(Some((h.0 as isize, 0)));
             let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
             let lay = BAR_LAYOUTS
@@ -14070,12 +17027,8 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                 .as_ref()
                 .and_then(|m| m.get(&(h.0 as isize)).cloned())
                 .unwrap_or_default();
-            if lay.npills > 0
-                && lay.cell > 0
-                && x >= lay.pills_x0
-                && x < lay.pills_x0 + lay.npills as i32 * lay.cell
-            {
-                let pill = ((x - lay.pills_x0) / lay.cell) as usize;
+            let mute = action_index("mute");
+            if let Some(pill) = lay.pills.iter().position(|&(a, b)| x >= a && x < b) {
                 // Map the clicked pill back to its real local workspace via slots
                 // (pills and workspaces diverge when empty pills are hidden).
                 let local = BAR
@@ -14092,13 +17045,50 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
                 lay.apps.iter().find(|&&(x0, x1, _)| x >= x0 && x < x1)
             {
                 push_cmd(Cmd::BarFocus(hw));
-            } else if lay.vol.1 > lay.vol.0 && x >= lay.vol.0 && x < lay.vol.1 {
+            } else if (lay.hits.iter()).any(|t| x >= t.x0 && x < t.x1 && t.acts[0] == mute) {
                 // Queued like the wheel above.
-                MUTE_TOGGLES.fetch_add(1, Ordering::Relaxed);
-                STAT_MUTE.fetch_xor(true, Ordering::Relaxed);
-                stats_wake();
+                toggle_mute();
                 let _ = InvalidateRect(h, None, BOOL(0));
             }
+            LRESULT(0)
+        }
+        // Click actions run on release, as the taskbar's do (a flyout
+        // opened on the press could close again on the release; inference).
+        // The manager resolves the action (Cmd::BarAction); returning 0 for
+        // the right button keeps DefWindowProc from raising a context menu.
+        WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
+            let x = (l.0 as u32 & 0xFFFF) as i16 as i32;
+            let button = match msg {
+                WM_LBUTTONUP => 0,
+                WM_RBUTTONUP => 1,
+                _ => 2,
+            };
+            if !bar_release_pairs(h.0 as isize, button as u8) {
+                return LRESULT(0); // no press here to pair with: see BAR_PRESS
+            }
+            let hit = BAR_LAYOUTS
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(|m| m.get(&(h.0 as isize)))
+                .and_then(|lay| lay.hits.iter().find(|t| x >= t.x0 && x < t.x1).copied());
+            if let Some(t) = hit {
+                let act = t.acts[button];
+                // A left-click mute already ran on the press.
+                if act != 0 && !(button == 0 && act == action_index("mute")) {
+                    push_cmd(Cmd::BarAction {
+                        hmon: GetWindowLongPtrW(h, GWLP_USERDATA),
+                        wgt: t.wgt,
+                        button: button as u8,
+                        sub: t.sub,
+                    });
+                }
+            }
+            LRESULT(0)
+        }
+        WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
+            let button = if msg == WM_RBUTTONDOWN { 1 } else { 2 };
+            BAR_PRESS.set(Some((h.0 as isize, button)));
             LRESULT(0)
         }
         // Paint is double-buffered; a background erase would only add flicker.
@@ -14161,6 +17151,7 @@ struct TabBarData {
     tab_h: i32,                   // tab_bar_height, logical (the font)
     icon_px: i32,                 // physical icon box; 0 = no icons (too short a bar)
     colors: (u32, u32, u32, u32), // bar_colors: bg, fg, accent, inactive
+    accent_fg: u32,               // the shown tab's title, on the accent (bar_roles)
 }
 
 /// The manager's latest tab bars, read by tab_bars_sync.
@@ -14230,7 +17221,8 @@ unsafe fn tab_bars_build(mgr: &Manager) -> Vec<TabBarData> {
     if !mgr.tiling {
         return bars;
     }
-    let colors = themed_bar_colors(&mgr.cfg);
+    let r = bar_roles(&mgr.cfg, THEME_LIGHT.load(Ordering::Relaxed));
+    let colors = (r.bg, r.fg, r.accent, r.muted);
     for (mi, m) in mgr.monitors.iter().enumerate() {
         // The no-tabs case (nearly always) costs a scan of the column metadata.
         let Some(ws) = m
@@ -14283,6 +17275,7 @@ unsafe fn tab_bars_build(mgr: &Manager) -> Vec<TabBarData> {
                 tab_h: mgr.cfg.tab_bar_height,
                 icon_px,
                 colors,
+                accent_fg: r.accent_fg,
             });
         }
     }
@@ -14636,7 +17629,7 @@ unsafe fn paint_tab_bar(h: HWND) {
             };
             let mut s: Vec<u16> = t.title.encode_utf16().collect();
             if text.right > text.left && !s.is_empty() {
-                SetTextColor(hdc, COLORREF(if shown { bg } else { fg }));
+                SetTextColor(hdc, COLORREF(if shown { d.accent_fg } else { fg }));
                 DrawTextW(
                     hdc,
                     &mut s,
@@ -14705,7 +17698,7 @@ fn focus_follow_worker() {
             continue;
         }
         unsafe {
-            if ANY_DRAG.load(Ordering::Relaxed) || left_alt_down() {
+            if ANY_DRAG.load(Ordering::Relaxed) || main_held() {
                 continue;
             }
             // Don't refocus mid-click (e.g. dragging a selection across windows).
@@ -14748,6 +17741,17 @@ fn focus_follow_worker() {
     }
 }
 
+/// Is widget `w` in a zone of a bar that is drawn? With the bar off (YASB,
+/// No bar) nothing is: the custom command used to keep running hidden every
+/// interval, its side effects included, with nothing showing its output.
+fn bar_shows(cfg: &Config, w: &str) -> bool {
+    cfg.bar_enabled
+        && cfg.bar_height > 0
+        && [&cfg.bar_left, &cfg.bar_center, &cfg.bar_right]
+            .iter()
+            .any(|z| z.iter().any(|x| x == w))
+}
+
 /// Push the config values the bar paint path and stats worker read from atomics
 /// (so they need no Config in hand). Call at startup and on every reload.
 fn apply_bar_statics(cfg: &Config) {
@@ -14766,7 +17770,8 @@ fn apply_bar_statics(cfg: &Config) {
     BAR_ICON_PX_CFG.store(cfg.bar_icon_size, Ordering::Relaxed);
     BAR_WIDGET_GAP_CFG.store(cfg.bar_widget_gap, Ordering::Relaxed);
     *BAR_FONT_NAME.lock().unwrap() = cfg.bar_font_name.clone();
-    BAR_FLOATING.store(cfg.bar_floating, Ordering::Relaxed);
+    BAR_FONT_WEIGHT.store(cfg.bar_font_weight as isize, Ordering::Relaxed);
+    BAR_FLOATING.store(cfg.effective_bar_shape() == "floating", Ordering::Relaxed);
     BAR_MARGIN.store(cfg.bar_margin as isize, Ordering::Relaxed);
     BAR_RADIUS.store(cfg.bar_radius as isize, Ordering::Relaxed);
     BAR_AUTOHIDE.store(cfg.bar_autohide, Ordering::Relaxed);
@@ -14783,6 +17788,22 @@ fn apply_bar_statics(cfg: &Config) {
             || (cfg.media_enabled && cfg.bar_show_media),
         Ordering::Relaxed,
     );
+    let listed = |w: &str| bar_shows(cfg, w);
+    DISK_ON.store(listed("disk"), Ordering::Relaxed);
+    *DISK_ROOT.lock().unwrap() = cfg.bar_disk_drive.clone();
+    CUSTOM_ON.store(
+        listed("custom") && !cfg.bar_custom_command.trim().is_empty(),
+        Ordering::Relaxed,
+    );
+    *CUSTOM_CMD.lock().unwrap() = cfg.bar_custom_command.clone();
+    CUSTOM_EVERY.store(cfg.bar_custom_interval, Ordering::Relaxed);
+    BAR_MON_MASK.store(cfg.bar_monitor_mask(), Ordering::Relaxed);
+    BAR_SECONDS.store(
+        listed("clock") && cfg.bar_show_clock && cfg.bar_clock_format.contains("ss"),
+        Ordering::Relaxed,
+    );
+    *SLOW_WAKE.0.lock().unwrap() = true;
+    SLOW_WAKE.1.notify_one();
 }
 
 /// Startup config load. A file that exists but cannot be read is usually an
@@ -15170,6 +18191,7 @@ fn manager_loop(cfg: Config) {
     let mut last_drag = None;
     let mut drag_generation = 0;
     let mut next_drag = Instant::now();
+    let mut recheck = BorderRecheck::default();
     loop {
         let (cmd, depth, burst) = {
             let mut q = CMDQ.lock().unwrap();
@@ -15191,7 +18213,18 @@ fn manager_loop(cfg: Config) {
                 } else {
                     last_drag = None;
                     next_drag = Instant::now();
-                    q = CMDCV.wait(q).unwrap();
+                    match recheck.wait(Instant::now()) {
+                        None => q = CMDCV.wait(q).unwrap(),
+                        Some(w) if !w.is_zero() => q = CMDCV.wait_timeout(q, w).unwrap().0,
+                        Some(_) => {
+                            // A border pass is due and no command to overtake
+                            // it. Drop CMDQ before Win32, as for a drag frame.
+                            drop(q);
+                            unsafe { reassert_borders(&mgr, &recheck.windows) };
+                            recheck.ran();
+                            q = CMDQ.lock().unwrap();
+                        }
+                    }
                 }
             };
             if let Cmd::DragStarted(_, generation) = &c {
@@ -15226,6 +18259,9 @@ fn manager_loop(cfg: Config) {
             MGR_BUSY.store(false, Ordering::SeqCst);
             continue;
         }
+        // #19.1: what the tail compares against to owe a border pass.
+        let styled_before = STYLED_FOCUS.load(Ordering::Relaxed);
+        let foreground = matches!(cmd, Cmd::Focused(_));
         // Per-command probe: time in `process` and in the fixed tail (styles,
         // bar, index sync), SetWindowPos calls issued and skipped as already in
         // place, queue depth left behind. Everything here is skipped unless
@@ -15280,6 +18316,14 @@ fn manager_loop(cfg: Config) {
                 }
             }
             apply_styles(&mgr);
+            // #19.1: the windows whose activation this command changed are
+            // owed their border again once the app has had its say. A
+            // foreground change Astur's focus did not follow (the taskbar,
+            // Start, a popup and back) (de)activated the styled window too.
+            let styled = STYLED_FOCUS.load(Ordering::Relaxed);
+            if mgr.cfg.border_enabled && (styled != styled_before || foreground) {
+                recheck.note(Instant::now(), styled_before, styled);
+            }
             update_bar(&mgr);
             tab_bars_publish(&mgr);
         }
@@ -15529,8 +18573,9 @@ fn parse_rescue_line(line: &str) -> Option<(bool, isize, u32, &str)> {
 /// then failed to restore. Each entry is verified (same hwnd AND pid AND
 /// class) so a recycled HWND can never make us show or move a window some
 /// other app deliberately hid or placed. Runs once at startup, before window
-/// adoption — rescued windows are then adopted normally onto the active
-/// workspace of their monitor.
+/// adoption — rescued windows are adopted onto the active workspace of their
+/// monitor once their posted show lands: by the startup scan, or by their
+/// SHOW event.
 unsafe fn rescue_orphans() {
     let path = rescue_file();
     let Ok(text) = std::fs::read_to_string(&path) else {
@@ -15553,12 +18598,16 @@ unsafe fn rescue_orphans() {
             // A hidden entry that is visible again was shown by its own app
             // since, maybe still at its park spot: no show, but the unpark.
             let shown = !parked && !IsWindowVisible(hw).as_bool();
+            // Posted, not waited for: an exit the watchdog cut short leaves
+            // this list, so the app may still be hung, and ShowWindow would
+            // hang this start the same way (#19).
             if shown {
-                let _ = ShowWindow(hw, SW_SHOWNA);
+                let _ = ShowWindowAsync(hw, SW_SHOWNA);
             }
             // A hidden window of a scrolling workspace may be parked as well.
-            // unpark_window moves only a window that lies on no monitor.
-            if unpark_window(h, None) || shown {
+            // unpark_window moves only a window that lies on no monitor; one
+            // we show is a reveal (posted, never SW_HIDE, either order).
+            if unpark_window(h, None, shown) || shown {
                 n += 1;
             }
         }
@@ -15574,6 +18623,35 @@ unsafe fn rescue_orphans() {
 /// (untrack_window), so the HIDE filter never misses a just-adopted window.
 fn is_managed(h: isize) -> bool {
     MANAGED.lock().unwrap().contains(&h)
+}
+
+/// Untracked windows SHOWn in the last UNCLOAK_RETRY_MS, a slot each (#16a).
+/// One shown cloaked is refused at SHOW and FOREGROUND, and may uncloak only
+/// after the foreground has moved on: a UWP app's cold start (Calculator,
+/// seen in a user's log) uncloaks its frame seconds later, often after a
+/// click elsewhere, and the foreground-only retry missed it. A
+/// virtual-desktop switch fires no SHOW, so it still cannot adopt that
+/// desktop's windows in bulk. Main thread only (win_event_proc).
+static UNCLOAK_RETRY: Mutex<[(isize, u64); 32]> = Mutex::new([(0, 0); 32]);
+const UNCLOAK_RETRY_MS: u64 = 30_000;
+
+/// Remember `h` until `deadline` (now_ms) in a fixed set of slots: its own
+/// slot if it has one, else the one that expires first. Allocation-free.
+fn uncloak_retry_mark(slots: &mut [(isize, u64)], h: isize, deadline: u64) {
+    let i = slots
+        .iter()
+        .position(|s| s.0 == h)
+        .or_else(|| (0..slots.len()).min_by_key(|&i| slots[i].1));
+    if let Some(s) = i.and_then(|i| slots.get_mut(i)) {
+        *s = (h, deadline);
+    }
+}
+
+/// Was `h` shown recently enough at `now` for its uncloak to ask for an
+/// Add? Not cleared on use: a frame may uncloak more than once while it
+/// starts, and a tracked window never gets this far (`!is_managed`).
+fn uncloak_retry_live(slots: &[(isize, u64)], h: isize, now: u64) -> bool {
+    slots.iter().any(|s| s.0 == h && s.1 > now)
 }
 
 /// Should a show/foreground event queue `Cmd::Add`? SUPPRESS is one global
@@ -15643,7 +18721,7 @@ fn retile_for_target(
 /// SHOW-only hook used to deliver every show twice: two Cmd::Add, two manager
 /// ticks. Never widen a range over CREATE (0x8000) or REORDER (0x8004): both
 /// fire constantly and nothing here handles them.
-const WINEVENT_RANGES: [(u32, u32, &str); 5] = [
+const WINEVENT_RANGES: [(u32, u32, &str); 7] = [
     (EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, "destroy..hide"),
     // F11/borderless fullscreen and maximize/restore change top-level
     // geometry; title changes keep the bar's title widget current. The
@@ -15668,6 +18746,17 @@ const WINEVENT_RANGES: [(u32, u32, &str); 5] = [
         EVENT_SYSTEM_MOVESIZESTART,
         EVENT_SYSTEM_MOVESIZEEND,
         "movesize",
+    ),
+    // A window shown while DWM-cloaked is refused at SHOW and FOREGROUND;
+    // its uncloak asks again (#16). Exact: CLOAKED (0x8017) and
+    // LIVEREGIONCHANGED (0x8019, frequent) sit either side.
+    (EVENT_OBJECT_UNCLOAKED, EVENT_OBJECT_UNCLOAKED, "uncloaked"),
+    // Secure desktop and back: forgets a main-key hold whose release the
+    // hooks cannot see (main_reset). Exact: rare, nothing near it is wanted.
+    (
+        windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_DESKTOPSWITCH,
+        windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_DESKTOPSWITCH,
+        "desktopswitch",
     ),
 ];
 
@@ -15700,6 +18789,15 @@ unsafe extern "system" fn win_event_proc(
             ev_count(EVC_LOCATION_CURSOR);
         }
     }
+    // Before the filter: this event need not carry a window. A desktop switch
+    // either way (secure desktop: UAC, Ctrl+Alt+Del, lock screen) ends any
+    // main-key hold the hook saw start; its release lands out of its sight.
+    // ponytail: no polling backstop; if this event is ever found not to
+    // arrive, add a MAIN_DOWN && input_desktop_foreign check to hook_watchdog.
+    if event == windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_DESKTOPSWITCH {
+        main_reset("desktop switch");
+        return;
+    }
     if id_object != 0 || id_child != 0 || hwnd.0.is_null() {
         return;
     }
@@ -15709,6 +18807,7 @@ unsafe extern "system" fn win_event_proc(
         EVENT_OBJECT_DESTROY => ev_count(EVC_DESTROY),
         EVENT_SYSTEM_FOREGROUND => ev_count(EVC_FOREGROUND),
         EVENT_OBJECT_NAMECHANGE => ev_count(EVC_NAMECHANGE),
+        EVENT_OBJECT_UNCLOAKED => ev_count(EVC_UNCLOAKED),
         _ => {}
     }
     let h = hwnd.0 as isize;
@@ -15730,6 +18829,12 @@ unsafe extern "system" fn win_event_proc(
             GetWindowLongW(hwnd, GWL_STYLE) as u32,
             GetWindowLongW(hwnd, GWL_EXSTYLE) as u32,
         );
+    // #16: a window can SHOW and take the foreground while still DWM-cloaked
+    // (rio), so both refused it. Its uncloak redoes FOREGROUND's Add and
+    // fullscreen probe, for the foreground window, or (Add only) one SHOWn in
+    // the last UNCLOAK_RETRY_MS: a virtual-desktop switch uncloaks every
+    // window on the new desktop, and none of those just showed.
+    let fg_uncloak = event == EVENT_OBJECT_UNCLOAKED && GetForegroundWindow() == hwnd;
     let tracked_fullscreen = fullscreen_window_tracked(h);
     let fullscreen_changed = match event {
         // Skips the fullscreen probe, but not the stale-entry removal it would
@@ -15766,6 +18871,10 @@ unsafe extern "system" fn win_event_proc(
         | EVENT_SYSTEM_FOREGROUND
         | EVENT_SYSTEM_MINIMIZEEND
         | EVENT_SYSTEM_MOVESIZEEND => refresh_fullscreen_window(hwnd),
+        // FOREGROUND's probe saw it cloaked and found (or removed) nothing: a
+        // desktop switch back to a maximized window, or an app that starts
+        // cloaked fullscreen. Redo it now that it can be seen.
+        EVENT_OBJECT_UNCLOAKED if fg_uncloak => refresh_fullscreen_window(hwnd),
         _ => false,
     };
     if fullscreen_changed {
@@ -15779,8 +18888,18 @@ unsafe extern "system" fn win_event_proc(
             unmark_hidden_by_us(h);
             if show_junk {
                 ev_count(EVC_SHOW_STYLE);
-            } else if show_needs_add(SUPPRESS.load(Ordering::Relaxed), is_managed(h)) {
-                push_cmd(Cmd::Add(h, event));
+            } else {
+                let managed = is_managed(h);
+                if show_needs_add(SUPPRESS.load(Ordering::Relaxed), managed) {
+                    push_cmd(Cmd::Add(h, event));
+                }
+                if !managed {
+                    uncloak_retry_mark(
+                        &mut UNCLOAK_RETRY.lock().unwrap()[..],
+                        h,
+                        now_ms() + UNCLOAK_RETRY_MS,
+                    );
+                }
             }
         }
         EVENT_OBJECT_NAMECHANGE => {
@@ -15812,11 +18931,38 @@ unsafe extern "system" fn win_event_proc(
         EVENT_SYSTEM_FOREGROUND => {
             // Foreground events refire for the same window; collapse repeats so
             // the manager doesn't re-run locate + styling for no change.
+            // UIPI hides input to a window above our integrity level from our
+            // hooks, so the release ending this main-key hold, or a hotkey's
+            // own key-up, would never be seen. A hotkey key too, not just the
+            // main key: under a passed-through main key (win, alt, ctrl+win)
+            // MAIN_DOWN is never set, and a chord that hands the foreground to
+            // a visible unmanaged elevated window (the last window closed or
+            // moved away, an empty workspace) left its PRESSED slot stuck, so
+            // the next press ran nothing and skipped the mask (Start opened).
+            // Before the repeat filter: a return to the same elevated window
+            // after one of Astur's own (whose events are skipped) is no repeat
+            // for this purpose. Process reads only while a key is held; the
+            // PRESSED scan is 256 relaxed loads per foreground change.
+            if (MAIN_DOWN.load(Ordering::Relaxed) || hotkey_held()) && integrity_above_own(hwnd) {
+                main_reset("elevated foreground");
+            }
             if LAST_FG.swap(h, Ordering::Relaxed) == h {
                 return;
             }
             push_cmd(Cmd::Focused(h));
             if show_needs_add(SUPPRESS.load(Ordering::Relaxed), is_managed(h)) {
+                push_cmd(Cmd::Add(h, event));
+            }
+        }
+        EVENT_OBJECT_UNCLOAKED => {
+            // See fg_uncloak and UNCLOAK_RETRY. Untracked only: following a
+            // tracked window is FOREGROUND's job. Never unmark_hidden_by_us:
+            // cloaking leaves WS_VISIBLE alone, so this says nothing about
+            // who hid it.
+            if !is_managed(h)
+                && (fg_uncloak
+                    || uncloak_retry_live(&UNCLOAK_RETRY.lock().unwrap()[..], h, now_ms()))
+            {
                 push_cmd(Cmd::Add(h, event));
             }
         }
@@ -15862,141 +19008,6 @@ unsafe extern "system" fn win_event_proc(
         }
         _ => {}
     }
-}
-
-/// Map an Alt+key (with optional Shift) hotkey to a manager command. The
-/// letter binds are rebindable via config (see `HOTKEYS`); arrows and Enter
-/// are fixed.
-fn map_hotkey(vk: u32, shift: bool) -> Option<Cmd> {
-    {
-        let hk = HOTKEYS.lock().unwrap();
-        if vk == hk.focus_next {
-            return Some(if shift {
-                Cmd::SwapDir(1)
-            } else {
-                Cmd::FocusDir(1)
-            });
-        }
-        if vk == hk.focus_prev {
-            return Some(if shift {
-                Cmd::SwapDir(-1)
-            } else {
-                Cmd::FocusDir(-1)
-            });
-        }
-        // Shift+H/L is the tile height on a scrolling monitor; the manager
-        // turns ResizeTile back into the old ResizeMaster everywhere else.
-        if vk == hk.shrink_master {
-            return Some(if shift {
-                Cmd::ResizeTile(-0.1)
-            } else {
-                Cmd::ResizeMaster(-0.05)
-            });
-        }
-        if vk == hk.grow_master {
-            return Some(if shift {
-                Cmd::ResizeTile(0.1)
-            } else {
-                Cmd::ResizeMaster(0.05)
-            });
-        }
-        if vk == hk.promote_master {
-            return Some(Cmd::PromoteMaster);
-        }
-        if vk == hk.toggle_tiling {
-            // Shift used to be ignored here, so Alt+Shift+T toggled tiling by
-            // accident; it is the tabbed toggle now (a no-op off scrolling).
-            return Some(if shift {
-                Cmd::ToggleTabbed
-            } else {
-                Cmd::ToggleTiling
-            });
-        }
-        if vk == hk.toggle_float {
-            return Some(Cmd::ToggleFloat);
-        }
-        if vk == hk.close_window {
-            return Some(Cmd::CloseFocused);
-        }
-        if vk == hk.cycle_width {
-            return Some(if shift {
-                Cmd::CycleHeight
-            } else {
-                Cmd::CycleWidth
-            });
-        }
-        if vk == hk.center_column {
-            return Some(Cmd::CenterColumn);
-        }
-        if vk == hk.consume_left {
-            return Some(Cmd::ConsumeOrExpel(-1));
-        }
-        if vk == hk.consume_right {
-            return Some(Cmd::ConsumeOrExpel(1));
-        }
-    }
-    match vk {
-        0x24 => Some(Cmd::ColumnEdge {
-            last: false,
-            carry: shift,
-        }), // Home
-        0x23 => Some(Cmd::ColumnEdge {
-            last: true,
-            carry: shift,
-        }), // End
-        0x0D => Some(if shift {
-            Cmd::LaunchBrowser
-        } else {
-            Cmd::LaunchTerminal
-        }), // Enter
-        0x25 => Some(if shift {
-            Cmd::MoveGeo(Dir::Left)
-        } else {
-            Cmd::FocusGeo(Dir::Left)
-        }), // Left
-        0x26 => Some(if shift {
-            Cmd::MoveGeo(Dir::Up)
-        } else {
-            Cmd::FocusGeo(Dir::Up)
-        }), // Up
-        0x27 => Some(if shift {
-            Cmd::MoveGeo(Dir::Right)
-        } else {
-            Cmd::FocusGeo(Dir::Right)
-        }), // Right
-        0x28 => Some(if shift {
-            Cmd::MoveGeo(Dir::Down)
-        } else {
-            Cmd::FocusGeo(Dir::Down)
-        }), // Down
-        _ => None,
-    }
-}
-
-/// Resolve a hotkey to a command. User-defined bindings override built-ins.
-/// Resolver returns only small command/index values: no allocation on hook path.
-fn resolve_hotkey(vk: u32, shift: bool, ctrl: bool) -> Option<Cmd> {
-    if let Some(binding) = EXTRA_HOTKEYS
-        .lock()
-        .unwrap()
-        .iter()
-        .find(|b| b.vk == vk && b.shift == shift && b.ctrl == ctrl)
-        .copied()
-    {
-        return Some(Cmd::Extra(binding.index));
-    }
-    if let Some(c) = map_hotkey(vk, shift) {
-        return Some(c);
-    }
-    let keys = WORKSPACE_KEYS.lock().unwrap();
-    if let Some(i) = keys.iter().position(|&k| k == vk) {
-        return Some(if shift {
-            Cmd::MoveToWs(i)
-        } else {
-            Cmd::Switch(i)
-        });
-    }
-    None
 }
 
 // =========================================================================
@@ -16240,6 +19251,9 @@ fn apply_theme(cfg: &Config) {
         _ => false,
     };
     THEME_LIGHT.store(light, Ordering::Relaxed);
+    if cfg.bar_palette == "system" {
+        SYS_ACCENT.store(read_sys_accent(), Ordering::Relaxed);
+    }
     ACRYLIC_ON.store(cfg.acrylic, Ordering::Relaxed);
     LAUNCHER_ENABLED.store(cfg.launcher_enabled, Ordering::Relaxed);
     SYSMENU_ENABLED.store(cfg.system_menu_enabled, Ordering::Relaxed);
@@ -16332,8 +19346,8 @@ unsafe fn apply_acrylic(h: HWND, on: bool) {
 }
 
 // ---- GDI back buffer --------------------------------------------------------
-// All owner-drawn surfaces (launcher, system menu, bar) render into a memory DC
-// and blit once. Painting straight to the window DC flashes: the bg fill wipes
+// The owner-drawn popups and tab bars render into a memory DC and blit once
+// (the status bar keeps its own DIB: BarDib). Painting straight to the window DC flashes: the bg fill wipes
 // the previous frame on screen before the content lands (the launcher icons
 // visibly blinked on every wheel scroll).
 struct BackBuf {
@@ -16726,6 +19740,9 @@ enum IconJob {
     Bar(String, i32),
     /// (exe path, px): a switcher Window row, into ICON_CACHE
     Exe(String, i32),
+    /// exe path: its FileDescription for the bar's `{app}`, into APP_NAMES.
+    /// Here because it is file I/O off the manager, like an icon.
+    Name(String),
 }
 static ICON_QUEUE: Mutex<VecDeque<IconJob>> = Mutex::new(VecDeque::new());
 static ICON_CV: Condvar = Condvar::new();
@@ -17344,6 +20361,21 @@ fn icon_worker() {
                     q = ICON_CV.wait(q).unwrap();
                 }
             };
+            if let IconJob::Name(path) = &job {
+                if let Some(name) = file_description(path) {
+                    APP_NAMES
+                        .lock()
+                        .unwrap()
+                        .get_or_insert_with(HashMap::new)
+                        .insert(path.clone(), name);
+                    // As for a bar icon (BAR-13): the snapshot shows the
+                    // fallback name until update_bar runs again.
+                    if bar_refresh_gate(&BAR_REFRESH_QUEUED) {
+                        push_cmd(Cmd::BarRefresh);
+                    }
+                }
+                continue;
+            }
             // Short lock: copy the source only if the row still belongs to
             // the current model, and skip what the cache already holds (a
             // reload or F5 re-queues every app; nearly all are hits).
@@ -17360,14 +20392,14 @@ fn icon_worker() {
                         Some(f) => (f.path.clone(), *px, f.stamp()),
                         _ => continue,
                     },
-                    IconJob::File(..) => continue,
+                    IconJob::File(..) | IconJob::Name(_) => continue,
                     IconJob::Bar(path, px) | IconJob::Exe(path, px) => (path.clone(), *px, 0),
                 }
             };
             let cache = match &job {
                 IconJob::File(..) => &FILE_ICON_CACHE,
                 IconJob::Bar(..) => &BAR_ICON_CACHE,
-                IconJob::App(..) | IconJob::Exe(..) => &ICON_CACHE,
+                IconJob::App(..) | IconJob::Exe(..) | IconJob::Name(_) => &ICON_CACHE,
             };
             // A Bar job's key holds the 0 placeholder bar_app_icon left there.
             if !matches!(job, IconJob::Bar(..))
@@ -20018,14 +23050,17 @@ unsafe fn sysmenu_exec(act: SysAct) {
         SysAct::Reload => reload_config_now(),
         SysAct::RestartAstur => {
             if let Ok(exe) = std::env::current_exe() {
-                restore_all_windows();
                 // Explicit hand-off: the replacement waits for this PID to exit
                 // before claiming the single-instance lock, so the two never
-                // manage the same windows at once.
+                // manage the same windows at once. Spawned before the restore,
+                // which the exit watchdog may end this process inside (a hung
+                // app): the restart still happens. Its wait (10 s cap) is well
+                // past that bound.
                 let _ = std::process::Command::new(exe)
                     .arg("--wait-for-pid")
                     .arg(std::process::id().to_string())
                     .spawn();
+                restore_all_windows();
                 std::process::exit(0);
             }
         }
@@ -20555,8 +23590,19 @@ unsafe fn tray_remove(hwnd: HWND) {
     let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
-/// Launch the sibling settings GUI (`astur-settings.exe` next to this exe).
+/// Launch the sibling settings GUI (`astur-settings.exe` next to this exe),
+/// or bring the open one forward: a second instance exits on its
+/// single-instance lock with no window, so with Settings on another
+/// workspace, minimised or behind, the click looked dead. ActivateWindow
+/// switches to its workspace, restores and focuses it. The exe check keeps
+/// a same-titled window (FindWindowW ignores case: the "Astur settings"
+/// error box below) from matching.
 unsafe fn tray_open_settings() {
+    let open = FindWindowW(PCWSTR::null(), w!("Astur Settings")).unwrap_or_default();
+    if !open.0.is_null() && window_exe(open).is_some_and(|e| floats_by_default(&e)) {
+        push_cmd(Cmd::ActivateWindow(open.0 as isize));
+        return;
+    }
     let Ok(exe) = std::env::current_exe() else {
         return;
     };
@@ -20857,6 +23903,27 @@ unsafe fn diag_monitors() -> Vec<String> {
         .collect()
 }
 
+/// The Windows build number (CurrentBuild in the registry; 0 if unread).
+unsafe fn current_build() -> u32 {
+    let mut buf = [0u16; 32];
+    let mut cb = (buf.len() * 2) as u32;
+    let ok = RegGetValueW(
+        HKEY_LOCAL_MACHINE,
+        w!(r"SOFTWARE\Microsoft\Windows NT\CurrentVersion"),
+        w!("CurrentBuild"),
+        RRF_RT_REG_SZ,
+        None,
+        Some(buf.as_mut_ptr() as *mut c_void),
+        Some(&mut cb),
+    )
+    .is_ok();
+    let n = (cb as usize / 2).saturating_sub(1).min(buf.len());
+    match ok {
+        true => String::from_utf16_lossy(&buf[..n]).parse().unwrap_or(0),
+        false => 0,
+    }
+}
+
 /// Windows build string, straight out of the registry (no deprecated
 /// GetVersionEx shimming).
 unsafe fn windows_build() -> String {
@@ -20894,9 +23961,7 @@ unsafe fn windows_build() -> String {
         .is_ok()
         .then_some(v)
     };
-    let build: u32 = read_sz(w!("CurrentBuild"))
-        .and_then(|b| b.parse().ok())
-        .unwrap_or(0);
+    let build = current_build();
     // The registry still says "Windows 10 Pro" on Windows 11; the build number
     // is the only honest discriminator (11 starts at 22000).
     let name = read_sz(w!("ProductName")).unwrap_or_else(|| "Windows".into());
@@ -21139,11 +24204,12 @@ fn main() {
     // window hidden on an inactive workspace would be left invisible. The hook
     // runs before the abort.
     std::panic::set_hook(Box::new(|info| {
-        restore_on_panic();
         // Written synchronously: `panic = "abort"` gives the log worker no
         // chance to drain its queue, and a panic is the one event that must
-        // never be lost.
+        // never be lost. First: the restore arms the exit watchdog, which can
+        // end the process while an app is busy, before the restore returns.
         log_sync(&format!("PANIC {info}"));
+        restore_on_panic();
         // Release aborts after this anyway (panic = "abort"). A dev build
         // would unwind only the panicking thread and keep running with
         // EXITING set, a manager that drops every command: end it the same.
@@ -21326,7 +24392,11 @@ fn main() {
                  Another program may be blocking them, or Astur may need to be 
                  run at the same privilege level as the apps you want to manage.",
             );
-            restore_all_windows();
+            // Nothing is managed or styled yet and the foreground lock is
+            // untouched, so there is nothing to restore; but a previous
+            // session's rescue.lst is unread. restore_all_windows deleted it
+            // here, losing those hidden windows for good.
+            rescue_orphans();
             std::process::exit(1);
         }
 
@@ -21379,6 +24449,9 @@ fn main() {
         spawn_named("focus-follow", focus_follow_worker);
         // CPU/RAM/battery poll loop (idles unless a stats widget is enabled).
         spawn_named("stats", stats_worker);
+        // Disk space and the custom command (idle unless those widgets are
+        // listed): either can block, so not on the stats worker.
+        spawn_named("slow-stats", slow_worker);
         // Wallpaper/state/rescue writes can involve disk/shell I/O; keep them off
         // manager/hooks.
         spawn_named("wallpaper", wallpaper_worker);
@@ -21430,15 +24503,18 @@ fn main() {
         spawn_named("ipc", ipc_worker);
         spawn_named("yasb", yasb::worker);
         // Crash rescue: un-hide anything a previous (killed) instance left hidden
-        // BEFORE the manager adopts windows, so they're adopted visible.
+        // BEFORE the manager adopts windows. The shows are posted, so a window
+        // whose show lands after the startup scan is adopted by its SHOW event.
         rescue_orphans();
         // Owns all tiling/workspace state; hooks only enqueue commands to it.
         spawn_named("manager", move || manager_loop(cfg));
 
         println!("Astur running.");
-        println!("  LEFT ALT + left-drag  = move window (drops back into the tiling)");
-        println!("  LEFT ALT + right-drag = resize nearest corner (red bracket)");
-        println!("  --- tiling (LEFT ALT is the modifier) ---");
+        println!("  Alt below = the main key: Left Alt unless main_key in astur.conf");
+        println!("  says win, alt, ctrl+win or capslock.");
+        println!("  Alt + left-drag  = move window (drops back into the tiling)");
+        println!("  Alt + right-drag = resize nearest corner (red bracket)");
+        println!("  --- tiling ---");
         println!("  Alt+T          = toggle tiling on/off (keeps workspaces)");
         println!("  Alt+J / Alt+K  = focus next / previous window");
         println!("  Alt+Shift+J/K  = swap window order in the stack");
@@ -21455,7 +24531,7 @@ fn main() {
         println!("  Alt+Shift+1..0 = move focused window to workspace");
         println!("  Per-monitor status bars, focus-follows-mouse, window rules:");
         println!("  all configurable in astur.conf (see comments in that file).");
-        println!("  Alt+Tab still works. Use RIGHT ALT for normal Alt behavior.");
+        println!("  Alt+Tab still works. With Left Alt, use RIGHT ALT for app Alt keys.");
         println!("  --- config ---");
         println!("  Default 'shared' mode spreads workspaces across monitors:");
         println!("  ws1=mon1, ws2=mon2, ws3=mon3, ws4=mon1 (2nd), and so on.");
@@ -21469,12 +24545,9 @@ fn main() {
             DispatchMessageW(&msg);
         }
 
-        for slot in [&MOUSE_HOOK_H, &KBD_HOOK_H] {
-            let h = slot.swap(0, Ordering::Relaxed);
-            if h != 0 {
-                let _ = UnhookWindowsHookEx(HHOOK(h as *mut c_void));
-            }
-        }
+        // Every quit that ends this loop already did this in its exit restore
+        // (unhook_input); a no-op then.
+        unhook_input();
         let _ = windows::Win32::Media::timeEndPeriod(1);
     }
 }
@@ -21625,6 +24698,24 @@ mod tests {
     }
 
     #[test]
+    fn only_windows_above_our_integrity_level_are_out_of_reach() {
+        let (low, medium, high, system) = (0x1000, 0x2000, INTEGRITY_HIGH, 0x4000);
+        // Readable: UIPI compares levels; equal or lower is ours to place.
+        assert!(integrity_out_of_reach(Some(high), medium));
+        assert!(!integrity_out_of_reach(Some(medium), medium));
+        assert!(!integrity_out_of_reach(Some(low), medium));
+        assert!(!integrity_out_of_reach(Some(high), high));
+        assert!(integrity_out_of_reach(Some(system), high));
+        // Unreadable (another account, a protected process): above a medium
+        // Astur, below an admin one.
+        assert!(integrity_out_of_reach(None, medium));
+        assert!(!integrity_out_of_reach(None, high));
+        // Our own level unreadable: the check is off, as before it existed.
+        assert!(!integrity_out_of_reach(Some(system), u32::MAX));
+        assert!(!integrity_out_of_reach(None, u32::MAX));
+    }
+
+    #[test]
     fn winevent_ranges_cover_show_once_and_never_create_or_reorder() {
         let covers = |e: u32| {
             WINEVENT_RANGES
@@ -21635,6 +24726,7 @@ mod tests {
         assert_eq!(covers(EVENT_OBJECT_SHOW), 1);
         assert_eq!(covers(0x8000), 0, "EVENT_OBJECT_CREATE");
         assert_eq!(covers(0x8004), 0, "EVENT_OBJECT_REORDER");
+        assert_eq!(covers(0x8019), 0, "EVENT_OBJECT_LIVEREGIONCHANGED");
         for e in [
             EVENT_OBJECT_DESTROY,
             EVENT_OBJECT_HIDE,
@@ -21644,6 +24736,10 @@ mod tests {
             EVENT_SYSTEM_MINIMIZESTART,
             EVENT_SYSTEM_MINIMIZEEND,
             EVENT_SYSTEM_MOVESIZEEND,
+            // #16: without it a window shown while cloaked is never managed.
+            EVENT_OBJECT_UNCLOAKED,
+            // Without it a Left Alt released on the secure desktop stays held.
+            windows::Win32::UI::WindowsAndMessaging::EVENT_SYSTEM_DESKTOPSWITCH,
         ] {
             assert_eq!(covers(e), 1, "event {e:#x}");
         }
@@ -23480,6 +26576,948 @@ mod tests {
         assert_eq!(bar_data_from(&cfg, true, true, Vec::new()).bg, 0x0012_3456);
     }
 
+    // ---- bar palettes, styles and the AA shape helper (bar.md phases 0-1) ----
+
+    #[test]
+    fn a_default_or_legacy_config_paints_the_bar_it_always_did() {
+        // Fresh templates, a file without the new keys, and a pre-theme file
+        // spelling the old defaults (read as auto): the old colours, the
+        // active label in the bar bg, a square box, a strip, no outline.
+        let legacy = "bar_bg = #1A1B26\nbar_fg = #C0CAF5\nbar_accent = #66AAFF\n";
+        for cfg in [
+            config::default_config(),
+            Config::defaults(),
+            config::parse_pair(legacy, ""),
+        ] {
+            for (light, old) in [(false, config::BAR_DARK), (true, config::BAR_LIGHT)] {
+                let d = bar_data_from(&cfg, light, true, Vec::new());
+                assert_eq!([d.bg, d.fg, d.accent, d.inactive], old);
+                assert_eq!(d.style.accent_fg, d.bg);
+                assert_eq!((d.style.ws, d.style.shape), (WsStyle::Box, BarShape::Strip));
+                assert_eq!(d.style.border_w, 0);
+                assert_eq!(bar_colors(&cfg, light), (old[0], old[1], old[2], old[3]));
+            }
+        }
+        // `floating = true` alone still floats the bar.
+        let cfg = config::parse_pair("", "floating = true");
+        let d = bar_data_from(&cfg, false, true, Vec::new());
+        assert_eq!(d.style.shape, BarShape::Floating);
+        // A pinned bg is still the text on the accent, whatever the palette.
+        let cfg = config::parse_pair("", "palette = nord\nbg = #102030");
+        let d = bar_data_from(&cfg, false, true, Vec::new());
+        assert_eq!(d.style.accent_fg, d.bg);
+    }
+
+    #[test]
+    fn the_system_palette_takes_the_windows_accent_unless_pinned() {
+        let cfg = config::parse_pair("", "palette = system");
+        let base = cfg.bar_roles(false);
+        let yellow = 0x0000_B9FF; // #FFB900 as a COLORREF
+        let r = system_roles(&cfg, base, yellow);
+        assert_eq!(r.accent, yellow);
+        assert_eq!(r.accent_fg, 0, "black on a light accent");
+        let navy = 0x0080_0000; // #000080
+        assert_eq!(system_roles(&cfg, base, navy).accent_fg, 0x00FF_FFFF);
+        // Unknown accent, another palette, or pinned keys: left alone.
+        assert_eq!(system_roles(&cfg, base, NO_ACCENT), base);
+        let classic = Config::defaults();
+        let cb = classic.bar_roles(false);
+        assert_eq!(system_roles(&classic, cb, yellow), cb);
+        let pinned = config::parse_pair(
+            "",
+            "palette = system\naccent = #123456\naccent_fg = #010101",
+        );
+        let pb = pinned.bar_roles(false);
+        assert_eq!(system_roles(&pinned, pb, yellow), pb);
+    }
+
+    #[test]
+    fn the_settings_window_floats_by_default() {
+        assert!(floats_by_default(
+            r"C:\Program Files\Astur\astur-settings.exe"
+        ));
+        assert!(floats_by_default("ASTUR-SETTINGS.EXE"));
+        assert!(!floats_by_default(r"C:\Astur\astur.exe"));
+        assert!(!floats_by_default(r"C:\x\not-astur-settings.exe"));
+    }
+
+    #[test]
+    fn pills_pad_widgets_but_not_the_space_between_them() {
+        assert_eq!(pill_pad(BarShape::Pills, BarWidget::Clock, 7), 7);
+        assert_eq!(pill_pad(BarShape::Pills, BarWidget::Separator, 7), 0);
+        assert_eq!(pill_pad(BarShape::Pills, BarWidget::Spacer, 7), 0);
+        assert_eq!(pill_pad(BarShape::Islands, BarWidget::Clock, 7), 0);
+        assert_eq!(pill_pad(BarShape::Strip, BarWidget::Workspaces, 7), 0);
+    }
+
+    #[test]
+    fn bar_widgets_follow_the_config_list_order() {
+        // `wgt as usize` indexes config::BAR_WIDGETS (click actions, fills).
+        let mut cfg = Config::defaults();
+        cfg.bar_show_apps = true;
+        cfg.bar_show_net = true;
+        cfg.bar_show_date = true;
+        cfg.bar_show_media = true;
+        let names: Vec<String> = config::BAR_WIDGETS.iter().map(|s| s.to_string()).collect();
+        let all = zone_widgets(&names, &cfg);
+        assert_eq!((all.len(), names.len()), (WIDGETS_N, WIDGETS_N));
+        for (i, w) in all.iter().enumerate() {
+            assert_eq!(*w as usize, i, "{w:?} is {}", config::BAR_WIDGETS[i]);
+        }
+    }
+
+    #[test]
+    fn click_ranges_meet_between_widgets_and_hover_skips_the_active_mark() {
+        let data = bar_data_from(&Config::defaults(), false, true, Vec::new());
+        let item = |wgt, x, w| BarItem {
+            wgt,
+            x,
+            w,
+            text: None,
+            glyph: None,
+            fill: None,
+            marks: Vec::new(),
+            zone: 2,
+        };
+        let ws = BarItem {
+            marks: vec![30, 30],
+            ..item(BarWidget::Workspaces, 5, 60)
+        };
+        let right = [
+            item(BarWidget::Separator, 80, 1),
+            item(BarWidget::Cpu, 100, 40),
+            item(BarWidget::Clock, 156, 50),
+            item(BarWidget::Title, 230, 50),
+        ];
+        let lay = bar_hits([&[ws], &[], &right], &data, None, 16, 0, 6);
+        assert_eq!(lay.pills, [(5, 35), (35, 65)]);
+        // No click: no range (the separator; the title by default).
+        assert_eq!(lay.hits.len(), 2);
+        let (cpu, clock) = (lay.hits[0], lay.hits[1]);
+        assert_eq!((cpu.x0, cpu.x1, cpu.vis), (92, 148, (94, 146)));
+        assert_eq!(clock.x0, cpu.x1, "neighbours meet halfway across the gap");
+        assert_eq!(cpu.acts[0], action_index("task_manager"));
+        assert_eq!(
+            clock.acts[..2],
+            [action_index("calendar"), action_index("datetime_settings")]
+        );
+        assert!(!lay.hover, "hover is off by default");
+        assert_eq!(hover_target(&lay, 0, 10), None, "the active mark");
+        assert_eq!(hover_target(&lay, 0, 40), Some((35, (38, 62), data.bg)));
+        assert_eq!(hover_target(&lay, 0, 147).map(|t| t.0), Some(92));
+        assert_eq!(hover_target(&lay, 0, 300), None);
+    }
+
+    #[test]
+    fn marks_slide_between_spans_of_any_width() {
+        let uniform = mark_spans(10, &[34; 5]);
+        assert_eq!(uniform[2], (78, 112));
+        // Uniform marks: exactly the old x + f * cell.
+        for f in [0.0, 0.25, 1.5, 3.999, 4.0] {
+            let (a, b) = pill_span(&uniform, f);
+            assert!((a - (10.0 + f * 34.0)).abs() < 1e-9, "{f}");
+            assert!((b - a - 34.0).abs() < 1e-9, "{f}");
+        }
+        // Different widths: each edge morphs between its neighbours.
+        let spans = mark_spans(0, &[20, 60]);
+        assert_eq!(pill_span(&spans, 0.5), (10.0, 50.0));
+        assert_eq!(pill_span(&spans, 9.0), (20.0, 80.0), "clamped to the last");
+        assert_eq!(pill_span(&[], 1.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn convex_polygons_are_anti_aliased_and_clipped() {
+        // A right-pointing arrow: its base on x = 2.5, its tip at (12, 5).
+        let arrow = [(2.5, 0.0), (12.0, 5.0), (2.5, 10.0)];
+        let mut px = vec![0u32; 20 * 10];
+        aa_convex(&mut px, 20, &arrow, 0xFF_FFFF);
+        let c = |x: usize, y: usize| (px[y * 20 + x] & 0xFF) as f32 / 255.0;
+        assert_eq!(c(4, 5), 1.0, "inside");
+        assert_eq!(c(15, 5), 0.0, "past the tip");
+        assert_eq!(c(1, 5), 0.0, "before the base");
+        assert!((c(2, 5) - 0.5).abs() < 0.01, "on the base: {}", c(2, 5));
+        // Either winding draws the same pixels.
+        let mut rev = vec![0u32; 20 * 10];
+        let mut back = arrow;
+        back.reverse();
+        aa_convex(&mut rev, 20, &back, 0xFF_FFFF);
+        assert_eq!(px, rev);
+        // Off the buffer, degenerate or no buffer: no panic.
+        let mut small = vec![0u32; 4];
+        aa_convex(&mut small, 2, &[(-5.0, -5.0), (50.0, 1.0), (-5.0, 9.0)], 1);
+        aa_convex(&mut small, 2, &[(0.0, 0.0), (1.0, 1.0)], 1);
+        aa_convex(&mut small, 2, &[(0.0, 0.0), (1.0, 1.0), (2.0, 2.0)], 1);
+        aa_convex(&mut [], 0, &arrow, 1);
+    }
+
+    #[test]
+    fn the_logo_mask_scales_and_blends() {
+        // 4x4 to 2x2: each output pixel the mean of its 2x2 block.
+        let src = [255, 255, 0, 0, 255, 255, 0, 0, 0, 0, 0, 100, 0, 0, 100, 100];
+        assert_eq!(scale_mask(&src, 4, 4, 2, 2), [255, 0, 0, 75]);
+        assert_eq!(scale_mask(&src, 4, 4, 2, 1), [128, 38]);
+        assert_eq!(scale_mask(&[9], 1, 1, 2, 2), [9; 4], "enlarged: nearest");
+        assert_eq!(
+            scale_mask(&[1, 2], 4, 4, 2, 2),
+            [0; 4],
+            "short source: blank"
+        );
+        let mut px = vec![0u32; 3 * 2];
+        blend_mask(&mut px, 3, (2, 0), &[255, 128, 0, 255], (2, 2), 0x00FF_FFFF);
+        assert_eq!(px, [0, 0, 0x00FF_FFFF, 0, 0, 0], "clipped at the edge");
+        blend_mask(&mut px, 3, (0, 1), &[128], (1, 1), 0x00FF_FFFF);
+        assert_eq!(px[3], 0x0080_8080);
+        // The bird itself, trimmed to its wings: wider than tall, solid.
+        let (alpha, w, h) = logo_alpha().expect("the tray PNG decodes");
+        assert!(*w > *h && *h > 0 && alpha.len() == w * h);
+        assert!(alpha.iter().any(|&a| a > 200));
+        // Fitted to the bar, never enlarged.
+        let (lw, lh) = logo_dims(36);
+        assert!(lw <= *w as i32 && lh <= 18 && lw > lh, "{lw}x{lh}");
+    }
+
+    #[test]
+    fn new_widget_values_format_for_the_bar() {
+        assert_eq!(fmt_uptime(0), "0m");
+        assert_eq!(fmt_uptime(42 * 60_000 + 59_999), "42m");
+        assert_eq!(fmt_uptime((5 * 60 + 12) * 60_000), "5h 12m");
+        assert_eq!(fmt_uptime(((3 * 24 + 4) * 60 + 30) * 60_000), "3d 4h");
+        assert_eq!(first_line(b"  hello world \r\nsecond\n"), "hello world");
+        assert_eq!(first_line(b""), "");
+        assert_eq!(first_line(&[b'x'; 200]).len(), 80);
+        // UTF-8 stays UTF-8; anything else is the console (OEM) code page.
+        assert_eq!(
+            decode_output("f\u{e9}vrier".as_bytes(), 850),
+            "f\u{e9}vrier"
+        );
+        assert_eq!(
+            decode_output(b"f\x82vrier 21\xF8C", 850),
+            "f\u{e9}vrier 21\u{b0}C"
+        );
+        assert_eq!(
+            chord_order(&[0x5B, 0x4E]),
+            [(0x5B, false), (0x4E, false), (0x4E, true), (0x5B, true)]
+        );
+        assert_eq!(chord_order(&[0xB3]), [(0xB3, false), (0xB3, true)]);
+        assert_eq!(next_layout("dwindle"), config::LAYOUTS[1]);
+        let last = config::LAYOUTS[config::LAYOUTS.len() - 1];
+        assert_eq!(next_layout(last), config::LAYOUTS[0]);
+        assert_eq!(next_layout("bogus"), config::LAYOUTS[0]);
+    }
+
+    #[test]
+    fn hidden_bar_runs_no_widget_work() {
+        let on = config::parse_pair("", "center = custom\ncustom_command = echo hi");
+        assert!(bar_shows(&on, "custom"));
+        assert!(!bar_shows(&on, "disk"), "not listed");
+        let off = config::parse_pair("", "enabled = false\ncenter = custom");
+        assert!(
+            !bar_shows(&off, "custom"),
+            "bar off: no hidden command runs"
+        );
+    }
+
+    /// A bar release runs its action only after a press on the same bar with
+    /// the same button: the release of a click whose press the hook ate (a
+    /// popup dismissal) runs nothing.
+    #[test]
+    fn bar_release_needs_its_press() {
+        assert!(!bar_release_pairs(7, 0), "eaten press: nothing to pair");
+        BAR_PRESS.set(Some((7, 0)));
+        assert!(bar_release_pairs(7, 0));
+        assert!(!bar_release_pairs(7, 0), "one press, one action");
+        BAR_PRESS.set(Some((7, 0)));
+        assert!(!bar_release_pairs(7, 1), "other button");
+        BAR_PRESS.set(Some((8, 0)));
+        assert!(!bar_release_pairs(7, 0), "other bar");
+    }
+
+    /// A hotkey whose key-up the hook never saw (an elevated foreground took
+    /// it) counts as held, so the elevated-foreground reset runs for it even
+    /// with no reserved main key down; the reset re-arms it.
+    #[test]
+    fn a_hotkey_up_lost_to_an_elevated_window_is_reset() {
+        assert!(!hotkey_held());
+        PRESSED[0x33].store(true, Ordering::Relaxed);
+        assert!(hotkey_held());
+        unsafe { main_reset("test") };
+        assert!(!hotkey_held());
+    }
+
+    /// next_layout on another screen's bar changes that screen's layout and
+    /// leaves focused_mon (the screen hotkeys act on) where the focus is.
+    #[test]
+    fn bar_layout_click_keeps_the_focused_monitor() {
+        let mut mgr = test_manager(2, 1);
+        mgr.cfg
+            .bar_clicks
+            .push(("layout".into(), 0, "next_layout".into()));
+        let wgt = config::BAR_WIDGETS
+            .iter()
+            .position(|w| *w == "layout")
+            .unwrap() as u8;
+        let (before, other) = (
+            mgr.monitors[1].layout.clone(),
+            mgr.monitors[0].layout.clone(),
+        );
+        let hmon = mgr.monitors[1].hmon;
+        unsafe { run_bar_action(&mut mgr, hmon, wgt, 0, 0) };
+        assert_eq!(mgr.monitors[1].layout, next_layout(&before));
+        assert_eq!(mgr.monitors[0].layout, other);
+        assert_eq!(mgr.focused_mon, 0, "the focus never moved");
+        unsafe { set_monitor_layout(&mut mgr, 1, "bogus".into()) };
+        unsafe { set_monitor_layout(&mut mgr, 9, "grid".into()) };
+        assert_eq!(mgr.monitors[1].layout, next_layout(&before));
+    }
+
+    /// The custom widget's timeout stops the program cmd started, not just
+    /// cmd: the pipe closes (so the output is read, not abandoned) and no
+    /// ping.exe is left behind. Also: a quoted program followed by a quoted
+    /// argument survives cmd's quote handling (/S).
+    #[test]
+    fn custom_command_timeout_kills_the_whole_tree() {
+        use std::time::Duration;
+        let pings = || {
+            let out = std::process::Command::new("tasklist")
+                .args(["/FI", "IMAGENAME eq PING.EXE", "/NH", "/FO", "CSV"])
+                .output()
+                .expect("tasklist runs");
+            String::from_utf8_lossy(&out.stdout)
+                .to_ascii_uppercase()
+                .matches("\"PING.EXE\"")
+                .count()
+        };
+        let before = pings();
+        let t = Instant::now();
+        let out = run_custom("ping -n 30 127.0.0.1", Duration::from_millis(500));
+        assert!(
+            out.is_some(),
+            "the pipe closed: nothing in the tree holds it"
+        );
+        assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
+        let gone = (0..20).any(|_| {
+            let n = pings();
+            n <= before || {
+                std::thread::sleep(Duration::from_millis(100));
+                false
+            }
+        });
+        assert!(gone, "ping.exe outlived the timeout");
+        assert_eq!(
+            run_custom(r#""cmd" /C "echo hi""#, Duration::from_secs(5)).as_deref(),
+            Some("hi")
+        );
+    }
+
+    /// A `w` x `h` black buffer with `aa_round_rect` drawn into it.
+    fn aa(
+        w: i32,
+        h: i32,
+        r: [f32; 4],
+        rad: f32,
+        fill: Option<u32>,
+        border: Option<(u32, f32)>,
+    ) -> Vec<u32> {
+        let mut px = vec![0u32; (w * h) as usize];
+        aa_round_rect(&mut px, w, r, rad, fill, border);
+        px
+    }
+
+    /// Coverage of a white fill over black at one pixel (0..=1, blue byte).
+    fn cov(px: &[u32], w: i32, x: i32, y: i32) -> f32 {
+        (px[(y * w + x) as usize] & 0xFF) as f32 / 255.0
+    }
+
+    #[test]
+    fn a_square_whole_pixel_rect_is_an_exact_fill() {
+        // What `box` relies on to stay pixel-identical to the old FillRect.
+        let px = aa(12, 12, [2.0, 3.0, 9.0, 8.0], 0.0, Some(0x00AB_CDEF), None);
+        for y in 0..12 {
+            for x in 0..12 {
+                let inside = (2..9).contains(&x) && (3..8).contains(&y);
+                let want = if inside { 0x00AB_CDEF } else { 0 };
+                assert_eq!(px[(y * 12 + x) as usize], want, "({x}, {y})");
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_corners_fade_and_edges_stay_solid() {
+        let px = aa(20, 10, [0.0, 0.0, 20.0, 10.0], 5.0, Some(0xFF_FFFF), None);
+        assert_eq!(cov(&px, 20, 0, 0), 0.0, "the corner pixel is cut off");
+        assert_eq!(cov(&px, 20, 10, 0), 1.0, "a straight top edge is solid");
+        assert_eq!(cov(&px, 20, 10, 5), 1.0, "the inside is solid");
+        let c = cov(&px, 20, 1, 1);
+        assert!(c > 0.0 && c < 1.0, "the corner ring is anti-aliased: {c}");
+        // Mirror-symmetric, left/right and top/bottom.
+        for y in 0..10 {
+            for x in 0..20 {
+                let p = px[(y * 20 + x) as usize];
+                assert_eq!(p, px[(y * 20 + 19 - x) as usize]);
+                assert_eq!(p, px[((9 - y) * 20 + x) as usize]);
+            }
+        }
+    }
+
+    #[test]
+    fn a_radius_past_half_the_height_is_a_capsule() {
+        let capsule = aa(20, 10, [0.0, 0.0, 20.0, 10.0], 5.0, Some(0xFF_FFFF), None);
+        let huge = aa(20, 10, [0.0, 0.0, 20.0, 10.0], 50.0, Some(0xFF_FFFF), None);
+        assert_eq!(huge, capsule);
+        // A tiny radius only shaves the corner pixel, a little.
+        let tiny = aa(10, 10, [0.0, 0.0, 10.0, 10.0], 1.0, Some(0xFF_FFFF), None);
+        let c = cov(&tiny, 10, 0, 0);
+        assert!(c > 0.7 && c < 1.0, "{c}");
+        assert_eq!(cov(&tiny, 10, 1, 0), 1.0);
+    }
+
+    #[test]
+    fn fractional_edges_blend_by_coverage() {
+        let px = aa(10, 4, [2.5, 0.0, 7.25, 4.0], 0.0, Some(0xFF_FFFF), None);
+        assert_eq!(cov(&px, 10, 1, 2), 0.0);
+        assert!((cov(&px, 10, 2, 2) - 0.5).abs() < 0.01);
+        assert_eq!(cov(&px, 10, 4, 2), 1.0);
+        assert!((cov(&px, 10, 7, 2) - 0.25).abs() < 0.01);
+    }
+
+    #[test]
+    fn outlines_draw_a_ring_with_or_without_a_fill() {
+        let ring = aa(
+            10,
+            10,
+            [0.0, 0.0, 10.0, 10.0],
+            0.0,
+            None,
+            Some((0xFF_FFFF, 1.0)),
+        );
+        assert_eq!(cov(&ring, 10, 0, 5), 1.0);
+        assert_eq!(cov(&ring, 10, 9, 9), 1.0);
+        assert_eq!(
+            cov(&ring, 10, 1, 5),
+            0.0,
+            "an outline alone leaves the inside"
+        );
+        let both = aa(
+            10,
+            10,
+            [0.0, 0.0, 10.0, 10.0],
+            3.0,
+            Some(0x0000_00FF),
+            Some((0x00FF_0000, 2.0)),
+        );
+        assert_eq!(both[5 * 10], 0x00FF_0000, "the edge is the border colour");
+        assert_eq!(both[5 * 10 + 5], 0x0000_00FF, "the inside is the fill");
+        // A border wider than the shape is all border.
+        let fat = aa(
+            4,
+            4,
+            [0.0, 0.0, 4.0, 4.0],
+            0.0,
+            Some(0xFF),
+            Some((0x00FF_0000, 9.0)),
+        );
+        assert!(fat.iter().all(|&p| p == 0x00FF_0000));
+    }
+
+    #[test]
+    fn shapes_clip_to_the_buffer() {
+        let px = aa(4, 4, [-10.0, -10.0, 40.0, 2.0], 3.0, Some(0xFF_FFFF), None);
+        assert_eq!(cov(&px, 4, 0, 0), 1.0);
+        assert_eq!(cov(&px, 4, 0, 3), 0.0);
+        // Empty or inverted rects, or no buffer, draw nothing.
+        let inverted = aa(4, 4, [3.0, 0.0, 1.0, 4.0], 0.0, Some(1), None);
+        assert!(inverted.iter().all(|&p| p == 0));
+        let mut none: Vec<u32> = Vec::new();
+        aa_round_rect(&mut none, 0, [0.0, 0.0, 1.0, 1.0], 0.0, Some(1), None);
+    }
+
+    /// A look check for a human, not a unit test: renders the bar offscreen
+    /// (no window) in a row per style / palette / shape and writes a BMP to
+    /// $ASTUR_BAR_RENDER. Run alone, it sets the bar statics:
+    /// `cargo test -p astur render_bar_gallery -- --ignored`.
+    #[test]
+    #[ignore]
+    fn render_bar_gallery() {
+        let Ok(out) = std::env::var("ASTUR_BAR_RENDER") else {
+            return;
+        };
+        // (navbar text, light theme, low battery off mains + muted, what
+        // the pointer is over: 0 nothing, 1 the clock, 2 the first mark).
+        let row = |conf: &str, light: bool, alert: bool| (conf.to_string(), light, alert, 0u8);
+        let mut rows: Vec<(String, bool, bool, u8)> = vec![
+            row("", false, false),
+            row("workspace_style = underline", false, false),
+            row(
+                "palette = rosepine\nshape = islands\nborder_width = 1",
+                false,
+                false,
+            ),
+        ];
+        let text = |p: &config::BarPreset| -> String {
+            p.pairs
+                .iter()
+                .map(|(k, v)| format!("{k} = {v}\n"))
+                .collect()
+        };
+        let preset = |name: &str| config::BAR_PRESETS.iter().find(|q| q.name == name).unwrap();
+        for light in [false, true] {
+            rows.extend(
+                config::BAR_PRESETS
+                    .iter()
+                    .map(|p| (text(p), light, false, 0)),
+            );
+        }
+        for p in ["pills", "islands", "classic"] {
+            rows.push((text(preset(p)), false, true, 0));
+        }
+        // Pill text per fill: the palettes whose one accent_fg was unreadable.
+        for (pal, light, alert) in [
+            ("nord", true, true),
+            ("mono", true, true),
+            ("mono", false, false),
+        ] {
+            rows.push((
+                format!("{}palette = {pal}\n", text(preset("pills"))),
+                light,
+                alert,
+                0,
+            ));
+        }
+        // The newer options, one look each.
+        let retro = text(preset("retro"));
+        let mac = text(preset("menubar"));
+        rows.extend([
+            (format!("{retro}separator_style = dot\n"), false, false, 0),
+            (
+                format!("{retro}separator_style = powerline\n"),
+                false,
+                false,
+                0,
+            ),
+            (mac.clone(), false, false, 1),
+            (mac.clone(), true, false, 2),
+            (text(preset("powerline")), true, true, 0),
+            (
+                "workspace_apps = true\nworkspace_style = pill\nhover = true".into(),
+                false,
+                false,
+                2,
+            ),
+            (
+                "workspace_label = name\nleft = workspaces\nright = clock".into(),
+                false,
+                false,
+                0,
+            ),
+            (
+                "workspace_label = icon_name\nworkspace_apps = true".into(),
+                true,
+                false,
+                0,
+            ),
+            (
+                "icon_mode = glyph\nleft = workspaces media_controls\ncenter = custom\n\
+                 right = keyboard disk uptime clock\ncustom_format = Hello {output}\n\
+                 clock_format = HH:mm:ss\ndate_format = dddd d MMMM"
+                    .into(),
+                false,
+                false,
+                0,
+            ),
+            (
+                format!(
+                    "{}icon_mode = glyph_only\nright = net volume battery disk date clock\n",
+                    mac
+                ),
+                false,
+                true,
+                0,
+            ),
+        ]);
+        let (dpi, w) = (144u32, 1700i32);
+        BAR_PAINT_DPI.store(dpi, Ordering::Relaxed);
+        for (stat, v) in [
+            (&STAT_CPU, 12),
+            (&STAT_MEM, 48),
+            (&STAT_VOL, 30),
+            (&STAT_NET_D, 123_456),
+            (&STAT_NET_U, 2_345),
+        ] {
+            stat.store(v, Ordering::Relaxed);
+        }
+        STAT_NET_WIFI.store(true, Ordering::Relaxed);
+        STAT_DISK_FREE.store(212 << 30, Ordering::Relaxed);
+        STAT_DISK_TOTAL.store(476 << 30, Ordering::Relaxed);
+        *CUSTOM_TEXT.lock().unwrap() = "world".into();
+        let mon = MonBar {
+            hmon: 1,
+            slots: (0..8).collect(),
+            labels: (1..=8).map(|i| i.to_string()).collect(),
+            active: 2,
+            occupied: 0b1000_1011,
+            title: "Astur - bar preview".into(),
+            apps: (1..=3)
+                .map(|i| BarApp {
+                    hwnd: i,
+                    icon: 0,
+                    label: format!("App {i}"),
+                })
+                .collect(),
+            layout: "dwindle".into(),
+            ws_icons: Vec::new(),
+        };
+        let mut img: Vec<u32> = Vec::new();
+        let mut row_h = 0;
+        unsafe {
+            let screen = GetDC(None);
+            for (conf, light, alert, hover) in &rows {
+                STAT_BAT.store(if *alert { 9 } else { 87 }, Ordering::Relaxed);
+                STAT_BAT_AC.store(false, Ordering::Relaxed);
+                STAT_MUTE.store(*alert, Ordering::Relaxed);
+                let cfg = config::parse_pair("", conf);
+                apply_bar_statics(&cfg);
+                bar_fonts_clear();
+                // What update_bar would make of this config: labels by
+                // `workspace_label` once it is set (the old rows keep their
+                // numbers), the app's name for `{app}`, placeholder icons.
+                let mut m = mon.clone();
+                if cfg.bar_workspace_label != "auto" {
+                    m.labels = (0..8)
+                        .map(|i| {
+                            let at = |v: &[String]| v.get(i).cloned().unwrap_or_default();
+                            let icons = ["W", "C", "", "F"].map(String::from);
+                            config::workspace_label(
+                                &cfg.bar_workspace_label,
+                                i + 1,
+                                &at(&cfg.workspace_names),
+                                &at(&icons),
+                            )
+                        })
+                        .collect();
+                }
+                if cfg.bar_workspace_apps {
+                    m.ws_icons = (0..8)
+                        .map(|i| vec![0; (m.occupied >> i & 1) as usize * (1 + i % 3)])
+                        .collect();
+                }
+                if cfg.bar_title_format == "{app}" {
+                    m.title = "Astur".into();
+                }
+                let data = bar_data_from(&cfg, *light, true, vec![m]);
+                row_h = dpi_px(cfg.bar_height, dpi);
+                let dib = new_bar_dib(screen, w, row_h).expect("DIB");
+                let cv = BarCanvas {
+                    hdc: HDC(dib.dc as *mut c_void),
+                    bits: dib.bits as *mut u32,
+                    w,
+                    h: row_h,
+                };
+                // Where the pointer is: found in a first, plain render.
+                let lay = render_bar(&cv, &data, 1, dpi, 0, None);
+                let clock = BarWidget::Clock as u8;
+                let pointer = match hover {
+                    1 => lay.hits.iter().find(|t| t.wgt == clock).map(|t| t.x0 + 4),
+                    2 => lay.pills.first().map(|p| p.0 + 4),
+                    _ => None,
+                };
+                // Median of 21 renders: an offscreen cost (no BitBlt to a window).
+                let mut us: Vec<u32> = (0..21)
+                    .map(|_| {
+                        let t = Instant::now();
+                        render_bar(&cv, &data, 1, dpi, 0, pointer);
+                        let _ = GdiFlush();
+                        t.elapsed().as_micros() as u32
+                    })
+                    .collect();
+                let name = conf.lines().take(2).collect::<Vec<_>>().join(" ");
+                eprintln!(
+                    "render_bar us p50/max={:?} {name} light={light}",
+                    p50_max(&mut us)
+                );
+                let _ = GdiFlush();
+                img.extend_from_slice(std::slice::from_raw_parts(cv.bits, (w * row_h) as usize));
+                // 4 px of grey between rows.
+                img.extend(std::iter::repeat_n(0x0080_8080, (w * 4) as usize));
+                SelectObject(cv.hdc, HGDIOBJ(dib.old as *mut c_void));
+                let _ = DeleteObject(HGDIOBJ(dib.bmp as *mut c_void));
+                let _ = DeleteDC(cv.hdc);
+            }
+            let _ = ReleaseDC(None, screen);
+            bar_fonts_clear();
+        }
+        assert!(row_h > 0);
+        let h = (img.len() / w as usize) as i32;
+        let mut bmp: Vec<u8> = Vec::new();
+        let size = 54 + img.len() as u32 * 4;
+        bmp.extend_from_slice(b"BM");
+        bmp.extend_from_slice(&size.to_le_bytes());
+        bmp.extend_from_slice(&0u32.to_le_bytes());
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        bmp.extend_from_slice(&40u32.to_le_bytes());
+        bmp.extend_from_slice(&w.to_le_bytes());
+        bmp.extend_from_slice(&(-h).to_le_bytes()); // top-down
+        bmp.extend_from_slice(&1u16.to_le_bytes());
+        bmp.extend_from_slice(&32u16.to_le_bytes());
+        bmp.extend_from_slice(&[0u8; 24]);
+        for p in img {
+            bmp.extend_from_slice(&(p | 0xFF00_0000).to_le_bytes());
+        }
+        std::fs::write(out, bmp).unwrap();
+    }
+
+    #[test]
+    fn the_flat_filled_middle_matches_the_distance_everywhere() {
+        // The span shortcut must change nothing: every pixel it fills flat
+        // has coverage 1 by the distance too. Fractional rects, radii from 0
+        // to a capsule, with and without an outline; the 3 px one leaves
+        // several band rows with no inner coverage, which are flat-filled
+        // with the border colour.
+        let rects = [
+            [0.0, 0.0, 30.0, 12.0],
+            [1.3, 0.6, 27.8, 11.2],
+            [-4.5, 2.25, 40.0, 9.75],
+        ];
+        for r in rects {
+            for rad in [0.0, 0.7, 3.0, 5.5, 99.0] {
+                for border in [
+                    None,
+                    Some((0x00FF_0000, 1.0)),
+                    Some((0x00FF_0000, 2.5)),
+                    Some((0x00FF_0000, 3.0)),
+                ] {
+                    for fill in [Some(0x0000_FF00), None] {
+                        let got = aa(32, 12, r, rad, fill, border);
+                        let mut want = vec![0u32; 32 * 12];
+                        let rad = rad.clamp(0.0, (r[2] - r[0]).min(r[3] - r[1]) / 2.0);
+                        let bw = border.map_or(0.0, |(_, bw)| bw);
+                        let inner = [r[0] + bw, r[1] + bw, r[2] - bw, r[3] - bw];
+                        let irad = (rad - bw)
+                            .clamp(0.0, (inner[2] - inner[0]).min(inner[3] - inner[1]) / 2.0);
+                        for y in 0..12 {
+                            for x in 0..32 {
+                                let (cx, cy) = (x as f32 + 0.5, y as f32 + 0.5);
+                                let c =
+                                    |r, rad| (0.5 - round_rect_sd(cx, cy, r, rad)).clamp(0.0, 1.0);
+                                let (outer, inside) = (c(r, rad), c(inner, irad));
+                                let p = &mut want[y * 32 + x];
+                                match (fill, border) {
+                                    (Some(f), Some((b, _))) => {
+                                        *p = blend_px(blend_px(*p, b, outer), f, inside)
+                                    }
+                                    (None, Some((b, _))) => *p = blend_px(*p, b, outer - inside),
+                                    (Some(f), None) => *p = blend_px(*p, f, outer),
+                                    (None, None) => {}
+                                }
+                            }
+                        }
+                        assert_eq!(got, want, "{r:?} r={rad} {border:?} {fill:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn stat_glyphs_follow_level_and_state() {
+        let g = |w, fluent, bat, ac, vol, mute, wifi| {
+            stat_glyph(w, fluent, bat, ac, vol, mute, wifi).map(|c| c as u32)
+        };
+        let bat = |pct, ac| g(BarWidget::Battery, true, pct, ac, 0, false, false);
+        // Battery0..9 by the nearest tenth, Battery10 out of sequence.
+        for (pct, cp) in [(0, 0xE850), (4, 0xE850), (5, 0xE851), (87, 0xE859)] {
+            assert_eq!(bat(pct, false), Some(cp), "{pct}%");
+        }
+        assert_eq!(bat(95, false), Some(0xE83F));
+        assert_eq!(bat(100, false), Some(0xE83F));
+        // On mains: BatteryCharging0..8, 9 and 10 out of sequence.
+        assert_eq!(bat(50, true), Some(0xE85F));
+        assert_eq!(bat(80, true), Some(0xE862));
+        assert_eq!(bat(90, true), Some(0xE83E));
+        assert_eq!(bat(100, true), Some(0xEA93));
+        let vol = |v, mute| g(BarWidget::Volume, false, 0, false, v, mute, false);
+        assert_eq!(vol(30, true), Some(0xE74F), "mute wins");
+        for (v, cp) in [
+            (0, 0xE992),
+            (1, 0xE993),
+            (33, 0xE993),
+            (50, 0xE994),
+            (100, 0xE995),
+        ] {
+            assert_eq!(vol(v, false), Some(cp), "{v}%");
+        }
+        assert_eq!(
+            g(BarWidget::Net, false, 0, false, 0, false, true),
+            Some(0xE701)
+        );
+        assert_eq!(
+            g(BarWidget::Net, false, 0, false, 0, false, false),
+            Some(0xE839)
+        );
+        // CPU and RAM exist in Segoe Fluent Icons only.
+        assert_eq!(
+            g(BarWidget::Cpu, true, 0, false, 0, false, false),
+            Some(0xEEA1)
+        );
+        assert_eq!(
+            g(BarWidget::Mem, true, 0, false, 0, false, false),
+            Some(0xEEA0)
+        );
+        assert_eq!(g(BarWidget::Cpu, false, 0, false, 0, false, false), None);
+        assert_eq!(g(BarWidget::Mem, false, 0, false, 0, false, false), None);
+        assert_eq!(g(BarWidget::Clock, true, 0, false, 0, false, false), None);
+    }
+
+    /// Every codepoint stat_glyph can return, per font, and the music
+    /// buttons'.
+    fn all_stat_glyphs(fluent: bool) -> Vec<u16> {
+        let mut v: Vec<u16> = MEDIA_GLYPHS.iter().map(|&c| c as u16).collect();
+        for wgt in [
+            BarWidget::Cpu,
+            BarWidget::Mem,
+            BarWidget::Net,
+            BarWidget::Volume,
+            BarWidget::Battery,
+            BarWidget::Disk,
+            BarWidget::Keyboard,
+            BarWidget::Uptime,
+        ] {
+            for (level, ac, mute, wifi) in [(0, false, false, false), (100, true, true, true)] {
+                for pct in (0..=100).step_by(5) {
+                    let pct = if level == 0 { pct } else { 100 - pct };
+                    if let Some(c) = stat_glyph(wgt, fluent, pct, ac, pct, mute, wifi) {
+                        v.push(c as u16);
+                    }
+                }
+            }
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    #[test]
+    fn the_installed_icon_fonts_have_every_glyph_used() {
+        // The codepoints come from the Learn tables; this checks them against
+        // the real fonts on this machine. MDL2 ships with Windows 10 and 11;
+        // Segoe Fluent Icons is checked only where it is installed.
+        use windows::Win32::Graphics::Gdi::GetGlyphIndicesW;
+        const GGI_MARK_NONEXISTING_GLYPHS: u32 = 1;
+        unsafe {
+            let screen = GetDC(None);
+            let dc = CreateCompatibleDC(screen);
+            let mut faces = vec![("Segoe MDL2 Assets", false)];
+            if icon_face_is_fluent() {
+                faces.push(("Segoe Fluent Icons", true));
+            }
+            for (face, fluent) in faces {
+                assert!(font_installed(face), "{face}");
+                let mut name: Vec<u16> = face.encode_utf16().chain([0]).collect();
+                let font = CreateFontW(
+                    -16,
+                    0,
+                    0,
+                    0,
+                    400,
+                    0,
+                    0,
+                    0,
+                    DEFAULT_CHARSET.0 as u32,
+                    0,
+                    0,
+                    0,
+                    0,
+                    PCWSTR(name.as_mut_ptr()),
+                );
+                let old = SelectObject(dc, HGDIOBJ(font.0));
+                let cps = all_stat_glyphs(fluent);
+                let mut idx = vec![0u16; cps.len()];
+                let mut text = cps.clone();
+                text.push(0);
+                GetGlyphIndicesW(
+                    dc,
+                    PCWSTR(text.as_ptr()),
+                    cps.len() as i32,
+                    idx.as_mut_ptr(),
+                    GGI_MARK_NONEXISTING_GLYPHS,
+                );
+                SelectObject(dc, old);
+                let _ = DeleteObject(HGDIOBJ(font.0));
+                for (cp, gi) in cps.iter().zip(&idx) {
+                    assert_ne!(*gi, 0xFFFF, "{face} has no U+{cp:04X}");
+                }
+            }
+            let _ = DeleteDC(dc);
+            ReleaseDC(None, screen);
+        }
+        assert!(!unsafe { font_installed("Astur No Such Font Family") });
+    }
+
+    #[test]
+    fn widget_colors_fill_only_pills_and_text_suits_the_fill() {
+        let preset = |name: &str| -> Config {
+            let p = config::BAR_PRESETS.iter().find(|p| p.name == name).unwrap();
+            let text: String = p
+                .pairs
+                .iter()
+                .map(|(k, v)| format!("{k} = {v}\n"))
+                .collect();
+            config::parse_pair("", &text)
+        };
+        let pills = preset("pills");
+        let r = pills.bar_roles(false);
+        let st = bar_style(&pills, &r);
+        assert_eq!(
+            st.fills[BarWidget::Cpu as usize],
+            Some(r.swatches[1]),
+            "orange"
+        );
+        assert_eq!(st.fills[BarWidget::Title as usize], None, "surface");
+        assert_eq!(st.alert, r.swatches[0]);
+        // Not a pills bar: no per-widget colours, whatever the key says.
+        let mut islands = preset("islands");
+        islands.bar_widget_colors = pills.bar_widget_colors.clone();
+        assert!(bar_style(&islands, &r).fills.iter().all(Option::is_none));
+        // A switched-off widget needs no colour.
+        let mut off = pills.clone();
+        off.bar_show_cpu = false;
+        assert_eq!(bar_style(&off, &r).fills[BarWidget::Cpu as usize], None);
+
+        let data = bar_data_from(&pills, false, true, Vec::new());
+        let item = |fill, tone| BarItem {
+            wgt: BarWidget::Cpu,
+            x: 0,
+            w: 1,
+            text: Some((String::new(), tone)),
+            glyph: None,
+            fill,
+            marks: Vec::new(),
+            zone: 0,
+        };
+        assert_eq!(item(None, Tone::Normal).color(&data), data.fg);
+        assert_eq!(item(None, Tone::Dim).color(&data), data.inactive);
+        assert_eq!(item(None, Tone::Alert).color(&data), data.style.alert);
+        // Text on a fill is black or white to suit that fill: Nord light's
+        // accent_fg (#ECEFF4) on its yellow was 1.4:1. A pinned accent_fg wins.
+        let mut nord = pills.clone();
+        nord.bar_palette = "nord".into();
+        let data = bar_data_from(&nord, true, true, Vec::new());
+        let yellow = nord.bar_widget_fill("mem", &nord.bar_roles(true));
+        assert_eq!(yellow, Some(0x008B_CBEB), "#EBCB8B");
+        assert_eq!(item(yellow, Tone::Normal).color(&data), 0, "black");
+        let navy = Some(0x0080_0000);
+        assert_eq!(item(navy, Tone::Normal).color(&data), 0x00FF_FFFF);
+        nord.bar_accent_fg = Some(0x0012_3456);
+        let data = bar_data_from(&nord, true, true, Vec::new());
+        assert_eq!(item(yellow, Tone::Alert).color(&data), 0x0012_3456);
+    }
+
+    #[test]
+    fn colorrefs_become_dib_pixels() {
+        assert_eq!(px_color(0x0012_3456), 0x0056_3412);
+        assert_eq!(blend_px(0, 0x00FF_FFFF, 0.5), 0x0080_8080);
+        assert_eq!(blend_px(0x0010_2030, 0x00FF_FFFF, 0.0), 0x0010_2030);
+    }
+
     // ---- per-monitor layout + skip-unchanged placement (scrolling slice 3) ----
 
     #[test]
@@ -23899,6 +27937,7 @@ mod tests {
             tab_h: 26,
             icon_px: 20,
             colors: (1, 2, 3, 4),
+            accent_fg: 1,
         };
         let with = |f: &dyn Fn(&mut TabBarData)| {
             let mut b = bar.clone();
@@ -23917,6 +27956,8 @@ mod tests {
         assert_eq!(tab_bar_diff(Some(&bar), &icon), (false, true));
         let themed = with(&|b| b.colors.2 = 9);
         assert_eq!(tab_bar_diff(Some(&bar), &themed), (false, true));
+        let text = with(&|b| b.accent_fg = 0);
+        assert_eq!(tab_bar_diff(Some(&bar), &text), (false, true));
         let resized = with(&|b| b.rect = rect(0, 0, 400, 26));
         assert_eq!(tab_bar_diff(Some(&bar), &resized), (true, true));
     }
@@ -23939,6 +27980,7 @@ mod tests {
             tab_h: 26,
             icon_px: 0,
             colors: (1, 2, 3, 4),
+            accent_fg: 1,
         };
         // Windows showing A (column [A, B]) and C (column [C, D]). The first
         // column goes (untabbed): the second keeps its window, not the first
@@ -24112,41 +28154,283 @@ mod tests {
 
     // ---- scrolling keys, mouse, focus, drag (scrolling slice 5) ----
 
+    // ---- hotkeys: the table against the lookup it replaced ----
+
+    /// A hotkey command as comparable text.
+    fn cmd_sig(c: &Cmd) -> String {
+        match c {
+            Cmd::FocusDir(n) | Cmd::SwapDir(n) | Cmd::ConsumeOrExpel(n) => {
+                format!("{} {n}", c.name())
+            }
+            Cmd::ResizeMaster(d) | Cmd::ResizeTile(d) => format!("{} {d}", c.name()),
+            Cmd::Switch(i) | Cmd::MoveToWs(i) | Cmd::Extra(i) => format!("{} {i}", c.name()),
+            Cmd::FocusGeo(d) | Cmd::MoveGeo(d) => format!("{} {}", c.name(), *d as u8),
+            Cmd::ColumnEdge { last, carry } => format!("{} {last} {carry}", c.name()),
+            c => c.name().to_string(),
+        }
+    }
+
+    /// What `mods`+`vk` runs under `c`, read from the table as the hook does.
+    fn bound(c: &Config, mods: u8, vk: u32) -> Option<String> {
+        let keys = config::compile_keys(c);
+        let mut table = vec![0u32; BINDS.len()];
+        for b in &keys.binds {
+            table[b.slot()] = b.entry();
+        }
+        let (action, arg) = config::decode_bind(table[(mods as usize) << 8 | vk as usize])?;
+        Some(bind_cmd(action, arg).map_or_else(|| format!("{action:?}"), |c| cmd_sig(&c)))
+    }
+
+    /// The lookup the table replaced, kept as the parity oracle: the hook's
+    /// Space checks, then resolve_hotkey (extra_hotkeys, map_hotkey, the
+    /// workspace keys), with Left Alt held. Reads `c` where the old code
+    /// read its three Mutexes. `c` comes from the new parser (and chords from
+    /// the new key_to_vk), so 2.3.0's parse differences (key names it did not
+    /// read, WIN-only chords it dropped) are not covered here: they are the
+    /// documented edge cases in plan/known-issues.md.
+    fn old_lookup(c: &Config, vk: u32, shift: bool, ctrl: bool) -> Option<String> {
+        if vk == 0x20 && shift && c.system_menu_enabled {
+            return Some("SystemMenu".into());
+        }
+        if vk == 0x20 && !shift && c.launcher_enabled {
+            return Some("Launcher".into());
+        }
+        // compile_extra_hotkeys, then resolve_hotkey's find.
+        for (index, def) in c.extra_hotkeys.iter().enumerate() {
+            if def.action == "scratchpad" && !c.scratchpad_enabled {
+                continue;
+            }
+            let parts: Vec<&str> = def.chord.split('+').collect();
+            let has = |n: &str| parts.iter().any(|p| p.eq_ignore_ascii_case(n));
+            let key = parts.iter().rev().find_map(|p| config::key_to_vk(p));
+            if has("ALT") && key == Some(vk) && has("SHIFT") == shift && has("CTRL") == ctrl {
+                return Some(cmd_sig(&Cmd::Extra(index)));
+            }
+        }
+        // map_hotkey: Ctrl ignored, Shift picks the second action if any.
+        let pick = |a: Cmd, b: Cmd| Some(cmd_sig(if shift { &b } else { &a }));
+        let one = |a: Cmd| Some(cmd_sig(&a));
+        let edge = |last| Cmd::ColumnEdge { last, carry: shift };
+        if vk == c.key_focus_next {
+            return pick(Cmd::FocusDir(1), Cmd::SwapDir(1));
+        }
+        if vk == c.key_focus_prev {
+            return pick(Cmd::FocusDir(-1), Cmd::SwapDir(-1));
+        }
+        if vk == c.key_shrink_master {
+            return pick(Cmd::ResizeMaster(-0.05), Cmd::ResizeTile(-0.1));
+        }
+        if vk == c.key_grow_master {
+            return pick(Cmd::ResizeMaster(0.05), Cmd::ResizeTile(0.1));
+        }
+        if vk == c.key_promote_master {
+            return one(Cmd::PromoteMaster);
+        }
+        if vk == c.key_toggle_tiling {
+            return pick(Cmd::ToggleTiling, Cmd::ToggleTabbed);
+        }
+        if vk == c.key_toggle_float {
+            return one(Cmd::ToggleFloat);
+        }
+        if vk == c.key_close_window {
+            return one(Cmd::CloseFocused);
+        }
+        if vk == c.key_cycle_width {
+            return pick(Cmd::CycleWidth, Cmd::CycleHeight);
+        }
+        if vk == c.key_center_column {
+            return one(Cmd::CenterColumn);
+        }
+        if vk == c.key_consume_left {
+            return one(Cmd::ConsumeOrExpel(-1));
+        }
+        if vk == c.key_consume_right {
+            return one(Cmd::ConsumeOrExpel(1));
+        }
+        match vk {
+            0x24 => return one(edge(false)),
+            0x23 => return one(edge(true)),
+            0x0D => return pick(Cmd::LaunchTerminal, Cmd::LaunchBrowser),
+            0x25 => return pick(Cmd::FocusGeo(Dir::Left), Cmd::MoveGeo(Dir::Left)),
+            0x26 => return pick(Cmd::FocusGeo(Dir::Up), Cmd::MoveGeo(Dir::Up)),
+            0x27 => return pick(Cmd::FocusGeo(Dir::Right), Cmd::MoveGeo(Dir::Right)),
+            0x28 => return pick(Cmd::FocusGeo(Dir::Down), Cmd::MoveGeo(Dir::Down)),
+            _ => {}
+        }
+        let i = c.workspace_keys.iter().position(|&k| k == vk)?;
+        pick(Cmd::Switch(i), Cmd::MoveToWs(i))
+    }
+
+    #[test]
+    fn left_alt_table_matches_the_old_lookup_for_every_key() {
+        let mut configs = vec![config::default_config()];
+        let mut c = config::default_config();
+        c.scratchpad_enabled = true;
+        configs.push(c);
+        // Rebinds that collide with each other, the fixed keys and the
+        // workspace keys; extras that shadow built-ins, with Ctrl and Shift;
+        // a launcher-off Space extra; a chord without ALT (always ignored).
+        configs.push(config::parse_text(
+            "key_focus_next = 1\nkey_toggle_float = J\nkey_promote_master = Home\n\
+             key_close_window = F\nworkspace_keys = 1 2 3 Q J End Enter\n\
+             launcher_enabled = false\nextra_hotkeys = ALT+SHIFT+F2|layout|grid ;; \
+             ALT+CTRL+Q|launch|x ;; ALT+9|switch_workspace|3 ;; ALT+X|close_window| ;; \
+             ALT+SHIFT+J|reload| ;; ALT+SPACE|reload| ;; CTRL+Q|launch|n ;; \
+             ALT+CTRL+SHIFT+M|reload| ;; ALT+9|reload|",
+        ));
+        configs.push(config::parse_text(
+            "system_menu_enabled = false\nextra_hotkeys = ALT+SHIFT+SPACE|reload|",
+        ));
+        for c in &configs {
+            for vk in 0..256u32 {
+                // Tab: the hook's Alt+Tab path, before any lookup.
+                if vk == 0x09 {
+                    for m in 0..32u8 {
+                        assert_eq!(bound(c, m | config::MOD_ALT, vk), None);
+                    }
+                    continue;
+                }
+                for (shift, ctrl) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let mods = config::MOD_ALT
+                        | if shift { config::MOD_SHIFT } else { 0 }
+                        | if ctrl { config::MOD_CTRL } else { 0 };
+                    assert_eq!(
+                        bound(c, mods, vk),
+                        old_lookup(c, vk, shift, ctrl),
+                        "vk {vk:#04x} shift {shift} ctrl {ctrl}"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_new_keys_map_to_strip_commands_and_shift_variants() {
         // Default binds: R, C, [, ], H/L, T, Home/End.
-        assert!(matches!(map_hotkey(0x52, false), Some(Cmd::CycleWidth)));
-        assert!(matches!(map_hotkey(0x52, true), Some(Cmd::CycleHeight)));
-        assert!(matches!(map_hotkey(0x43, false), Some(Cmd::CenterColumn)));
-        assert!(matches!(
-            map_hotkey(0xDB, false),
-            Some(Cmd::ConsumeOrExpel(-1))
-        ));
-        assert!(matches!(
-            map_hotkey(0xDD, false),
-            Some(Cmd::ConsumeOrExpel(1))
-        ));
+        let c = config::default_config();
+        let alt = |vk| bound(&c, config::MOD_ALT, vk);
+        let alt_shift = |vk| bound(&c, config::MOD_ALT | config::MOD_SHIFT, vk);
+        let sig = |cmd: Cmd| Some(cmd_sig(&cmd));
+        assert_eq!(alt(0x52), sig(Cmd::CycleWidth));
+        assert_eq!(alt_shift(0x52), sig(Cmd::CycleHeight));
+        assert_eq!(alt(0x43), sig(Cmd::CenterColumn));
+        assert_eq!(alt(0xDB), sig(Cmd::ConsumeOrExpel(-1)));
+        assert_eq!(alt(0xDD), sig(Cmd::ConsumeOrExpel(1)));
         // Shift+H/L is the tile height; plain H/L unchanged.
-        assert!(matches!(map_hotkey(0x48, true), Some(Cmd::ResizeTile(d)) if d < 0.0));
-        assert!(matches!(map_hotkey(0x4C, true), Some(Cmd::ResizeTile(d)) if d > 0.0));
-        assert!(matches!(map_hotkey(0x48, false), Some(Cmd::ResizeMaster(d)) if d < 0.0));
+        assert_eq!(alt_shift(0x48), sig(Cmd::ResizeTile(-0.1)));
+        assert_eq!(alt_shift(0x4C), sig(Cmd::ResizeTile(0.1)));
+        assert_eq!(alt(0x48), sig(Cmd::ResizeMaster(-0.05)));
         // Alt+Shift+T no longer toggles tiling.
-        assert!(matches!(map_hotkey(0x54, true), Some(Cmd::ToggleTabbed)));
-        assert!(matches!(map_hotkey(0x54, false), Some(Cmd::ToggleTiling)));
-        assert!(matches!(
-            map_hotkey(0x24, false),
-            Some(Cmd::ColumnEdge {
-                last: false,
-                carry: false
-            })
-        ));
-        assert!(matches!(
-            map_hotkey(0x23, true),
-            Some(Cmd::ColumnEdge {
-                last: true,
-                carry: true
-            })
-        ));
+        assert_eq!(alt_shift(0x54), sig(Cmd::ToggleTabbed));
+        assert_eq!(alt(0x54), sig(Cmd::ToggleTiling));
+        let edge = |last, carry| sig(Cmd::ColumnEdge { last, carry });
+        assert_eq!(alt(0x24), edge(false, false));
+        assert_eq!(alt_shift(0x23), edge(true, true));
+    }
+
+    #[test]
+    fn every_main_key_binds_the_defaults_on_its_own_modifiers() {
+        use config::{MainKey, MOD_CTRL, MOD_HYPER, MOD_SHIFT, MOD_WIN};
+        let mut c = config::default_config();
+        for main in MainKey::ALL {
+            c.main_key = main;
+            let m = main.bits();
+            assert_eq!(
+                bound(&c, m, 0x4A),
+                Some(cmd_sig(&Cmd::FocusDir(1))),
+                "{main:?}"
+            );
+            assert_eq!(
+                bound(&c, m | MOD_SHIFT, 0x31),
+                Some(cmd_sig(&Cmd::MoveToWs(0)))
+            );
+            assert_eq!(bound(&c, m, 0x20), Some("Launcher".into()));
+        }
+        c.main_key = MainKey::CapsLock;
+        assert_eq!(
+            bound(&c, MOD_HYPER, 0x57),
+            Some(cmd_sig(&Cmd::CloseFocused))
+        );
+        c.main_key = MainKey::Win;
+        // Win+Ctrl+Left stays Windows' desktop switch.
+        assert_eq!(bound(&c, MOD_WIN | MOD_CTRL, 0x25), None);
+    }
+
+    #[test]
+    fn mask_only_for_a_win_or_alt_that_apps_see() {
+        use config::{MOD_ALT as A, MOD_CTRL as C, MOD_HYPER as H, MOD_SHIFT as S, MOD_WIN as W};
+        // Reserved Left Alt never reaches apps.
+        assert!(!needs_mask(true, A));
+        assert!(!needs_mask(true, A | S | C));
+        assert!(needs_mask(true, A | W)); // a WIN chord under Left Alt
+                                          // Passed through: Alt, Win, Ctrl+Win.
+        assert!(needs_mask(false, A));
+        assert!(needs_mask(false, W | S));
+        assert!(needs_mask(false, C | W));
+        // Reserved Caps Lock: nothing to mask unless Alt / Win is in it.
+        assert!(!needs_mask(false, H | S | C));
+        assert!(needs_mask(false, H | A));
+    }
+
+    /// Hook cost of a key press with Left Alt held, the old lookup (two
+    /// GetAsyncKeyState, three Mutexes and their scans) against the table
+    /// (live_mods, one load). Measurement, not a pass/fail:
+    /// cargo test -p astur --release -- --ignored --nocapture hotkey_lookup_cost
+    #[test]
+    #[ignore]
+    fn hotkey_lookup_cost() {
+        use std::hint::black_box;
+        let c = config::default_config();
+        publish_binds(c.main_key, &config::compile_keys(&c).binds);
+        let extras: Mutex<Vec<(u32, bool, bool, usize)>> =
+            Mutex::new(vec![(0xC0, false, false, 0)]);
+        let keys = Mutex::new([
+            c.key_focus_next,
+            c.key_focus_prev,
+            c.key_shrink_master,
+            c.key_grow_master,
+            c.key_promote_master,
+            c.key_toggle_tiling,
+            c.key_toggle_float,
+            c.key_close_window,
+            c.key_cycle_width,
+            c.key_center_column,
+            c.key_consume_left,
+            c.key_consume_right,
+        ]);
+        let ws = Mutex::new(c.workspace_keys.clone());
+        let probe = [0x4Au32, 0x31, 0x25, 0x44]; // J, 1, Left, D (unbound)
+        let n = 2_000_000usize;
+        let mut hits = 0u32;
+        let t = Instant::now();
+        for i in 0..n {
+            let vk = black_box(probe[i % 4]);
+            let (shift, ctrl) = unsafe { (vk_down(VK_SHIFT), vk_down(VK_CONTROL)) };
+            let hit = extras
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.0 == vk && e.1 == shift && e.2 == ctrl)
+                || keys.lock().unwrap().contains(&vk)
+                || matches!(vk, 0x0D | 0x23..=0x28)
+                || ws.lock().unwrap().contains(&vk);
+            hits += hit as u32;
+        }
+        let old = t.elapsed();
+        let t = Instant::now();
+        for i in 0..n {
+            let vk = black_box(probe[i % 4]) as usize;
+            let m = unsafe { live_mods(0xA4, true) };
+            hits += (BINDS[(m as usize) << 8 | vk].load(Ordering::Acquire) != 0) as u32;
+        }
+        let new = t.elapsed();
+        let per = |d: std::time::Duration| d.as_nanos() as f64 / n as f64;
+        println!(
+            "per press: old lookup {:.1} ns, table {:.1} ns",
+            per(old),
+            per(new)
+        );
+        assert_eq!(hits as usize, 2 * n * 3 / 4);
     }
 
     #[test]
@@ -24490,5 +28774,199 @@ mod tests {
             m.remove(&snapped);
             m.remove(&fresh);
         }
+    }
+
+    #[test]
+    fn a_launch_command_reaches_cmd_verbatim_so_arguments_work() {
+        // #16: std quoted each of these whole (inner quotes as \"), and
+        // `start` took the whole text for one program name.
+        assert_eq!(
+            start_line("wt -p Ubuntu", false),
+            r#"start "" wt -p Ubuntu"#
+        );
+        assert_eq!(
+            start_line(r#"explorer.exe "rio.exe""#, false),
+            r#"start "" explorer.exe "rio.exe""#
+        );
+        assert_eq!(
+            start_line(r#""C:\Program Files\Rio\rio.exe" --flag"#, false),
+            r#"start "" "C:\Program Files\Rio\rio.exe" --flag"#
+        );
+        assert_eq!(start_line("wt", false), r#"start "" wt"#);
+        assert_eq!(start_line("http://", false), r#"start "" http://"#);
+        // A bare existing path with spaces is quoted whole, as std did, so it
+        // still opens rather than running `C:\Program` with arguments.
+        assert_eq!(
+            start_line(r"C:\Program Files\Rio\rio.exe", true),
+            r#"start "" "C:\Program Files\Rio\rio.exe""#
+        );
+        // The probe sees the path cmd will run: %VAR%s expanded, an unset,
+        // empty or invalid name kept as written (std::env::var may panic on
+        // the last two, and panic = abort).
+        let pf = |n: &str| (n == "PF").then(|| r"C:\Program Files".to_string());
+        assert_eq!(
+            expand_env(r"%PF%\Mozilla Firefox\firefox.exe", pf),
+            r"C:\Program Files\Mozilla Firefox\firefox.exe"
+        );
+        assert_eq!(expand_env("50% %NOPE% x", pf), "50% %NOPE% x");
+        assert_eq!(
+            expand_env("a%%b%=x%c%PF%", pf),
+            r"a%%b%=x%cC:\Program Files"
+        );
+        assert_eq!(expand_env("100%", pf), "100%");
+        // The only typed text that can reach cmd (a `cmd:` web-search
+        // template) is URL-encoded first: no cmd operator, quote or space
+        // survives it.
+        let q = url_encode(r#"a & b | c < d > e ^ f "g" (h)"#);
+        assert!(!q.contains(|c: char| "&|<>^\"() ".contains(c)), "{q}");
+    }
+
+    #[test]
+    fn exit_unhook_runs_once_and_only_on_the_hook_thread() {
+        // The only test that touches the hook statics. Fake handles (tests
+        // install no hooks), with uniqueness bits set so they can never name
+        // a real object in this session: UnhookWindowsHookEx just fails.
+        MOUSE_HOOK_H.store(0x7FFE_0001, Ordering::Relaxed);
+        KBD_HOOK_H.store(0x7FFE_0002, Ordering::Relaxed);
+        HOOK_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Relaxed);
+        std::thread::spawn(|| unsafe { unhook_input() })
+            .join()
+            .unwrap();
+        assert_eq!(
+            MOUSE_HOOK_H.load(Ordering::Relaxed),
+            0x7FFE_0001,
+            "another thread unhooked"
+        );
+        assert_eq!(
+            KBD_HOOK_H.load(Ordering::Relaxed),
+            0x7FFE_0002,
+            "another thread unhooked"
+        );
+        unsafe { unhook_input() };
+        assert_eq!(MOUSE_HOOK_H.load(Ordering::Relaxed), 0);
+        assert_eq!(KBD_HOOK_H.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn border_recheck_runs_twice_after_the_last_focus_change_then_forgets() {
+        let ms = std::time::Duration::from_millis;
+        let t0 = Instant::now();
+        let mut r = BorderRecheck::default();
+        assert_eq!(r.wait(t0), None, "nothing owed: the plain wait");
+        r.note(t0, 0, 0);
+        assert_eq!(r.wait(t0), None, "no window, nothing owed");
+        r.note(t0, 0xA, 0xB);
+        // A second change inside the first one's delay: A lost focus first
+        // and is still owed its border; the passes restart from the last.
+        r.note(t0 + ms(100), 0xB, 0xC);
+        assert_eq!(r.windows, [0xA, 0xB, 0xC]);
+        assert_eq!(r.wait(t0 + ms(150)), Some(ms(100)));
+        assert_eq!(r.wait(t0 + ms(300)), Some(ms(0)));
+        r.ran();
+        assert_eq!(r.wait(t0 + ms(300)), Some(ms(400)), "the late pass");
+        r.ran();
+        assert_eq!(r.wait(t0 + ms(900)), None);
+        assert!(r.windows.is_empty());
+    }
+
+    #[test]
+    fn reserved_alt_swallows_only_typing_editing_and_navigation_keys() {
+        // D, 1, Delete, Backspace, F4, F12, Space, Enter, Esc, Left, Apps,
+        // numpad 0, ';', OEM_102 (the ISO < > key): each would reach the app
+        // as the bare key.
+        for vk in [
+            0x44, 0x31, 0x2E, 0x08, 0x73, 0x7B, 0x20, 0x0D, 0x1B, 0x25, 0x5D, 0x60, 0xBA, 0xE2,
+        ] {
+            assert!(swallow_unbound(vk), "{vk:#04x}");
+        }
+        // Tab (the Alt+Tab path), Win, PrintScreen, F13, Caps Lock, Pause,
+        // volume up, play/pause, launch app 2: still reach the system.
+        for vk in [0x09, 0x5B, 0x2C, 0x7C, 0x14, 0x13, 0xAF, 0xB3, 0xB7] {
+            assert!(!swallow_unbound(vk), "{vk:#04x}");
+        }
+        // A modifier is never eaten: its swallowed key-up would stick it down.
+        assert!((0..256)
+            .filter(|&vk| is_modifier_vk(vk))
+            .all(|vk| !swallow_unbound(vk)));
+    }
+
+    #[test]
+    fn alt_drag_never_takes_a_shell_surface() {
+        let utf16 = |s: &str| s.encode_utf16().collect::<Vec<u16>>();
+        let overlapped = 0x00CF_0000; // WS_OVERLAPPEDWINDOW
+                                      // An app window drags, whatever its class.
+        assert!(!never_dragged(overlapped, 0, &utf16("Chrome_WidgetWin_1")));
+        assert!(!never_dragged(
+            overlapped,
+            0,
+            &utf16("WinUIDesktopWin32WindowClass")
+        ));
+        // Quick Settings and friends: refused by style, as tiling does.
+        assert!(never_dragged(
+            0,
+            WS_EX_TOOLWINDOW.0,
+            &utf16("ControlCenterWindow")
+        ));
+        assert!(never_dragged(0, WS_EX_NOACTIVATE.0, &utf16("Anything")));
+        // An app's captioned tool palette (OBS dock) still drags: refusing
+        // it turned the Alt+press into a real click inside the app.
+        let caption = 0x00C0_0000; // WS_CAPTION
+        assert!(!never_dragged(
+            caption,
+            WS_EX_TOOLWINDOW.0,
+            &utf16("Qt5QWindowToolSaveBits")
+        ));
+        // Start/Search, the taskbar and Astur's own surfaces: by class.
+        assert!(never_dragged(
+            overlapped,
+            0,
+            &utf16("Windows.UI.Core.CoreWindow")
+        ));
+        assert!(never_dragged(overlapped, 0, &utf16("Shell_TrayWnd")));
+        assert!(never_dragged(overlapped, 0, &utf16("astur_slide")));
+        assert!(never_dragged(overlapped, 0, &utf16("astur_bar")));
+    }
+
+    #[test]
+    fn an_uncloak_retries_only_a_recent_show() {
+        let mut slots = [(0isize, 0u64); 4];
+        uncloak_retry_mark(&mut slots, 0x10, 1_000);
+        assert!(uncloak_retry_live(&slots, 0x10, 500));
+        // Expired, or never shown (a virtual-desktop switch): no retry.
+        assert!(!uncloak_retry_live(&slots, 0x10, 1_000));
+        assert!(!uncloak_retry_live(&slots, 0x20, 500));
+        // Not consumed by a check: a frame may uncloak twice while starting.
+        assert!(uncloak_retry_live(&slots, 0x10, 600));
+        // A re-show refreshes its own slot instead of taking another.
+        uncloak_retry_mark(&mut slots, 0x10, 5_000);
+        assert_eq!(slots.iter().filter(|s| s.0 == 0x10).count(), 1);
+        // Full: the soonest-expiring slot makes room.
+        for (h, d) in [(0x20, 2_000), (0x30, 3_000), (0x40, 4_000)] {
+            uncloak_retry_mark(&mut slots, h, d);
+        }
+        uncloak_retry_mark(&mut slots, 0x50, 6_000);
+        assert!(!uncloak_retry_live(&slots, 0x20, 0));
+        assert!(uncloak_retry_live(&slots, 0x10, 0));
+        assert!(uncloak_retry_live(&slots, 0x50, 0));
+    }
+
+    #[test]
+    fn a_revealing_unpark_never_hides_a_window_its_posted_show_shows() {
+        let (hide, min, na) = (
+            SW_HIDE.0 as u32,
+            SW_SHOWMINNOACTIVE.0 as u32,
+            SW_SHOWNA.0 as u32,
+        );
+        // Manager callers keep the state they read.
+        assert_eq!(placement_show_cmd(false, true, false), hide);
+        assert_eq!(placement_show_cmd(false, false, false), hide);
+        assert_eq!(placement_show_cmd(true, true, false), min);
+        assert_eq!(placement_show_cmd(true, false, false), na);
+        // Exit restore and rescue (#19): their ShowWindowAsync may land after
+        // the read, so a hidden read still ends shown, minimised or not.
+        assert_eq!(placement_show_cmd(false, true, true), min);
+        assert_eq!(placement_show_cmd(false, false, true), na);
+        assert_eq!(placement_show_cmd(true, true, true), min);
+        assert_eq!(placement_show_cmd(true, false, true), na);
     }
 }

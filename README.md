@@ -3,7 +3,7 @@
 **Astur** is a fast, free, open-source **tiling window manager for Windows** —
 **Alt-drag** window movement, nearest-corner resize, six tiling layouts
 (including a Niri-style scrolling layout, chosen per monitor), a
-per-monitor status bar, up to 10 virtual workspaces, and silky composited
+per-monitor status bar, up to 20 virtual workspaces, and silky composited
 animations. Full edition adds a configurable **app launcher + file search**
 (Alt+Space), **system menu** (Alt+Shift+Space), desktop tools, settings GUI, and
 tray icon. A keyboard-driven,
@@ -61,8 +61,10 @@ menu, tray, and a settings GUI — with the same motion polish and core tiling.
   [v1.0.1 release](https://github.com/Page011/Astur/releases/tag/v1.0.1). One
   `.exe`, no install, console window.
 
-No admin required. Running as admin lets it manage elevated windows (e.g. Task
-Manager) too.
+No admin required. Elevated windows (an admin terminal, or Task Manager on an admin
+account) are left untiled where they are, and stay visible on every workspace,
+unless Astur runs as admin too: Windows does not let a normal process move or hide
+them.
 
 ## What it does
 
@@ -70,16 +72,41 @@ Manager) too.
 - **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
 - **Tiling mode** — `dwindle` (spiral), `master`, equal `columns`, balanced `grid`,
   stacked `monocle`, or Niri-style `scrolling` (see [Scrolling layout](#scrolling-layout))
-  across up to 10 named/icon-labelled virtual workspaces. Each monitor can run its
+  across up to 20 named/icon-labelled virtual workspaces. Each monitor can run its
   own layout (`monitor_layouts`)
-- **Status bar** — a per-monitor bar with three fully configurable widget zones
+- **Status bar** — a per-monitor bar (or only on the screens you pick,
+  `monitors`) with three fully configurable widget zones
   (left / center / right): workspace pills, focused title, app buttons (click to
-  focus), clock, date, CPU, RAM, battery, **network speed**, and **volume**
-  (scroll over it to adjust, click to mute). Scroll anywhere else on the bar to
-  cycle workspaces, click a pill to switch. Optional **floating rounded bar**
-  (margins + corner radius) and **auto-hide** (reveals on edge hover). Widget gaps,
-  app labels/tooltips, stat labels, formats, icon-font glyphs, and media text are
-  configurable.
+  focus), clock, date, CPU, RAM, battery, **network speed**, **volume**
+  (scroll over it to adjust, click to mute), **keyboard language**, **disk
+  space**, **uptime**, **your own text or a command's output**, **music
+  buttons** and the Astur logo. Scroll anywhere else on the bar to
+  cycle workspaces, click a pill to switch. Every widget has **click actions**
+  for the left, right and middle button (`clock_click = calendar`,
+  `cpu_right_click = launch wt`): out of the box the clock and date open the
+  calendar, volume mutes, battery and network open quick settings, CPU and RAM
+  open Task Manager, a right-click opens the matching Windows Settings page.
+  Workspace marks can show numbers, names, icons or both, plus the apps open
+  on each (`workspace_label`, `workspace_apps`); an optional hover highlight,
+  dot or powerline separators, a bold app-name title (`title_format = {app}`),
+  and clock seconds / AM-PM and long date tokens. Shapes: full-width strip,
+  **floating rounded bar** (margins + corner radius), **islands** (a rounded
+  island per zone) or **pills** (a capsule per widget, each in its own palette
+  colour if you like, with black or white text to suit it), with an optional
+  outline, plus **auto-hide** (reveals on
+  edge hover). Seven colour **palettes** (classic, Catppuccin, Nord, Gruvbox,
+  Rose Pine, mono, and system, which takes your Windows accent), each with a
+  dark and a light variant, and four active-workspace styles (box, anti-aliased
+  pill, underline, dots). Stats can show **Windows icons** (`icon_mode = glyph`:
+  Segoe Fluent Icons, or Segoe MDL2 Assets on Windows 10, no install) with the
+  battery level and charging, the volume level and mute, and wifi or ethernet;
+  a low battery turns red (`glyph_only`: the icons alone). Nine **presets**
+  (classic, retro, minimal, floating, islands, pills, Mac style, fluent,
+  powerline), which Settings applies by writing their keys into
+  `navbar.conf`. The bar is opaque: no blur behind it (see
+  `plan/decisions.md`). Font
+  weight, widget gaps, app labels/tooltips, stat labels, formats and media text
+  are configurable.
 - **Animations** — workspace switches animate with a composited overlay:
   `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`. Windows
   also **glide** to new slots (re-tile, open/close reflow, scrolling, resizes,
@@ -107,9 +134,39 @@ Manager) too.
 - **Desktop tools** *(Astur, opt-in)* — workspace-aware Alt+Tab picker, Alt+Grave
   scratchpad, clipboard/emoji launcher providers, workspace-triggered wallpaper,
   media title widget, active-workspace/MRU persistence, and local named-pipe IPC.
-- **Settings GUI** *(Astur)* — native editor for launcher, menus, desktop tools,
-  layouts, appearance, navbar, widgets, rules, and key bindings. Saving applies
-  **live** — window manager hot-reloads, no restart.
+- **Settings GUI** *(Astur)* — Windows 11 style editor for shortcuts, layouts,
+  workspaces, rules, appearance, motion, the status bar, launcher, power menu,
+  desktop extras and integrations, with Ctrl+F search across every setting.
+  Changes apply **as you make them** (no Save button; Ctrl+Z undoes) — the window
+  manager hot-reloads, no restart. Home has a one-click **Quick setup** (theme,
+  layout, bar style, animations, gap size) and a short how-to built from your
+  own keys. Nothing needs typing: the terminal, browser and scratchpad app are
+  picked from the ones installed (or any app, with the Windows file picker),
+  fonts from the installed fonts with a sample, the web search from a list of
+  sites, folders and pictures with Browse, and an app rule from a window that
+  is open now; a value typed by hand stays editable under More options.
+  Window rules, launcher entries, power-menu
+  items, workspaces and extra hotkeys are tables (a row that isn't valid yet
+  shows in red with the reason and is not written); shortcuts are set by
+  pressing the key, with a warning when two share one, and a copyable cheat
+  sheet. The Status bar page has a preset gallery with drawn previews, Mac
+  style and Powerline included (Apply
+  backs up `navbar.conf` to `navbar.conf.bak` first, once per session, and
+  shows which preset your bar is closest to and what you changed), palettes
+  with swatches, shape, separators, hover highlight and font (warning when
+  the font is not installed), and a drag-and-drop editor for the left /
+  centre / right zones: dropping a widget into a zone shows it, dragging it
+  out hides it, and clicking one opens its settings. Formats are picked by
+  what they show (`14:05`, `2:05:09 PM`, `Sun 4 Oct`, App name, `ENG-US`;
+  Custom… types one), the disk widget's drive from the drives on the PC, and
+  the custom widget's command says plainly that it runs in the background.
+  A Workspaces section sets the active-workspace style, labels (numbers,
+  names, icons) and app icons in each mark; Click actions gives every widget
+  on the bar a drop-down per mouse button ("Open the calendar (default)",
+  "Go to workspace…" with a number, "Open an app or command…" with the app
+  picker); Behaviour picks which screens show the bar (all, the main one, or
+  ticked screens). Troubleshooting lists config lines it did not understand,
+  with a did-you-mean fix.
 - **Tray icon** *(Astur)* — no console window; left-click for Settings, right-click for
   Settings / Quit.
 - **Light / dark theme** *(Astur)* — the launcher and menus follow `theme = dark |
@@ -120,12 +177,31 @@ Manager) too.
   100% screen next to a 150% one both look right. Sizes in the config are
   logical pixels at 100%.
 - **Extras** — coloured borders, unfocused dimming, focus-follows-mouse, rich
-  exe/class/title window rules with workspace/monitor routing, arbitrary Alt chords,
-  and live config hot-reload.
+  exe/class/title window rules with workspace/monitor routing, extra shortcuts on
+  the main key, Alt or Win, and live config hot-reload.
 
-Left Alt is fully reserved as Astur modifier — apps never see it. Right Alt is
-untouched. Alt+Tab passes through by default; optional replacement uses Astur's
-workspace-aware picker.
+**The main key.** Every Astur shortcut and mouse move / resize is held with one
+main key, `Alt` in the tables below. It is **Left Alt** unless you pick another in
+Settings (or `main_key` in `astur.conf`):
+
+| `main_key` | What it means |
+|---|---|
+| `lalt` (default) | Left Alt, reserved: apps never see it. Left Alt plus a key Astur does not use does nothing (typing, editing and navigation keys, the numpad and F1-F12 are swallowed; volume, media, PrintScreen and F13-F24 still work). Right Alt is untouched; use it for app Alt shortcuts (Alt+F4, menus). Alt+Tab passes through by default; optional replacement uses Astur's workspace-aware picker. |
+| `win` | The Windows key. Apps and Windows keep it; only Astur's shortcuts are taken, and they replace Windows' own (Win+D, Win+1...). Start does not pop up after a Win shortcut or Win+drag. Win+L always locks the PC, so grow-master moves to `Win+O` (unless another of your shortcuts already uses O). |
+| `alt` | Either Alt, GlazeWM-style. Apps keep their Alt shortcuts except the ones Astur uses; menu bars do not pop up after an Astur shortcut. |
+| `ctrl+win` | Ctrl and the Windows key held together. |
+| `capslock` | Caps Lock becomes the main key and no longer turns capitals on (turn it off first). Pressed where Astur can't see it (an admin window, the lock screen, a UAC prompt, or before Astur starts) it still turns capitals on; press it there again (Win+L locks the PC), or use the on-screen keyboard. |
+
+Right Alt and Ctrl+Alt are not offered: on German, French and similar keyboards
+they type characters (AltGr). Win+L and Ctrl+Alt+Del always belong to Windows.
+
+In Settings, **Shortcuts > Astur key** shows each choice with the Windows
+shortcuts it would take over with your shortcuts. A new key works at once and
+goes back by itself after 15 seconds (or when Settings is closed) unless you
+press **Keep**, so a key that doesn't work on your keyboard can't lock you out.
+Custom shortcuts written with `ALT` (the scratchpad's `ALT+GRAVE`) move to the
+new key as `MOD`. Every label, the cheat sheet and the conflict notes on each
+shortcut follow the key you picked.
 
 ## Hotkeys
 
@@ -148,13 +224,15 @@ workspace-aware picker.
 | `Alt` + `Shift+Enter` | Launch browser |
 | `Alt` + `1`–`9`, `0` | Switch to workspace 1–10 |
 | `Alt` + `Shift` + `1`–`9`, `0` | Move focused window to workspace |
-| `Alt` + `Tab` | Windows switcher by default; optional Astur workspace-aware switcher |
+| `Alt` + `Tab` | Windows switcher by default; optional Astur workspace-aware switcher (Left Alt main key) |
+
+`Alt` here is the main key (above): with `main_key = win` read `Win` + `J`, and so on.
 
 On a monitor running the scrolling layout, the arrows, `J K H L M` and a few new
 keys work on columns instead — see [Scrolling layout](#scrolling-layout).
 
 Letter binds (`J K H L M T F W`, and `R C [ ]` for scrolling) plus extra
-Alt/Shift/Ctrl chords are configurable
+chords (`MOD` = the main key, with `CTRL`, `SHIFT`, `ALT`, `WIN`) are configurable
 in `%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
 borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
 in same folder. Both files **hot-reload** on save.
@@ -246,8 +324,19 @@ everything, which also repairs any window left mis-styled:
   launcher providers/custom entries, system actions, desktop tools, rich rules,
   persistence, IPC, and hotkeys (scrolling keys: `key_cycle_width`,
   `key_center_column`, `key_consume_left`, `key_consume_right`).
-- **`navbar.conf`** — bar placement/style, three widget zones, labels/formats/icons,
-  app buttons/tooltips, stats, volume, network, media, floating mode, and auto-hide.
+- **`navbar.conf`** — bar placement/style (`shape`, `palette`, `workspace_style`,
+  `font_weight`, `border_width`, `island_padding`, `widget_colors`), three widget
+  zones, labels/formats/icons (`icon_mode = glyph` for Windows icons), app
+  buttons/tooltips, stats, volume, network, media, floating mode, and auto-hide;
+  `<widget>_click` / `_right_click` / `_middle_click` actions, `monitors`,
+  `workspace_label`, `workspace_apps`, `separator_style`, `hover`,
+  `title_format`, `title_bold`, and the keyboard / disk / uptime / custom
+  widgets' keys (`disk_drive`, `custom_command`, `custom_interval`, formats).
+  A bar preset in Settings writes these keys (look, clock/date formats and
+  zones) and turns Astur's bar on (`enabled = true`); it never writes
+  `bottom`, `autohide` or the wheel / hide-empty behaviour. The look includes icon mode, workspace style, widget colours,
+  separator style, hover and the title's format and weight.
+  A `shape` line overrides `floating`.
 
 Save both as UTF-8. The window manager never overwrites a file it cannot read (a
 UTF-16 "Unicode" save, or one locked mid-save): it keeps its current settings
@@ -255,9 +344,20 @@ UTF-16 "Unicode" save, or one locked mid-save): it keeps its current settings
 
 Full Astur ships **`astur-settings.exe`** to edit both files. `.conf` remains source
 of truth; comments/layout survive saves. Structured records use `;;` between rows
-and `|` between fields. Prefix literal separators with backslash. Built-in icon names:
+and `|` between fields. Prefix literal separators with backslash (Settings edits
+these as tables and escapes them for you). Built-in icon names:
 `app browser calculator clipboard command file folder grid lock media power reload
 power-circle restart screenshot search settings setup signout sleep terminal wallpaper web window`.
+
+Commands Astur runs (`terminal`, `browser`, `scratchpad_command`, the `launch`
+hotkey action, IPC `launch` and `cmd:` targets) are cmd.exe command lines
+(`cmd /C start "" <command>`): PATH and App Execution Aliases resolve and
+arguments work, e.g. `terminal = wt -p Ubuntu`. Quote a path with spaces (or
+whose `%VARIABLES%` expand to spaces, like a `C:\Users\John Smith` profile) when
+arguments follow it: `"C:\Program Files\App\app.exe" --flag`. A bare path to an
+existing file or folder works unquoted, `%VARIABLES%` included. cmd characters
+(`& | < > ^ %`) work as in cmd, so quote a URL that contains `&`; inside `|`/`;;`
+records write a pipe as `\|`.
 
 ## Build from source
 
@@ -282,7 +382,7 @@ crate, no workspace).
 
 Use YASB's existing GlazeWM workspace widget with Astur's optional localhost
 WebSocket server: live workspace indicators, app icons, click-to-switch and wheel
-cycling, including per-monitor workspaces. Open **Settings > YASB integration**
+cycling, including per-monitor workspaces. Open **Settings > Integrations**
 to enable it, choose a port, and copy the widget configuration and example CSS.
 Alternatively, set `yasb_enabled = true` in `astur.conf` and connect the widget
 to `ws://127.0.0.1:6123`.
@@ -291,8 +391,14 @@ See [setup and ready-to-merge YASB configuration](integrations/yasb/README.md).
 ## How it works
 
 Astur installs two low-level Windows hooks (`WH_MOUSE_LL`, `WH_KEYBOARD_LL`) that
-intercept input before it reaches any application. Left Alt is swallowed so it never
-triggers app menus or Alt shortcuts — only Astur sees it. Drag commands are queued to
+intercept input before it reaches any application. With the default main key, Left
+Alt is swallowed so it never triggers app menus or Alt shortcuts — only Astur sees it.
+A Left Alt chord Astur does not bind is swallowed too (typing, editing and navigation
+keys), so the app never receives it as the bare key. With a Win, Alt or Ctrl+Win main
+key the modifier reaches apps and only Astur's own shortcut keys are swallowed; Astur
+then sends an unassigned key (0xE8) so Windows does not open Start, nor an app its menu
+bar, on the release. Every shortcut is one lookup in a precomputed table: no lock on
+the input path. Drag commands are queued to
 the manager. Alt-drag moves and resizes the real window: no thumbnail, outline,
 off-screen parking, or preview handoff. The manager samples the newest pointer
 geometry at up to 120 Hz; repeated samples are skipped. Final drops run on the same
@@ -335,7 +441,9 @@ power menu, with a single-exe (Lite) option and no required config file.
 
 **Does it work on Windows 11?** Yes, on Windows 10 and 11, x64.
 
-**Do I need admin rights?** No. Running as admin lets it manage elevated windows too.
+**Do I need admin rights?** No. Without them Astur leaves elevated windows (an admin
+terminal, or Task Manager on an admin account) untiled, because Windows does not let a
+normal process move or hide them. Run Astur as admin to tile those too.
 
 **Does it work with display scaling (125% / 150%)?** Yes, from 2.1.3 on. Astur is
 per-monitor-DPI aware, including mixed-scale multi-monitor setups. (Earlier

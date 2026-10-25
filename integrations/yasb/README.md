@@ -6,10 +6,11 @@ GlazeWM process, helper script, or custom plugin is required.
 
 ## Setup
 
-In **Astur Settings > YASB integration**, enable the integration, choose the port,
-and click **Save**. The same page can copy the server address, widget YAML with
-your selected port, and example CSS. Follow its YASB setup steps, then turn off
-**Show Astur's built-in bar** and save. To restore the Astur bar, turn it back on.
+In **Astur Settings > Integrations**, turn on **YASB workspaces** and choose the
+port (changes apply as you make them). The same page can copy the server
+address, widget YAML with your selected port, and example CSS. Follow its YASB
+setup steps, then on the **Status bar** page set **Status bar** to **YASB**.
+To restore the Astur bar, set it back to **Astur bar**.
 
 The settings exe embeds the examples, so these copy buttons work with a portable
 installation too. For manual configuration:

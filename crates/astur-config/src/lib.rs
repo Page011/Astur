@@ -49,7 +49,7 @@ pub struct Config {
     pub outer_gap: i32,           // gap between windows and screen edge
     pub inner_gap: i32,           // gap between adjacent windows
     pub master_ratio: f32,        // fraction of width given to the master window
-    pub workspaces: usize,        // workspaces per monitor (1..10)
+    pub workspaces: usize,        // shared: total; per_monitor: each (1..=MAX_WORKSPACES)
     pub workspace_keys: Vec<u32>, // VK code per workspace; Alt+key switches, +Shift moves
     pub workspace_names: Vec<String>, // optional display names, in workspace order
     pub workspace_icons: Vec<String>, // optional short labels/icons, in workspace order
@@ -156,6 +156,8 @@ pub struct Config {
     /// Not written back to disk, and not part of "has the user edited this".
     pub unknown_keys: Vec<String>,
     pub extra_hotkeys: Vec<HotkeyDef>,
+    /// The key every hotkey is held with (`main_key`, alias `mod`).
+    pub main_key: MainKey,
     pub window_rules: Vec<WindowRule>,
     pub bar_enabled: bool,         // draw the status bar on every monitor
     pub bar_height: i32,           // bar thickness in px (work area is reserved for it)
@@ -222,6 +224,42 @@ pub struct Config {
     pub bar_left: Vec<String>, // widget names, left zone (drawn left-to-right)
     pub bar_center: Vec<String>, // widget names, centered in the remaining gap
     pub bar_right: Vec<String>, // widget names, right zone (listed left-to-right)
+    pub bar_palette: String,   // PALETTES name the `auto` colours resolve through
+    pub bar_workspace_style: String, // active workspace: box | pill | underline | dot
+    pub bar_font_weight: i32,  // bar (and tab-bar) font weight, 100-900
+    pub bar_surface: Option<u32>, // island / pill fill; None = palette
+    pub bar_accent_fg: Option<u32>, // text on the accent; None = see `bar_roles`
+    pub bar_border: Option<u32>, // outline colour; None = the muted role
+    pub bar_border_width: i32, // outline width (px), 0 = none
+    /// strip | floating | islands | pills, or "" when no `shape` line set it
+    /// (then `floating` decides): read it through `effective_bar_shape`.
+    pub bar_shape: String,
+    pub bar_island_padding: i32, // space around an island's / pill's content (px)
+    /// `widget_colors`: (text widget, swatch name | surface | #hex), the
+    /// capsule fills of `shape = pills`; read through `bar_widget_fill`.
+    pub bar_widget_colors: Vec<(String, String)>,
+    /// `<widget>_click` / `_right_click` / `_middle_click` lines as (widget,
+    /// button 0 left / 1 right / 2 middle, "action [argument]"): explicit
+    /// lines only, one per widget and button, the last line wins. Read
+    /// through `bar_click`, which falls back to `BAR_CLICK_DEFAULTS`.
+    pub bar_clicks: Vec<(String, u8, String)>,
+    pub bar_keyboard_format: String, // keyboard widget: {lang} {region}
+    pub bar_disk_drive: String,      // disk widget: a drive or folder, ending in '\'
+    pub bar_disk_format: String,     // {free} {used} {total} {value} (% used)
+    pub bar_icon_disk: String,       // disk label for icon / both
+    pub bar_uptime_format: String,   // {value}
+    pub bar_custom_command: String,  // custom widget: cmd /S /C "<this>"; empty = never runs
+    pub bar_custom_format: String,   // {output}
+    pub bar_custom_interval: u32,    // seconds between custom runs, 1..=3600
+    pub bar_workspace_label: String, // WORKSPACE_LABELS: what a mark shows
+    pub bar_workspace_apps: bool,    // up to 3 app icons in each workspace mark
+    /// `monitors`: all | primary | screen numbers ("1 3", 1-based, left to
+    /// right); read through `bar_monitor_mask` and `bar_on`.
+    pub bar_monitors: String,
+    pub bar_separator_style: String, // line | dot | powerline
+    pub bar_hover: bool,             // highlight the clickable item under the pointer
+    pub bar_title_format: String,    // title widget: {title} {app}
+    pub bar_title_bold: bool,        // title widget in a bold weight
 }
 
 /// Widget names accepted in the navbar `left` / `center` / `right` zone lists.
@@ -240,7 +278,294 @@ pub const BAR_WIDGETS: &[&str] = &[
     "media",
     "separator",
     "spacer",
+    "keyboard",
+    "disk",
+    "uptime",
+    "custom",
+    "media_controls",
+    "logo",
 ];
+
+/// Widgets with click actions (`<widget>_click` keys). Workspaces, app
+/// buttons and the music buttons keep their own fixed clicks; separators
+/// and spacers have none.
+pub const BAR_CLICK_WIDGETS: &[&str] = &[
+    "title", "layout", "cpu", "mem", "net", "volume", "battery", "date", "clock", "media",
+    "keyboard", "disk", "uptime", "custom", "logo",
+];
+
+/// Every bar click action: (value, plain-English label for Settings). The
+/// last two take an argument after a space: `switch_workspace 3`,
+/// `launch wt -p Ubuntu`. Hotkeys and bar clicks share the WM's action
+/// runner, so a name means the same in both.
+pub const BAR_ACTIONS: &[(&str, &str)] = &[
+    ("none", "Do nothing"),
+    ("calendar", "Open the calendar"),
+    (
+        "quick_settings",
+        "Open quick settings (Wi-Fi, sound, battery)",
+    ),
+    ("mute", "Mute or unmute"),
+    ("volume_mixer", "Open the volume mixer"),
+    ("sound_settings", "Open sound settings"),
+    ("network_settings", "Open network settings"),
+    ("bluetooth_settings", "Open Bluetooth settings"),
+    ("power_settings", "Open power and battery settings"),
+    ("datetime_settings", "Open date and time settings"),
+    ("language_settings", "Open language and keyboard settings"),
+    ("next_input", "Switch keyboard language"),
+    ("storage_settings", "Open storage settings"),
+    ("display_settings", "Open display settings"),
+    ("windows_settings", "Open Windows Settings"),
+    ("astur_settings", "Open Astur Settings"),
+    ("task_manager", "Open Task Manager"),
+    ("open_drive", "Open the drive in File Explorer"),
+    ("media_play_pause", "Play or pause"),
+    ("media_next", "Next track"),
+    ("media_prev", "Previous track"),
+    ("launcher", "Open the app launcher"),
+    ("system_menu", "Open the power menu"),
+    ("workspace_next", "Next workspace"),
+    ("workspace_prev", "Previous workspace"),
+    ("next_layout", "Next layout"),
+    ("switch_workspace", "Go to workspace\u{2026}"),
+    ("launch", "Open an app or command\u{2026}"),
+];
+
+/// What a click does with no `<widget>_click` line: [left, right, middle].
+/// Every action was a no-op before click actions existed except the volume
+/// widget's left click (mute), which keeps it; a widget not listed does
+/// nothing on any button.
+pub const BAR_CLICK_DEFAULTS: &[(&str, [&str; 3])] = &[
+    ("clock", ["calendar", "datetime_settings", "none"]),
+    ("date", ["calendar", "datetime_settings", "none"]),
+    ("volume", ["mute", "sound_settings", "none"]),
+    ("battery", ["quick_settings", "power_settings", "none"]),
+    ("net", ["quick_settings", "network_settings", "none"]),
+    ("cpu", ["task_manager", "none", "none"]),
+    ("mem", ["task_manager", "none", "none"]),
+    ("disk", ["open_drive", "storage_settings", "none"]),
+    ("keyboard", ["next_input", "language_settings", "none"]),
+    ("media", ["media_play_pause", "media_next", "none"]),
+    ("logo", ["system_menu", "astur_settings", "none"]),
+];
+
+/// `workspace_label` values: auto (icon, else name, else number: the bar
+/// before this key), number, name, icon, icon_name.
+pub const WORKSPACE_LABELS: &[&str] = &["auto", "number", "name", "icon", "icon_name"];
+
+/// `bar_monitor_mask` bit meaning "the primary screen only".
+pub const BAR_PRIMARY_ONLY: u64 = 1 << 63;
+
+/// The text of one workspace mark (`workspace_label`): `number` is 1-based,
+/// `name` / `icon` that workspace's workspace_names / workspace_icons entry
+/// ("" = none). A missing name or icon falls back to the number, so a mark
+/// is never blank. Shared by the WM and the settings preview.
+pub fn workspace_label(mode: &str, number: usize, name: &str, icon: &str) -> String {
+    let or_number = |s: &str| {
+        if s.is_empty() {
+            number.to_string()
+        } else {
+            s.to_string()
+        }
+    };
+    match mode {
+        "number" => number.to_string(),
+        "name" => or_number(name),
+        "icon" => or_number(icon),
+        "icon_name" if !icon.is_empty() && !name.is_empty() => format!("{icon} {name}"),
+        // auto, and icon_name with only one of the two.
+        _ => or_number(if icon.is_empty() { name } else { icon }),
+    }
+}
+
+/// Does bar monitor `index` (0-based, left to right) with `primary` get a
+/// bar under `mask` (`Config::bar_monitor_mask`)? The WM's bar placement and
+/// its work-area reservation both ask this one function: if they disagreed,
+/// every tile on that screen would sit offset by a bar's height.
+pub fn bar_on(mask: u64, index: usize, primary: bool) -> bool {
+    if mask & BAR_PRIMARY_ONLY != 0 {
+        primary
+    } else {
+        index < 63 && (mask >> index) & 1 == 1
+    }
+}
+
+/// The clock widget's text. Tokens: HH / H (24-hour), hh / h (12-hour), mm,
+/// ss, tt (am/pm), TT (AM/PM); an empty format is `HH:mm`, or `h:mm tt`
+/// without `h24`. The replaces run longest-first, as the WM always did, so
+/// every format without the newer ss / TT reads exactly as before. Here, not
+/// in the WM, so Settings' samples cannot drift from the bar.
+pub fn format_clock(fmt: &str, h24: bool, h: u32, m: u32, s: u32) -> String {
+    let fmt = match fmt {
+        "" if h24 => "HH:mm",
+        "" => "h:mm tt",
+        f => f,
+    };
+    let h12 = match h % 12 {
+        0 => 12,
+        x => x,
+    };
+    let pm = h >= 12;
+    fmt.replace("HH", &format!("{h:02}"))
+        .replace("hh", &format!("{h12:02}"))
+        .replace("mm", &format!("{m:02}"))
+        .replace("ss", &format!("{s:02}"))
+        .replace("tt", if pm { "pm" } else { "am" })
+        .replace("TT", if pm { "PM" } else { "AM" })
+        .replace('H', &h.to_string())
+        .replace('h', &h12.to_string())
+}
+
+/// The date widget's text. Tokens: yyyy yy, MMMM (January) MMM (Jan) MM,
+/// dddd (Sunday) ddd (Sun) dd, and d (day, no leading zero) only where no
+/// letter touches it, so a literal word such as "Today" keeps its d.
+/// `mon` is 1..=12, `wday` 0 = Sunday; out of range gives no name. Anything
+/// else is copied. Char-based so non-ASCII text never splits.
+pub fn format_date(fmt: &str, y: u32, mon: u32, day: u32, wday: u32) -> String {
+    const WD: [&str; 7] = [
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+    ];
+    const MO: [&str; 12] = [
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
+    ];
+    let chars: Vec<char> = fmt.chars().collect();
+    let at = |i: usize, tok: &str| {
+        tok.chars()
+            .enumerate()
+            .all(|(k, t)| chars.get(i + k) == Some(&t))
+    };
+    let letter = |i: Option<usize>| {
+        i.and_then(|i| chars.get(i))
+            .is_some_and(|c| c.is_alphabetic())
+    };
+    let wd = WD.get(wday as usize).copied().unwrap_or("");
+    let mo = (mon as usize)
+        .checked_sub(1)
+        .and_then(|i| MO.get(i))
+        .copied()
+        .unwrap_or("");
+    let short = |s: &str| s.chars().take(3).collect::<String>();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let (text, len) = if at(i, "yyyy") {
+            (format!("{y:04}"), 4)
+        } else if at(i, "yy") {
+            (format!("{:02}", y % 100), 2)
+        } else if at(i, "MMMM") {
+            (mo.to_string(), 4)
+        } else if at(i, "MMM") {
+            (short(mo), 3)
+        } else if at(i, "MM") {
+            (format!("{mon:02}"), 2)
+        } else if at(i, "dddd") {
+            (wd.to_string(), 4)
+        } else if at(i, "ddd") {
+            (short(wd), 3)
+        } else if at(i, "dd") {
+            (format!("{day:02}"), 2)
+        } else if chars[i] == 'd' && !letter(i.checked_sub(1)) && !letter(Some(i + 1)) {
+            (day.to_string(), 1)
+        } else {
+            (chars[i].to_string(), 1)
+        };
+        out.push_str(&text);
+        i += len;
+    }
+    out
+}
+
+/// A `disk_drive` value as the root the WM asks about: `C`, `C:` and `C:\`
+/// are the drive, any other text a folder; always ending in '\'. None for an
+/// empty value (the previous one stays).
+pub fn disk_root(v: &str) -> Option<String> {
+    let v = v.trim().trim_matches('"');
+    let mut s = match v.as_bytes() {
+        [] => return None,
+        [d] if d.is_ascii_alphabetic() => format!("{}:", d.to_ascii_uppercase() as char),
+        [d, b':', ..] if d.is_ascii_alphabetic() => {
+            format!("{}{}", d.to_ascii_uppercase() as char, &v[1..])
+        }
+        _ => v.to_string(),
+    };
+    if !s.ends_with(['\\', '/']) {
+        s.push('\\');
+    }
+    Some(s)
+}
+
+/// A `monitors` value normalised (all, primary, or sorted 1-based screen
+/// numbers "1 3"), or None when it is none of those (the previous stays).
+fn parse_monitors(v: &str) -> Option<String> {
+    let m = v.trim().to_ascii_lowercase();
+    match m.as_str() {
+        "" | "all" => return Some("all".into()),
+        "primary" | "main" => return Some("primary".into()),
+        _ => {}
+    }
+    let mut n: Vec<u32> = m
+        .split([',', ' ', '\t'])
+        .filter(|s| !s.is_empty())
+        .map(|s| s.parse::<u32>().ok().filter(|n| (1..=63).contains(n)))
+        .collect::<Option<_>>()?;
+    n.sort_unstable();
+    n.dedup();
+    let words: Vec<String> = n.iter().map(u32::to_string).collect();
+    (!words.is_empty()).then(|| words.join(" "))
+}
+
+/// A `<widget>_click` key as (widget, button): `_middle_click` and
+/// `_right_click` are stripped before `_click`, so `cpu_right_click` is
+/// the right button, not a widget named `cpu_right`.
+fn click_key(k: &str) -> Option<(&str, u8)> {
+    let (w, b) = if let Some(w) = k.strip_suffix("_middle_click") {
+        (w, 2)
+    } else if let Some(w) = k.strip_suffix("_right_click") {
+        (w, 1)
+    } else {
+        (k.strip_suffix("_click")?, 0)
+    };
+    BAR_CLICK_WIDGETS.contains(&w).then_some((w, b))
+}
+
+/// A click value `action [argument]`, split at the first whitespace, the
+/// action lower-cased and the argument kept verbatim. None for an unknown
+/// action; Some("") for an empty value (back to the default).
+fn click_value(v: &str) -> Option<String> {
+    let v = v.trim();
+    let (a, arg) = v
+        .split_once(char::is_whitespace)
+        .map_or((v, ""), |(a, r)| (a, r.trim()));
+    let a = a.to_ascii_lowercase();
+    if a.is_empty() {
+        return Some(String::new());
+    }
+    BAR_ACTIONS.iter().any(|x| x.0 == a).then(|| {
+        if arg.is_empty() {
+            a
+        } else {
+            format!("{a} {arg}")
+        }
+    })
+}
 
 /// The one list of valid layout names. The parser, IPC, extra hotkeys and the
 /// WM's layout commands all check against it, so a new layout cannot be
@@ -253,6 +578,14 @@ pub const LAYOUTS: &[&str] = &[
     "monocle",
     "scrolling",
 ];
+
+/// Most workspaces `workspaces =` accepts (#18). The settings slider uses it
+/// too, so the GUI can reach every value the parser accepts (a value dragged
+/// or typed there is clamped to the slider range). 20, not the 64 the bar's
+/// per-monitor pill mask allows: every workspace left on a monitor keeps a work-area-sized
+/// slide snapshot (~32 MB of GPU/system-shared memory at 4K, an estimate),
+/// and the pill strip is `workspaces` x `workspace_width` wide.
+pub const MAX_WORKSPACES: usize = 20;
 
 /// Built-in scrolling preset cycles. Shared by `defaults()` and the parser,
 /// which falls back to them when a list has nothing valid in it.
@@ -272,6 +605,528 @@ pub const BAR_LIGHT: [u32; 4] = [
     0x0024_1E1B, // #1B1E24
     0x0082_6333, // #336382
     0x0091_8277, // #778291
+];
+
+/// `#RRGGBB` written as 0xRRGGBB, as a COLORREF (0x00BBGGRR), so the palette
+/// tables below read like the hex their sources publish.
+const fn rgb(hex: u32) -> u32 {
+    ((hex & 0xFF) << 16) | (hex & 0xFF00) | ((hex >> 16) & 0xFF)
+}
+
+/// One palette variant's colour roles (COLORREFs). `muted` is the `inactive`
+/// key; `accent_fg` is text on the accent fill; `surface` fills islands and
+/// pills. `swatches` are named by `SWATCH_NAMES`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BarRoles {
+    pub bg: u32,
+    pub surface: u32,
+    pub fg: u32,
+    pub muted: u32,
+    pub accent: u32,
+    pub accent_fg: u32,
+    pub swatches: [u32; 8],
+}
+
+/// A named bar palette: what `auto` colours resolve to, per theme.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Palette {
+    pub name: &'static str,
+    pub dark: BarRoles,
+    pub light: BarRoles,
+}
+
+/// Names of `BarRoles::swatches`, in order. A palette without one of these
+/// hues repeats its nearest (Nord and Gruvbox have no pink, Rose Pine no green).
+pub const SWATCH_NAMES: [&str; 8] = [
+    "red", "orange", "yellow", "green", "teal", "blue", "purple", "pink",
+];
+
+/// Every `palette =` value, `classic` (the default) first. Hex values were
+/// checked on 2026-10-24 against catppuccin/palette palette.json (Mocha /
+/// Latte), nordtheme.com, morhetz/gruvbox colors/gruvbox.vim and
+/// rose-pine/palette palette.json (main / dawn). classic is BAR_DARK /
+/// BAR_LIGHT plus Astur's own surface and swatches; mono is Astur's own;
+/// system's neutrals approximate Windows' and its accent is replaced by the
+/// Windows accent colour in the WM (never read here: no Win32).
+pub const PALETTES: &[Palette] = &[
+    Palette {
+        name: "classic",
+        dark: BarRoles {
+            bg: BAR_DARK[0],
+            surface: rgb(0x292E42),
+            fg: BAR_DARK[1],
+            muted: BAR_DARK[3],
+            accent: BAR_DARK[2],
+            accent_fg: BAR_DARK[0],
+            swatches: CLASSIC_DARK_SWATCHES,
+        },
+        light: BarRoles {
+            bg: BAR_LIGHT[0],
+            surface: rgb(0xDDE1E8),
+            fg: BAR_LIGHT[1],
+            muted: BAR_LIGHT[3],
+            accent: BAR_LIGHT[2],
+            accent_fg: BAR_LIGHT[0],
+            swatches: CLASSIC_LIGHT_SWATCHES,
+        },
+    },
+    Palette {
+        name: "catppuccin",
+        // Mocha: base, surface0, text, overlay0, mauve, crust.
+        dark: BarRoles {
+            bg: rgb(0x1E1E2E),
+            surface: rgb(0x313244),
+            fg: rgb(0xCDD6F4),
+            muted: rgb(0x6C7086),
+            accent: rgb(0xCBA6F7),
+            accent_fg: rgb(0x11111B),
+            swatches: [
+                rgb(0xF38BA8),
+                rgb(0xFAB387),
+                rgb(0xF9E2AF),
+                rgb(0xA6E3A1),
+                rgb(0x94E2D5),
+                rgb(0x89B4FA),
+                rgb(0xCBA6F7),
+                rgb(0xF5C2E7),
+            ],
+        },
+        // Latte: base, surface0, text, overlay0, mauve, base.
+        light: BarRoles {
+            bg: rgb(0xEFF1F5),
+            surface: rgb(0xCCD0DA),
+            fg: rgb(0x4C4F69),
+            muted: rgb(0x9CA0B0),
+            accent: rgb(0x8839EF),
+            accent_fg: rgb(0xEFF1F5),
+            swatches: [
+                rgb(0xD20F39),
+                rgb(0xFE640B),
+                rgb(0xDF8E1D),
+                rgb(0x40A02B),
+                rgb(0x179299),
+                rgb(0x1E66F5),
+                rgb(0x8839EF),
+                rgb(0xEA76CB),
+            ],
+        },
+    },
+    Palette {
+        name: "nord",
+        // nord0, nord1, nord4, nord3, nord8, nord0.
+        dark: BarRoles {
+            bg: rgb(0x2E3440),
+            surface: rgb(0x3B4252),
+            fg: rgb(0xD8DEE9),
+            muted: rgb(0x4C566A),
+            accent: rgb(0x88C0D0),
+            accent_fg: rgb(0x2E3440),
+            swatches: NORD_AURORA,
+        },
+        // nord6, nord5, nord0, nord3, nord10, nord6.
+        light: BarRoles {
+            bg: rgb(0xECEFF4),
+            surface: rgb(0xE5E9F0),
+            fg: rgb(0x2E3440),
+            muted: rgb(0x4C566A),
+            accent: rgb(0x5E81AC),
+            accent_fg: rgb(0xECEFF4),
+            swatches: NORD_AURORA,
+        },
+    },
+    Palette {
+        name: "gruvbox",
+        // dark0, dark1, light1, gray, bright_yellow, dark0; bright swatches.
+        dark: BarRoles {
+            bg: rgb(0x282828),
+            surface: rgb(0x3C3836),
+            fg: rgb(0xEBDBB2),
+            muted: rgb(0x928374),
+            accent: rgb(0xFABD2F),
+            accent_fg: rgb(0x282828),
+            swatches: [
+                rgb(0xFB4934),
+                rgb(0xFE8019),
+                rgb(0xFABD2F),
+                rgb(0xB8BB26),
+                rgb(0x8EC07C),
+                rgb(0x83A598),
+                rgb(0xD3869B),
+                rgb(0xD3869B),
+            ],
+        },
+        // light0, light1, dark1, gray, faded_yellow, light0; faded swatches.
+        light: BarRoles {
+            bg: rgb(0xFBF1C7),
+            surface: rgb(0xEBDBB2),
+            fg: rgb(0x3C3836),
+            muted: rgb(0x928374),
+            accent: rgb(0xB57614),
+            accent_fg: rgb(0xFBF1C7),
+            swatches: [
+                rgb(0x9D0006),
+                rgb(0xAF3A03),
+                rgb(0xB57614),
+                rgb(0x79740E),
+                rgb(0x427B58),
+                rgb(0x076678),
+                rgb(0x8F3F71),
+                rgb(0x8F3F71),
+            ],
+        },
+    },
+    Palette {
+        name: "rosepine",
+        // main: base, overlay (surface is too close to base to read as an
+        // island), text, muted, iris, base. love gold gold pine foam pine iris rose.
+        dark: BarRoles {
+            bg: rgb(0x191724),
+            surface: rgb(0x26233A),
+            fg: rgb(0xE0DEF4),
+            muted: rgb(0x6E6A86),
+            accent: rgb(0xC4A7E7),
+            accent_fg: rgb(0x191724),
+            swatches: [
+                rgb(0xEB6F92),
+                rgb(0xF6C177),
+                rgb(0xF6C177),
+                rgb(0x31748F),
+                rgb(0x9CCFD8),
+                rgb(0x31748F),
+                rgb(0xC4A7E7),
+                rgb(0xEBBCBA),
+            ],
+        },
+        // dawn, the same roles.
+        light: BarRoles {
+            bg: rgb(0xFAF4ED),
+            surface: rgb(0xF2E9E1),
+            fg: rgb(0x464261),
+            muted: rgb(0x9893A5),
+            accent: rgb(0x907AA9),
+            accent_fg: rgb(0xFAF4ED),
+            swatches: [
+                rgb(0xB4637A),
+                rgb(0xEA9D34),
+                rgb(0xEA9D34),
+                rgb(0x286983),
+                rgb(0x56949F),
+                rgb(0x286983),
+                rgb(0x907AA9),
+                rgb(0xD7827E),
+            ],
+        },
+    },
+    Palette {
+        name: "mono",
+        dark: BarRoles {
+            bg: rgb(0x111111),
+            surface: rgb(0x1E1E1E),
+            fg: rgb(0xE6E6E6),
+            muted: rgb(0x6B6B6B),
+            accent: rgb(0xE6E6E6),
+            accent_fg: rgb(0x111111),
+            swatches: MONO_DARK,
+        },
+        light: BarRoles {
+            bg: rgb(0xF5F5F5),
+            surface: rgb(0xE6E6E6),
+            fg: rgb(0x1A1A1A),
+            muted: rgb(0x8A8A8A),
+            accent: rgb(0x1A1A1A),
+            accent_fg: rgb(0xF5F5F5),
+            swatches: MONO_LIGHT,
+        },
+    },
+    Palette {
+        name: "system",
+        // Accent: Windows' default blue until the WM reads the real one.
+        dark: BarRoles {
+            bg: rgb(0x202020),
+            surface: rgb(0x2B2B2B),
+            fg: rgb(0xFFFFFF),
+            muted: rgb(0x9D9D9D),
+            accent: rgb(0x0078D4),
+            accent_fg: rgb(0xFFFFFF),
+            swatches: CLASSIC_DARK_SWATCHES,
+        },
+        light: BarRoles {
+            bg: rgb(0xF3F3F3),
+            surface: rgb(0xFBFBFB),
+            fg: rgb(0x1B1B1B),
+            muted: rgb(0x616161),
+            accent: rgb(0x005FB8),
+            accent_fg: rgb(0xFFFFFF),
+            swatches: CLASSIC_LIGHT_SWATCHES,
+        },
+    },
+];
+
+/// Nord's Aurora plus Frost, in SWATCH_NAMES order (no pink: purple again).
+const NORD_AURORA: [u32; 8] = [
+    rgb(0xBF616A),
+    rgb(0xD08770),
+    rgb(0xEBCB8B),
+    rgb(0xA3BE8C),
+    rgb(0x8FBCBB),
+    rgb(0x81A1C1),
+    rgb(0xB48EAD),
+    rgb(0xB48EAD),
+];
+/// Mono's grey ramps, away from the bar background first, so the first
+/// pills stand out most. Slot 0 is a real red even here: it is the low-battery
+/// alert, and a near-white "red" vanished on the light bar (1.05:1) and
+/// matched fg on the dark one. The reds are classic's.
+const MONO_DARK: [u32; 8] = [
+    rgb(0xF7768E),
+    rgb(0xD6D6D6),
+    rgb(0xBDBDBD),
+    rgb(0xA3A3A3),
+    rgb(0x8A8A8A),
+    rgb(0x707070),
+    rgb(0x575757),
+    rgb(0x3D3D3D),
+];
+const MONO_LIGHT: [u32; 8] = [
+    rgb(0xB8364C),
+    rgb(0x2A2A2A),
+    rgb(0x3D3D3D),
+    rgb(0x575757),
+    rgb(0x707070),
+    rgb(0x8A8A8A),
+    rgb(0xA3A3A3),
+    rgb(0xBDBDBD),
+];
+/// Astur's own, for classic and system: Tokyo-Night-like hues on dark,
+/// darkened for contrast on light.
+const CLASSIC_DARK_SWATCHES: [u32; 8] = [
+    rgb(0xF7768E),
+    rgb(0xFF9E64),
+    rgb(0xE0AF68),
+    rgb(0x9ECE6A),
+    rgb(0x73DACA),
+    rgb(0x7AA2F7),
+    rgb(0xBB9AF7),
+    rgb(0xF5A6D8),
+];
+const CLASSIC_LIGHT_SWATCHES: [u32; 8] = [
+    rgb(0xB8364C),
+    rgb(0xB15C1E),
+    rgb(0x8C6C20),
+    rgb(0x4E7A2A),
+    rgb(0x237A6E),
+    rgb(0x2F5FB3),
+    rgb(0x7447B3),
+    rgb(0xA8457F),
+];
+
+/// The palette `name` names; classic for anything else.
+pub fn palette(name: &str) -> &'static Palette {
+    PALETTES
+        .iter()
+        .find(|p| p.name == name)
+        .unwrap_or(&PALETTES[0])
+}
+
+/// Readable text on the COLORREF `fill`: black when its luma (Rec. 601
+/// weights) is over 128, else white. One rule shared by the WM (text on the
+/// Windows accent, text on a coloured pill) and the settings preview, so the
+/// preview cannot pick a different colour than the bar. The cut was 150 when
+/// only `palette = system` used it; that put white on Latte orange (2.98:1)
+/// and pure green (1.4:1). At 128 every palette swatch reads at 3.3:1 or more
+/// (the PALETTES test checks it) and Windows' default blue keeps white text.
+pub fn text_on(fill: u32) -> u32 {
+    let (r, g, b) = (fill & 0xFF, (fill >> 8) & 0xFF, (fill >> 16) & 0xFF);
+    if (r * 299 + g * 587 + b * 114) / 1000 > 128 {
+        0
+    } else {
+        0x00FF_FFFF
+    }
+}
+
+/// A bar look the settings GUI applies by writing `pairs` into navbar.conf
+/// (`apply_updates`), so the file stays the one source of truth: there is no
+/// `preset` key and no base layer in the parser (a template that spells out
+/// every key would hide one anyway). A preset owns the look and the zones:
+/// every preset writes the same look keys, so applying one after another
+/// leaves nothing behind, plus `show_* = true` for each widget it lists.
+/// It never writes behaviour (enabled, bottom, autohide, wheel_workspaces,
+/// hide_empty_workspaces), and lists no `media` (that needs astur.conf's
+/// media_enabled too).
+#[derive(Clone, Copy, Debug)]
+pub struct BarPreset {
+    pub name: &'static str,
+    pub label: &'static str,
+    pub blurb: &'static str,
+    pub pairs: &'static [(&'static str, &'static str)],
+}
+
+/// A preset's pairs with every colour key back on `auto`: a preset's colours
+/// come from its palette, never a pinned #hex (and never a legacy default
+/// hex, which the parser reads as auto anyway).
+macro_rules! looks {
+    ($($k:literal: $v:literal),* $(,)?) => {
+        &[$(($k, $v),)* ("bg", "auto"), ("fg", "auto"), ("accent", "auto"),
+          ("inactive", "auto"), ("accent_fg", "auto"), ("surface", "auto"), ("border", "auto")]
+    };
+}
+
+/// Every bar preset, `classic` (today's default bar, minus the widgets it
+/// hides) first.
+pub const BAR_PRESETS: &[BarPreset] = &[
+    BarPreset {
+        name: "classic",
+        label: "Classic",
+        blurb: "The default: a full-width strip, square accent block, title centred, stats on the right.",
+        pairs: looks! {
+            "shape": "strip", "palette": "classic", "height": "28", "padding": "8", "margin": "8",
+            "radius": "12", "island_padding": "10", "border_width": "0",
+            "font_name": "Segoe UI", "font_size": "0", "font_weight": "600",
+            "workspace_style": "box", "workspace_width": "34", "widget_gap": "16", "icon_size": "20",
+            "icon_mode": "both", "widget_colors": "", "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "line", "hover": "false", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces", "center": "title", "right": "layout cpu mem volume battery clock",
+            "show_title": "true", "show_layout": "true", "show_cpu": "true", "show_mem": "true",
+            "show_volume": "true", "show_battery": "true", "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "retro",
+        label: "Retro",
+        blurb: "i3 / dwmblocks: a dense monospace strip, square boxes, stats split by separators, Gruvbox.",
+        pairs: looks! {
+            "shape": "strip", "palette": "gruvbox", "height": "24", "padding": "4", "margin": "8",
+            "radius": "12", "island_padding": "10", "border_width": "0",
+            "font_name": "Consolas", "font_size": "0", "font_weight": "400",
+            "workspace_style": "box", "workspace_width": "24", "widget_gap": "8", "icon_size": "20",
+            "icon_mode": "both", "widget_colors": "", "clock_format": "HH:mm", "date_format": "yyyy-MM-dd",
+            "separator_style": "line", "hover": "false", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces layout", "center": "title",
+            "right": "cpu separator mem separator net separator volume separator battery separator date separator clock",
+            "show_title": "true", "show_layout": "true", "show_cpu": "true", "show_mem": "true",
+            "show_net": "true", "show_volume": "true", "show_battery": "true", "show_date": "true",
+            "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "minimal",
+        label: "Minimal",
+        blurb: "Quiet and monochrome: workspace dots, the clock centred, volume and battery.",
+        pairs: looks! {
+            "shape": "strip", "palette": "mono", "height": "26", "padding": "14", "margin": "8",
+            "radius": "12", "island_padding": "10", "border_width": "0",
+            "font_name": "Segoe UI", "font_size": "0", "font_weight": "400",
+            "workspace_style": "dot", "workspace_width": "18", "widget_gap": "16", "icon_size": "20",
+            "icon_mode": "glyph", "widget_colors": "", "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "line", "hover": "false", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces", "center": "clock", "right": "volume battery",
+            "show_volume": "true", "show_battery": "true", "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "floating",
+        label: "Floating",
+        blurb: "A detached rounded bar with an outline and a rounded workspace pill, Nord.",
+        pairs: looks! {
+            "shape": "floating", "palette": "nord", "height": "32", "padding": "10", "margin": "8",
+            "radius": "12", "island_padding": "10", "border_width": "1",
+            "font_name": "Segoe UI", "font_size": "0", "font_weight": "600",
+            "workspace_style": "pill", "workspace_width": "34", "widget_gap": "16", "icon_size": "20",
+            "icon_mode": "glyph", "widget_colors": "", "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "line", "hover": "true", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces", "center": "title", "right": "volume battery date clock",
+            "show_title": "true", "show_volume": "true", "show_battery": "true", "show_date": "true",
+            "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "islands",
+        label: "Islands",
+        blurb: "Each zone its own rounded island, icons from the Windows icon font, Catppuccin.",
+        pairs: looks! {
+            "shape": "islands", "palette": "catppuccin", "height": "34", "padding": "6", "margin": "8",
+            "radius": "10", "island_padding": "12", "border_width": "0",
+            "font_name": "Segoe UI", "font_size": "0", "font_weight": "600",
+            "workspace_style": "pill", "workspace_width": "30", "widget_gap": "14", "icon_size": "20",
+            "icon_mode": "glyph", "widget_colors": "", "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "line", "hover": "true", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces layout", "center": "title", "right": "cpu mem volume battery date clock",
+            "show_title": "true", "show_layout": "true", "show_cpu": "true", "show_mem": "true",
+            "show_volume": "true", "show_battery": "true", "show_date": "true", "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "pills",
+        label: "Pills",
+        blurb: "Every widget its own capsule in a palette colour, black or white text to suit each fill, Catppuccin.",
+        pairs: looks! {
+            "shape": "pills", "palette": "catppuccin", "height": "32", "padding": "6", "margin": "8",
+            "radius": "16", "island_padding": "10", "border_width": "0",
+            "font_name": "Segoe UI", "font_size": "0", "font_weight": "700",
+            "workspace_style": "pill", "workspace_width": "30", "widget_gap": "6", "icon_size": "20",
+            "icon_mode": "glyph",
+            "widget_colors": "layout:teal cpu:orange mem:yellow volume:blue battery:green date:pink clock:purple",
+            "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "line", "hover": "true", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces layout", "center": "title", "right": "cpu mem volume battery date clock",
+            "show_title": "true", "show_layout": "true", "show_cpu": "true", "show_mem": "true",
+            "show_volume": "true", "show_battery": "true", "show_date": "true", "show_clock": "true",
+        },
+    },
+    // Internal name kept from the earlier "Menu bar" preset, so Settings and
+    // its tests keep finding it. The logo is Astur's own bird, never an Apple
+    // mark; "Mac" is only a description of the look.
+    BarPreset {
+        name: "menubar",
+        label: "Mac style",
+        blurb: "A thin, quiet menu bar like a Mac's: the Astur logo and the app's name on the left, workspace dots in the middle, icons, date and time on the right.",
+        pairs: looks! {
+            "shape": "strip", "palette": "mono", "height": "24", "padding": "12", "margin": "8",
+            "radius": "12", "island_padding": "10", "border_width": "0",
+            "font_name": "Segoe UI", "font_size": "13", "font_weight": "400",
+            "workspace_style": "dot", "workspace_width": "18", "widget_gap": "14", "icon_size": "20",
+            "icon_mode": "glyph_only", "widget_colors": "", "clock_format": "h:mm TT", "date_format": "ddd d MMM",
+            "separator_style": "line", "hover": "true", "title_bold": "true", "title_format": "{app}",
+            "left": "logo title", "center": "workspaces", "right": "net volume battery date clock",
+            "show_title": "true", "show_net": "true", "show_volume": "true", "show_battery": "true",
+            "show_date": "true", "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "fluent",
+        label: "Fluent",
+        blurb: "Taskbar-like: workspaces and app icons centred, an accent underline, Windows colours.",
+        pairs: looks! {
+            "shape": "strip", "palette": "system", "height": "40", "padding": "12", "margin": "8",
+            "radius": "12", "island_padding": "10", "border_width": "0",
+            "font_name": "Segoe UI", "font_size": "14", "font_weight": "400",
+            "workspace_style": "underline", "workspace_width": "34", "widget_gap": "16", "icon_size": "22",
+            "icon_mode": "glyph", "widget_colors": "", "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "line", "hover": "true", "title_bold": "false", "title_format": "{title}",
+            "left": "layout", "center": "workspaces apps", "right": "volume battery date clock",
+            "show_layout": "true", "show_apps": "true", "show_volume": "true", "show_battery": "true",
+            "show_date": "true", "show_clock": "true",
+        },
+    },
+    BarPreset {
+        name: "powerline",
+        label: "Powerline",
+        blurb: "Square coloured segments joined by arrows, as in a terminal prompt, monospace, Gruvbox.",
+        pairs: looks! {
+            "shape": "pills", "palette": "gruvbox", "height": "24", "padding": "0", "margin": "8",
+            "radius": "0", "island_padding": "10", "border_width": "0",
+            "font_name": "Consolas", "font_size": "0", "font_weight": "600",
+            "workspace_style": "box", "workspace_width": "24", "widget_gap": "6", "icon_size": "20",
+            "icon_mode": "glyph",
+            "widget_colors": "layout:yellow cpu:orange mem:yellow net:teal volume:blue battery:green date:purple clock:orange",
+            "clock_format": "HH:mm", "date_format": "ddd dd MMM",
+            "separator_style": "powerline", "hover": "false", "title_bold": "false", "title_format": "{title}",
+            "left": "workspaces layout", "center": "title", "right": "cpu mem net volume battery date clock",
+            "show_title": "true", "show_layout": "true", "show_cpu": "true", "show_mem": "true",
+            "show_net": "true", "show_volume": "true", "show_battery": "true", "show_date": "true",
+            "show_clock": "true",
+        },
+    },
 ];
 
 impl Config {
@@ -445,6 +1300,7 @@ impl Config {
             key_center_column: 0x43,  // C
             key_consume_left: 0xDB,   // [ (VK_OEM_4)
             key_consume_right: 0xDD,  // ] (VK_OEM_6)
+            main_key: MainKey::LAlt,
             theme: "dark".to_string(),
             acrylic: false,
             bar_floating: false,
@@ -468,6 +1324,79 @@ impl Config {
                 "date".into(),
                 "clock".into(),
             ],
+            bar_palette: "classic".to_string(),
+            bar_workspace_style: "box".to_string(),
+            bar_font_weight: 600,
+            bar_surface: None,
+            bar_accent_fg: None,
+            bar_border: None,
+            bar_border_width: 0,
+            bar_shape: String::new(),
+            bar_island_padding: 10,
+            bar_widget_colors: Vec::new(),
+            bar_clicks: Vec::new(),
+            bar_keyboard_format: "{lang}".to_string(),
+            bar_disk_drive: "C:\\".to_string(),
+            bar_disk_format: "{free}".to_string(),
+            bar_icon_disk: "DISK".to_string(),
+            bar_uptime_format: "{value}".to_string(),
+            bar_custom_command: String::new(),
+            bar_custom_format: "{output}".to_string(),
+            bar_custom_interval: 10,
+            bar_workspace_label: "auto".to_string(),
+            bar_workspace_apps: false,
+            bar_monitors: "all".to_string(),
+            bar_separator_style: "line".to_string(),
+            bar_hover: false,
+            bar_title_format: "{title}".to_string(),
+            bar_title_bold: false,
+        }
+    }
+
+    /// The bar shape in effect: the `shape` line when there is one, else the
+    /// older `floating` key. So a file or a GUI that only knows `floating`
+    /// keeps working, and a `shape` line wins whatever the line order or the
+    /// file it is in.
+    pub fn effective_bar_shape(&self) -> &str {
+        match self.bar_shape.as_str() {
+            "" if self.bar_floating => "floating",
+            "" => "strip",
+            s => s,
+        }
+    }
+
+    /// The bar's colours for one theme: the palette's roles with every pinned
+    /// key on top. `accent_fg` on auto is the bar background while `bg` is
+    /// pinned (the rule before palettes, so such a file looks the same),
+    /// otherwise the palette's own. The WM swaps in the Windows accent for
+    /// `palette = system`; this crate never reads it (no Win32).
+    pub fn bar_roles(&self, light: bool) -> BarRoles {
+        let p = palette(&self.bar_palette);
+        let base = if light { p.light } else { p.dark };
+        let bg = self.bar_bg.unwrap_or(base.bg);
+        let accent_fg = match self.bar_bg {
+            Some(_) => bg,
+            None => base.accent_fg,
+        };
+        BarRoles {
+            bg,
+            surface: self.bar_surface.unwrap_or(base.surface),
+            fg: self.bar_fg.unwrap_or(base.fg),
+            muted: self.bar_inactive.unwrap_or(base.muted),
+            accent: self.bar_accent.unwrap_or(base.accent),
+            accent_fg: self.bar_accent_fg.unwrap_or(accent_fg),
+            swatches: base.swatches,
+        }
+    }
+
+    /// The capsule colour `widget_colors` gives `widget` under the roles `r`:
+    /// a swatch (so a palette or theme switch recolours it) or a pinned #hex.
+    /// None = the surface, also for `surface` itself. The last entry wins.
+    pub fn bar_widget_fill(&self, widget: &str, r: &BarRoles) -> Option<u32> {
+        let (_, spec) = self.bar_widget_colors.iter().rfind(|(w, _)| w == widget)?;
+        match SWATCH_NAMES.iter().position(|s| s == spec) {
+            Some(i) => Some(r.swatches[i]),
+            None => Some(parse_color(spec, NO_LEGACY)).filter(|&c| c != NO_LEGACY),
         }
     }
 
@@ -477,6 +1406,39 @@ impl Config {
         match self.monitor_layouts.get(index) {
             Some(l) if !l.is_empty() => l,
             _ => &self.layout,
+        }
+    }
+
+    /// What clicking `widget` with `button` (0 left, 1 right, 2 middle)
+    /// does, as (action, argument): its `_click` line, else the
+    /// BAR_CLICK_DEFAULTS entry, else ("none", ""). No allocation: the bar
+    /// resolves every widget on each snapshot.
+    pub fn bar_click(&self, widget: &str, button: usize) -> (&str, &str) {
+        if let Some((_, _, v)) = self
+            .bar_clicks
+            .iter()
+            .rfind(|(w, b, _)| w == widget && *b as usize == button)
+        {
+            return v.split_once(' ').unwrap_or((v, ""));
+        }
+        BAR_CLICK_DEFAULTS
+            .iter()
+            .find(|(w, _)| *w == widget)
+            .and_then(|(_, a)| a.get(button))
+            .map_or(("none", ""), |a| (a, ""))
+    }
+
+    /// `monitors` as a mask for `bar_on`: bit i = screen i + 1 (left to
+    /// right), or BAR_PRIMARY_ONLY.
+    pub fn bar_monitor_mask(&self) -> u64 {
+        match self.bar_monitors.as_str() {
+            "primary" => BAR_PRIMARY_ONLY,
+            "all" => !BAR_PRIMARY_ONLY,
+            list => list
+                .split(' ')
+                .filter_map(|n| n.parse::<u32>().ok())
+                .filter(|n| (1..=63).contains(n))
+                .fold(0, |m, n| m | 1 << (n - 1)),
         }
     }
 }
@@ -517,7 +1479,10 @@ const DEFAULT_CONFIG: &str = "\
 #   floats : space/comma list of decimals, each clamped; none valid = default
 #   colour : #RRGGBB hex (e.g. #66AAFF). Malformed values keep the default.
 #   text   : literal string (program name / command line)
-#   keys   : space/comma list of key names: 0-9, A-Z, F1-F24, [ ].
+#   keys   : space/comma list of key names: 0-9, A-Z, F1-F24, Space, Tab,
+#            Enter, Backspace, Esc, Left Up Right Down, Home, End, PgUp, PgDn,
+#            Insert, Delete, [ ] ` - = Semicolon Quote Comma Period Slash
+#            Backslash (punctuation by its place on a US keyboard).
 #
 # Every key below is shown set to its built-in DEFAULT.
 # ============================================================================
@@ -538,10 +1503,13 @@ const DEFAULT_CONFIG: &str = "\
 # values: shared | per_monitor
 workspace_mode = shared
 
-# Number of workspaces.  int 1 - 10
+# Number of workspaces.  int 1 - 20
 #   shared mode      = TOTAL across all monitors (distributed from the main
 #                      monitor outward).
 #   per_monitor mode = workspaces per monitor.
+# More keys than 10 are fine (workspace_keys = 1 2 3 4 5 6 7 8 9 0 G). A
+# workspace with no key is still reached by its bar pill, IPC `switch N`
+# (ipc_enabled) or an extra_hotkeys switch_workspace chord.
 workspaces = 10
 
 # Keys (with LEFT ALT) that select workspaces 1, 2, 3, ... in order. Add Shift
@@ -722,14 +1690,22 @@ float_classes =
 # Rich rules. Records separated by ;;, fields by |:
 # action|exe|class|title|workspace|monitor
 # Empty match fields are wildcards. workspace/monitor are 1-based; 0/empty = unset.
+# Example, keep PowerToys popups out of the tiling (match by exe: titles are
+# localized): ignore|PowerToys.AdvancedPaste.exe ;; ignore|PowerToys.Peek.UI.exe
 window_rules =
 
 # ---------------------------------------------------------------------------
 # Launcher and system menu
 # ---------------------------------------------------------------------------
 
-# Program launched by Alt+Enter. Resolved via the shell, so PATH and App
-# Execution Aliases (e.g. wt.exe) work.  text
+# Program launched by Alt+Enter: a cmd.exe command line run through `start`,
+# so PATH and App Execution Aliases (e.g. wt.exe) resolve and arguments work
+# (wt -p Ubuntu). Quote a path with spaces (or whose %VARIABLES% expand to
+# spaces) when arguments follow it:
+# \"C:\\Program Files\\App\\app.exe\" --flag. A bare path to an existing file
+# works unquoted. cmd characters (& | < > ^ %) act as in cmd, so quote a URL
+# that has &. Same for browser, scratchpad_command, launch hotkeys, IPC
+# launch and cmd: targets in launcher_entries / system_actions.  text
 terminal = wt.exe
 # Program launched by Alt+Shift+Enter. Leave EMPTY to open the system default
 # browser.  text
@@ -830,12 +1806,28 @@ foreground_lock_disable = true
 # existed.  bool
 async_window_pos = true
 # Extra bindings: chord|action|argument ;; chord|action|argument
+# A chord is keys joined by +: MOD (the main key, see main_key below), CTRL,
+# SHIFT, ALT, WIN and one key name. It needs MOD, ALT or WIN. With
+# main_key = lalt, ALT is Left Alt, the same as MOD.
 # Escape literal field separators with a leading backslash.
 extra_hotkeys = ALT+GRAVE|scratchpad|
 
 # ============================================================================
-# Hotkeys (LEFT ALT is the modifier)
+# Hotkeys (the main key, Left Alt unless main_key says otherwise)
 # ============================================================================
+# The main key is held for every shortcut below and for mouse move / resize;
+# 'Alt' in this list means the main key. Choices:
+#   lalt      Left Alt (default). Astur keeps it: apps never see Left Alt, so
+#             use Right Alt for app shortcuts (Alt+F4, menus).
+#   win       Windows key. Apps keep it; only Astur's shortcuts are taken and
+#             they replace Windows' own (Win+D ...). Win+L always locks the
+#             PC, so key_grow_master's default L becomes O (if O is free).
+#   alt       Either Alt, GlazeWM-style. Apps keep Alt shortcuts Astur doesn't use.
+#   ctrl+win  Ctrl and the Windows key held together.
+#   capslock  Caps Lock. It no longer turns capitals on: turn it off first.
+#             Pressed where Astur can't see it (an admin window, the lock
+#             screen, a UAC prompt) it still toggles; press it there again.
+main_key = lalt
 #   Alt + left-drag      move window under cursor (drops back into the tiling)
 #   Alt + right-drag     resize nearest corner (red bracket marker)
 #   Alt+T                toggle tiling on/off (floating mode; workspaces kept)
@@ -853,7 +1845,7 @@ extra_hotkeys = ALT+GRAVE|scratchpad|
 #   Alt+<workspace_key>  switch to that workspace (see workspace_keys above)
 #   Alt+Shift+<ws key>   move focused window to that workspace (and follow it)
 #   Alt+Tab              normal task switcher (still works)
-#   RIGHT ALT            normal Alt behaviour (LEFT ALT is reserved by Astur)
+#   RIGHT ALT            normal Alt behaviour (with main_key = lalt)
 #
 # Scrolling layout only (elsewhere these do nothing or keep the meaning above):
 #   Alt+Left / Right     focus column left / right (scrolls the view; at the
@@ -881,7 +1873,7 @@ extra_hotkeys = ALT+GRAVE|scratchpad|
 #
 # The letter keys above (J K H L M T F W, and R C [ ] for scrolling) are
 # rebindable. Each takes a single key name (see the 'keys' type at the top of
-# this file). Arrows and Enter are fixed.  key
+# this file). Arrows, Home, End and Enter are fixed.  key
 key_focus_next = J
 key_focus_prev = K
 key_shrink_master = H
@@ -905,9 +1897,16 @@ const DEFAULT_NAVBAR: &str = "\
 #            (override with the ASTUR_NAVBAR environment variable)
 # Window-manager settings live separately in astur.conf (same folder).
 # Apply    : save this file; Astur hot-reloads it about 0.1 s after the save.
+# Presets  : a bar preset in Settings writes its keys into this file: the look
+#            (shape, palette, sizes, fonts, workspace style, icon mode, widget
+#            colours, clock and date formats, separator style, hover, title
+#            format and weight, colours back to auto) and the
+#            zones, with show_* on for every widget it lists. It never changes
+#            enabled, bottom, autohide, wheel_workspaces or
+#            hide_empty_workspaces. Edit any line afterwards as usual.
 #
-# One bar is drawn on EVERY monitor. Each shows that monitor's workspaces and
-# focused window. The tiling work area is reserved so windows never sit under a
+# One bar is drawn on every monitor (or those `monitors` lists). Each shows
+# that monitor's workspaces and focused window. The tiling work area is reserved so windows never sit under a
 # bar. Click a workspace pill to switch to it.
 #
 # Value types: bool, int, colour (#RRGGBB) -- see astur.conf for details.
@@ -929,17 +1928,61 @@ padding = 8
 font_name = Segoe UI
 # Text height in px. 0 = auto (about half the bar height).  int 0 - 100
 font_size = 0
+# Text weight: 400 = regular, 600 = semi-bold, 700 = bold.  int 100 - 900
+font_weight = 600
 
 # ---------------------------------------------------------------------------
 # Style
 # ---------------------------------------------------------------------------
+# Bar shape:
+#   strip     full-width bar along the screen edge (the default)
+#   floating  detached from the edges by `margin`, with rounded corners
+#   islands   a strip with a rounded island behind each zone
+#   pills     a strip with a rounded pill behind each widget
+# Islands and pills sit on the bar background (the desktop does not show
+# between them yet). A non-empty `shape` line overrides `floating`, wherever
+# it is (Settings writes it here when you pick a shape or apply a preset).
+# Left empty, `floating` below decides between strip and floating.
+shape =
 # Floating bar: detached from the screen edge with a margin and rounded
-# corners (waybar/Hyprland style). false = classic full-width strip.  bool
+# corners (waybar/Hyprland style). false = classic full-width strip. Ignored
+# while a `shape` line is set.  bool
 floating = false
 # Gap between a floating bar and the screen edges, in px.  int 0 - 200
 margin = 8
-# Floating-bar corner radius, in px.  int 0 - 40
+# Corner radius of a floating bar, an island or a pill, in px. At least half
+# the height draws a full capsule.  int 0 - 40
 radius = 12
+# Space between an island's or a pill's edge and its content, in px.  int 0 - 50
+island_padding = 10
+# Outline width in px, 0 = none: around a floating bar, each island or each
+# pill; a strip gets a line along its inner edge. Colour: `border`.  int 0 - 10
+border_width = 0
+# How the active workspace is marked:
+#   box        accent block behind its number (the default)
+#   pill       rounded accent pill behind its number
+#   underline  short accent line under its number
+#   dot        a dot per workspace instead of numbers (dim = empty), the
+#              active one an accent pill
+workspace_style = box
+# Pills shape only: a colour per widget's pill, as widget:colour pairs. A
+# colour is a palette swatch (red orange yellow green teal blue purple pink;
+# switching palette or theme recolours it), surface, or #RRGGBB. Text on a
+# coloured pill is black or white, whichever reads on that fill, unless
+# accent_fg is pinned to a #hex. Text widgets only (not workspaces, apps,
+# separator, spacer or logo). Empty = every pill in the surface colour.
+#   e.g.  widget_colors = cpu:orange mem:yellow volume:blue clock:purple
+widget_colors =
+# What the separator widget draws:
+#   line       a thin line (the default)
+#   dot        a small dot
+#   powerline  a small arrow; with shape = pills the pills join edge to
+#              edge into square segments with arrow ends
+separator_style = line
+# Highlight the clickable item under the mouse pointer.  bool
+hover = false
+# Draw the window title in bold.  bool
+title_bold = false
 # Auto-hide: the bar slides away and stops reserving screen space; move the
 # mouse to the bar's screen edge to reveal it.  bool
 autohide = false
@@ -958,10 +2001,17 @@ autohide = false
 #   date        the date (see date_format)
 #   clock       the time
 #   media       current media title
-#   separator   thin divider
+#   separator   divider (see separator_style)
 #   spacer      fixed gap
+#   keyboard    the active window's keyboard language (ENG, DEU, ...)
+#   disk        free space on a drive (see disk_drive)
+#   uptime      time since Windows started (42m, 5h 12m, 3d 4h)
+#   custom      your own text, or the first line a command prints
+#   media_controls  previous / play-pause / next buttons for any player
+#   logo        the Astur bird (click: power menu)
 # A widget only shows if it is BOTH listed in a zone and its show_* toggle
-# below is true (so you can flip widgets without re-ordering).
+# below is true (so you can flip widgets without re-ordering). The widgets
+# from keyboard on have no show_* toggle: listed means shown.
 # ---------------------------------------------------------------------------
 left = workspaces apps
 center = title
@@ -978,6 +2028,57 @@ wheel_workspaces = true
 # Hide empty workspace pills, showing only the active one and those with
 # windows. false = show every workspace the monitor owns.  bool
 hide_empty_workspaces = false
+# Which screens get a bar: all, primary (the main screen only), or screen
+# numbers counted from the left, e.g. 1 3. A screen without a bar keeps
+# its whole height for windows.
+monitors = all
+
+# ---------------------------------------------------------------------------
+# Workspace marks
+# ---------------------------------------------------------------------------
+# What each workspace mark shows (names and icons are workspace_names and
+# workspace_icons in astur.conf):
+#   auto       its icon, else its name, else its number (the default)
+#   number     always the number
+#   name       the name (the number when it has none)
+#   icon       the icon (the number when it has none)
+#   icon_name  icon and name together
+# With anything but auto, a mark widens to fit its label.
+workspace_label = auto
+# Up to 3 app icons in each workspace mark, for the apps open there (not
+# with workspace_style = dot).  bool
+workspace_apps = false
+
+# ---------------------------------------------------------------------------
+# Click actions
+# ---------------------------------------------------------------------------
+# <widget>_click, <widget>_right_click and <widget>_middle_click set what a
+# click on a widget does, as: action [argument]. Widgets: title layout cpu
+# mem net volume battery date clock media keyboard disk uptime custom logo.
+# Workspaces, app buttons and media_controls keep their own clicks.
+# Actions:
+#   none calendar quick_settings mute volume_mixer sound_settings
+#   network_settings bluetooth_settings power_settings datetime_settings
+#   language_settings next_input storage_settings display_settings
+#   windows_settings astur_settings task_manager open_drive
+#   media_play_pause media_next media_prev launcher system_menu
+#   workspace_next workspace_prev next_layout
+#   switch_workspace N        (go to workspace N)
+#   launch COMMAND            (as extra_hotkeys' launch)
+# Without a line, a click does this (left / right; middle does nothing):
+#   clock, date   calendar / datetime_settings
+#   volume        mute / sound_settings
+#   battery       quick_settings / power_settings
+#   net           quick_settings / network_settings
+#   cpu, mem      task_manager / none
+#   disk          open_drive / storage_settings
+#   keyboard      next_input / language_settings
+#   media         media_play_pause / media_next
+#   logo          system_menu / astur_settings
+#   others        none / none
+# Examples (remove the # to use one):
+#   cpu_right_click = launch wt -p Ubuntu
+#   clock_click = none
 
 # ---------------------------------------------------------------------------
 # Widget toggles
@@ -988,11 +2089,13 @@ show_title = true
 show_layout = true
 # Show the clock.  bool
 show_clock = true
-# 24-hour clock; false = 12-hour with am/pm.  bool
+# 24-hour clock when clock_format is empty; false = 12-hour with am/pm.  bool
 clock_24h = true
 # Show the date.  bool
 show_date = false
-# Date format tokens:  yyyy yy  MMM MM  ddd dd  (e.g. \"ddd dd MMM\" -> Fri 19 Jun)
+# Date format tokens:  yyyy yy  MMMM (June) MMM (Jun) MM  dddd (Friday)
+# ddd (Fri) dd  d (day without a leading zero, when no letter touches it)
+# (e.g. \"ddd dd MMM\" -> Fri 19 Jun, \"dddd d MMMM\" -> Friday 19 June)
 date_format = ddd dd MMM
 # Live system stats. Updated every ~2s.  bool
 show_cpu = true
@@ -1013,7 +2116,14 @@ show_media = false
 widget_gap = 16
 icon_size = 20
 workspace_width = 34
-# icon = label only; text = value only; both = label + value
+# How cpu / mem / net / volume / battery show:
+#   icon   label only        text   value only        both   label + value
+#   glyph  a Windows icon + value: Segoe Fluent Icons (Windows 11), else
+#          Segoe MDL2 Assets. Battery shows its level (and charging), volume
+#          its level (and mute), net wifi or ethernet. MDL2 has no cpu or
+#          mem icon, so those show their label (below) there instead.
+#   glyph_only  the Windows icon alone, no value (disk too); a widget
+#          without an icon shows its label
 icon_mode = both
 show_tooltips = true
 show_app_labels = false
@@ -1022,22 +2132,60 @@ mem_format = {value}%
 battery_format = {value}%
 net_format = D:{down} U:{up}
 volume_format = {value}%
+# Clock tokens: HH H (24-hour)  hh h (12-hour)  mm  ss (seconds: the bar
+# then repaints every second)  tt (am/pm)  TT (AM/PM). Empty = clock_24h
+# decides between HH:mm and h:mm tt.
 clock_format = HH:mm
-# Plain labels work everywhere; icon-font glyphs work when font_name supports them.
+# Labels for icon / both. Plain text works everywhere; your own icon-font
+# glyphs work when font_name has them.
 icon_cpu = CPU
 icon_mem = RAM
 icon_battery = BAT
 icon_net = NET
 icon_volume = VOL
+icon_disk = DISK
 
-# Colours: 'auto' follows the theme (astur.conf 'theme' picks the dark or light
-# preset), or set an explicit #RRGGBB to override that colour permanently.
+# ---------------------------------------------------------------------------
+# More widgets (listed in a zone = shown)
+# ---------------------------------------------------------------------------
+# Title text. Tokens: {title} (the window's title), {app} (the app's name,
+# e.g. Microsoft Edge).
+title_format = {title}
+# Keyboard language. Tokens: {lang} (ENG, DEU, ...) {region} (US, GB, ...).
+keyboard_format = {lang}
+# The drive (or folder) the disk widget measures, checked every 30 s:
+# C, C: or a folder path.
+disk_drive = C:
+# Disk tokens: {free} {used} {total} {value} (percent used).
+disk_format = {free}
+# Uptime token: {value} (42m, 5h 12m, 3d 4h).
+uptime_format = {value}
+# custom: a command run hidden (as cmd /C) every custom_interval seconds
+# (1 - 3600); its first output line is {output}. Stopped after 5 s. Empty =
+# custom_format alone, as plain text.
+custom_command =
+custom_format = {output}
+custom_interval = 10
+
+# Colour palette the 'auto' colours come from: classic (the default),
+# catppuccin, nord, gruvbox, rosepine, mono, or system (Windows neutrals and
+# your Windows accent colour, read at start and on reload). Each has a dark
+# and a light variant; astur.conf 'theme' picks which.
+palette = classic
+# Colours: 'auto' follows the palette and theme, or set an explicit #RRGGBB to
+# override that colour permanently.
 bg = auto
 fg = auto
 # Active-workspace pill highlight.
 accent = auto
 # Empty workspaces / layout / stats text.
 inactive = auto
+# Text on the accent highlight. auto = the palette's, or bg while bg is set.
+accent_fg = auto
+# Island and pill fill.
+surface = auto
+# Outline colour (see border_width). auto = the inactive colour.
+border = auto
 ";
 
 pub fn parse_bool(v: &str) -> bool {
@@ -1078,16 +2226,22 @@ fn records(v: &str) -> std::vec::IntoIter<Vec<String>> {
     let mut i = 0usize;
     while i < chars.len() {
         let ch = chars[i];
-        if ch == '\\'
-            && i + 1 < chars.len()
-            && chars[i + 1] == '\\'
-            && (i + 2 == chars.len()
-                || chars[i + 2] == '|'
-                || (chars[i + 2] == ';' && i + 3 < chars.len() && chars[i + 3] == ';'))
-        {
-            field.push('\\');
-            i += 2;
-            continue;
+        // `\\` before a separator is one escaped trailing backslash. Skip
+        // whitespace first: format_* joins records with " ;; ", and without
+        // the skip a field ending in `\` grew one backslash per save.
+        if ch == '\\' && chars.get(i + 1) == Some(&'\\') {
+            let mut j = i + 2;
+            while j < chars.len() && chars[j].is_whitespace() {
+                j += 1;
+            }
+            if j == chars.len()
+                || chars[j] == '|'
+                || (chars[j] == ';' && chars.get(j + 1) == Some(&';'))
+            {
+                field.push('\\');
+                i += 2;
+                continue;
+            }
         }
         if ch == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '|' | ';') {
             field.push(chars[i + 1]);
@@ -1262,7 +2416,71 @@ pub fn format_hotkeys(v: &[HotkeyDef]) -> String {
         .collect::<Vec<_>>()
         .join(" ;; ")
 }
-/// Map a key name ("1", "Q", "F3") to its Win32 virtual-key code.
+/// Key names beyond letters, digits and F1-F24, as (name, VK). The first name
+/// of a VK is the one `vk_to_key` writes. `;` `,` and `\` are written as
+/// words: `;;` and `\` are extra_hotkeys syntax, `,` separates workspace_keys.
+const KEY_NAMES: &[(&str, u32)] = &[
+    ("Space", 0x20),
+    ("Tab", 0x09),
+    ("Enter", 0x0D),
+    ("Return", 0x0D),
+    ("Backspace", 0x08),
+    ("Back", 0x08),
+    ("Esc", 0x1B),
+    ("Escape", 0x1B),
+    ("Left", 0x25),
+    ("Up", 0x26),
+    ("Right", 0x27),
+    ("Down", 0x28),
+    ("Home", 0x24),
+    ("End", 0x23),
+    ("PgUp", 0x21),
+    ("PageUp", 0x21),
+    ("PgDn", 0x22),
+    ("PageDown", 0x22),
+    ("Insert", 0x2D),
+    ("Ins", 0x2D),
+    ("Delete", 0x2E),
+    ("Del", 0x2E),
+    ("[", 0xDB),
+    ("LBRACKET", 0xDB),
+    ("OEM_4", 0xDB),
+    ("]", 0xDD),
+    ("RBRACKET", 0xDD),
+    ("OEM_6", 0xDD),
+    ("`", 0xC0),
+    ("GRAVE", 0xC0),
+    ("BACKTICK", 0xC0),
+    ("OEM_3", 0xC0),
+    ("-", 0xBD),
+    ("MINUS", 0xBD),
+    ("OEM_MINUS", 0xBD),
+    ("=", 0xBB),
+    ("EQUAL", 0xBB),
+    ("OEM_PLUS", 0xBB),
+    ("Semicolon", 0xBA),
+    (";", 0xBA),
+    ("Quote", 0xDE),
+    ("'", 0xDE),
+    ("Comma", 0xBC),
+    (",", 0xBC),
+    ("Period", 0xBE),
+    (".", 0xBE),
+    ("Slash", 0xBF),
+    ("/", 0xBF),
+    ("Backslash", 0xDC),
+    ("\\", 0xDC),
+];
+
+/// Map a key name ("1", "Q", "F3", "Space", "Left", "[") to its Win32
+/// virtual-key code, ignoring case.
+///
+/// Letters, digits, F-keys and the named keys are the same VK on every
+/// Windows layout. The punctuation names are not: they bind the Windows
+/// VK_OEM_* code, which is that glyph's key only on a US layout. On German,
+/// French and similar layouts the same VK sits on a different physical key
+/// (VK_OEM_4 is the German `ß` key), so the bind fires there, not on the key
+/// that prints the glyph.
 pub fn key_to_vk(name: &str) -> Option<u32> {
     let n = name.trim().to_ascii_uppercase();
     let b = n.as_bytes();
@@ -1279,13 +2497,10 @@ pub fn key_to_vk(name: &str) -> Option<u32> {
             }
         }
     }
-    // VK_OEM_4/6 name the physical key that is '[' / ']' on a US layout; other
-    // layouts print other glyphs on it, hence the layout-neutral aliases.
-    match n.as_str() {
-        "[" | "LBRACKET" | "OEM_4" => Some(0xDB),
-        "]" | "RBRACKET" | "OEM_6" => Some(0xDD),
-        _ => None,
-    }
+    KEY_NAMES
+        .iter()
+        .find(|k| k.0.eq_ignore_ascii_case(&n))
+        .map(|k| k.1)
 }
 
 /// Parse a space/comma-separated navbar zone list, keeping only known widget
@@ -1294,6 +2509,44 @@ fn parse_widgets(v: &str) -> Vec<String> {
     v.split([',', ' ', '\t'])
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| BAR_WIDGETS.contains(&s.as_str()))
+        .collect()
+}
+
+/// Parse `widget_colors`: space/comma-separated `widget:colour` pairs, kept
+/// lower-cased. Text widgets only (workspaces and apps draw their own marks
+/// and icons on the surface); a colour is a swatch name, `surface` or #hex.
+/// Anything else is dropped, as `parse_widgets` drops a typo.
+fn parse_widget_colors(v: &str) -> Vec<(String, String)> {
+    // `cpu: orange` (a YAML habit) splits into `cpu:` and `orange`, both
+    // dropped, and a later GUI edit then erased them from the file. Glue a
+    // token ending in ':' (or a next one starting with ':') back on, unless
+    // that makes two colons: `volume: date:pink` stays two entries.
+    let mut toks: Vec<String> = Vec::new();
+    for t in v.split([',', ' ', '\t']).filter(|t| !t.is_empty()) {
+        match toks.last_mut() {
+            Some(l)
+                if (l.ends_with(':') || t.starts_with(':'))
+                    && l.matches(':').count() + t.matches(':').count() == 1 =>
+            {
+                l.push_str(t)
+            }
+            _ => toks.push(t.to_string()),
+        }
+    }
+    toks.iter()
+        .filter_map(|t| {
+            let (w, c) = t.split_once(':')?;
+            let (w, c) = (w.trim().to_ascii_lowercase(), c.trim().to_ascii_lowercase());
+            let text_widget = BAR_WIDGETS.contains(&w.as_str())
+                && !matches!(
+                    w.as_str(),
+                    "workspaces" | "apps" | "separator" | "spacer" | "logo"
+                );
+            let colour = c == "surface"
+                || SWATCH_NAMES.contains(&c.as_str())
+                || parse_color(&c, NO_LEGACY) != NO_LEGACY;
+            (text_widget && colour).then_some((w, c))
+        })
         .collect()
 }
 
@@ -1350,6 +2603,21 @@ fn parse_theme_color(v: &str, legacy_default: u32, prev: Option<u32>) -> Option<
     }
 }
 
+/// `legacy_default` for a themed colour key that never shipped a hex default.
+/// No #RRGGBB parses to it.
+const NO_LEGACY: u32 = u32::MAX;
+
+/// A colour the user pinned, made to survive a save: the parser reads a key's
+/// legacy default hex as `auto` (above), so pinning exactly that colour would
+/// silently flip back to Auto. One step of red is invisible and stays pinned.
+pub fn pin_theme_color(c: u32, legacy_default: u32) -> u32 {
+    if c == legacy_default {
+        c ^ 1
+    } else {
+        c
+    }
+}
+
 /// Parse a #RRGGBB hex string into a Win32 COLORREF (0x00BBGGRR). Falls back to
 /// `fallback` on any malformed input.
 fn parse_color(v: &str, fallback: u32) -> u32 {
@@ -1392,29 +2660,36 @@ impl std::fmt::Display for ConfigReadError {
     }
 }
 
-/// Read a config file, writing `default` the first time it is missing.
+/// Read a config file: `Ok(None)` only when it is genuinely absent (`NotFound`).
 ///
-/// Only a file that is genuinely absent (`NotFound`) gets the defaults written.
 /// Any other failure — a sharing violation while an editor is mid-save, invalid
 /// UTF-8, a UTF-16 "Unicode" save from Notepad — means the user's file IS there,
 /// and writing over it would silently destroy it. That is exactly what the old
-/// `Err(_) => write(default)` arm did, on every such read, startup included.
-fn read_or_create(path: &std::path::Path, default: &str) -> Result<String, ConfigReadError> {
+/// `Err(_) => write(default)` arm did, on every such read, startup included, and
+/// what the settings GUI's template fallback did on Save. Both read through here.
+pub fn read_existing(path: &std::path::Path) -> Result<Option<String>, ConfigReadError> {
     match std::fs::read_to_string(path) {
-        Ok(t) => Ok(t),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(path, default);
-            println!("wrote default config: {}", path.display());
-            Ok(default.to_string())
-        }
+        Ok(t) => Ok(Some(t)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(error) => Err(ConfigReadError {
             path: path.to_path_buf(),
             error,
         }),
     }
+}
+
+/// Read a config file, writing `default` the first time it is missing (and
+/// only then: see `read_existing`).
+fn read_or_create(path: &std::path::Path, default: &str) -> Result<String, ConfigReadError> {
+    if let Some(t) = read_existing(path)? {
+        return Ok(t);
+    }
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(path, default);
+    println!("wrote default config: {}", path.display());
+    Ok(default.to_string())
 }
 
 /// Load settings from astur.conf (window manager) and navbar.conf (status
@@ -1442,14 +2717,19 @@ pub fn default_config() -> Config {
 /// Apply `key = value` lines from `text` onto `c`. Unknown keys are ignored.
 /// Recognises both the window-manager keys (astur.conf) and the navbar keys
 /// (navbar.conf, unprefixed) so either file may set either, and old configs that
-/// used the `bar_*` names keep working.
-fn parse_into(c: &mut Config, text: &str) {
+/// used the `bar_*` names keep working. Public for the settings GUI, which
+/// stamps a bar preset's pairs onto the config being edited exactly as a
+/// file read after them would.
+pub fn parse_into(c: &mut Config, text: &str) {
     parse_into_from(c, text, "")
 }
 
 /// `parse_into` with a source label, so an unknown key can say which file it
 /// came from.
 fn parse_into_from(c: &mut Config, text: &str, source: &str) {
+    // A UTF-8 BOM (Notepad's "UTF-8 with BOM") is not whitespace to `trim`, so
+    // it stuck to the first key and that line was silently ignored.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
     for line in text.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -1480,7 +2760,7 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             }
             "workspaces" => {
                 if let Ok(n) = v.parse::<usize>() {
-                    c.workspaces = n.clamp(1, 10);
+                    c.workspaces = n.clamp(1, MAX_WORKSPACES);
                 }
             }
             "workspace_keys" => {
@@ -1803,6 +3083,11 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                     c.key_consume_right = k;
                 }
             }
+            "main_key" | "mod" => {
+                if let Some(k) = MainKey::from_name(v) {
+                    c.main_key = k;
+                }
+            }
             // ---- navbar (navbar.conf, unprefixed) and legacy bar_* aliases ----
             "enabled" | "bar_enabled" => c.bar_enabled = parse_bool(v),
             "height" | "bar_height" => {
@@ -1853,7 +3138,10 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             }
             "icon_mode" | "bar_icon_mode" => {
                 let m = v.trim().to_ascii_lowercase();
-                if matches!(m.as_str(), "icon" | "text" | "both") {
+                if matches!(
+                    m.as_str(),
+                    "icon" | "text" | "both" | "glyph" | "glyph_only"
+                ) {
                     c.bar_icon_mode = m
                 }
             }
@@ -1913,6 +3201,92 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "left" | "bar_left" => c.bar_left = parse_widgets(v),
             "center" | "centre" | "bar_center" => c.bar_center = parse_widgets(v),
             "right" | "bar_right" => c.bar_right = parse_widgets(v),
+            "palette" => {
+                let m = v.trim().to_ascii_lowercase();
+                if PALETTES.iter().any(|p| p.name == m) {
+                    c.bar_palette = m;
+                }
+            }
+            "workspace_style" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "box" | "pill" | "underline" | "dot") {
+                    c.bar_workspace_style = m;
+                }
+            }
+            "font_weight" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_font_weight = n.clamp(100, 900);
+                }
+            }
+            // New keys: no shipped default hex to read as auto.
+            "surface" => c.bar_surface = parse_theme_color(v, NO_LEGACY, c.bar_surface),
+            "accent_fg" => c.bar_accent_fg = parse_theme_color(v, NO_LEGACY, c.bar_accent_fg),
+            "border" => c.bar_border = parse_theme_color(v, NO_LEGACY, c.bar_border),
+            "border_width" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_border_width = n.clamp(0, 10);
+                }
+            }
+            "shape" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "strip" | "floating" | "islands" | "pills") {
+                    c.bar_shape = m;
+                }
+            }
+            "island_padding" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.bar_island_padding = n.clamp(0, 50);
+                }
+            }
+            "widget_colors" => c.bar_widget_colors = parse_widget_colors(v),
+            "keyboard_format" => c.bar_keyboard_format = v.to_string(),
+            "disk_drive" => {
+                if let Some(d) = disk_root(v) {
+                    c.bar_disk_drive = d;
+                }
+            }
+            "disk_format" => c.bar_disk_format = v.to_string(),
+            "icon_disk" => c.bar_icon_disk = v.to_string(),
+            "uptime_format" => c.bar_uptime_format = v.to_string(),
+            "custom_command" => c.bar_custom_command = v.to_string(),
+            "custom_format" => c.bar_custom_format = v.to_string(),
+            "custom_interval" => {
+                if let Ok(n) = v.parse::<u32>() {
+                    c.bar_custom_interval = n.clamp(1, 3600);
+                }
+            }
+            "workspace_label" => {
+                let m = v.trim().to_ascii_lowercase();
+                if WORKSPACE_LABELS.contains(&m.as_str()) {
+                    c.bar_workspace_label = m;
+                }
+            }
+            "workspace_apps" => c.bar_workspace_apps = parse_bool(v),
+            "monitors" | "bar_monitors" => {
+                if let Some(m) = parse_monitors(v) {
+                    c.bar_monitors = m;
+                }
+            }
+            "separator_style" => {
+                let m = v.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "line" | "dot" | "powerline") {
+                    c.bar_separator_style = m;
+                }
+            }
+            "hover" => c.bar_hover = parse_bool(v),
+            "title_format" => c.bar_title_format = v.to_string(),
+            "title_bold" => c.bar_title_bold = parse_bool(v),
+            // `<widget>_click` and its _right / _middle forms: a known key
+            // whatever the value; an unknown action keeps the previous one,
+            // an empty value goes back to the default.
+            other if click_key(other).is_some() => {
+                if let (Some((w, b)), Some(val)) = (click_key(other), click_value(v)) {
+                    c.bar_clicks.retain(|x| !(x.0 == w && x.1 == b));
+                    if !val.is_empty() {
+                        c.bar_clicks.push((w.to_string(), b, val));
+                    }
+                }
+            }
             other => {
                 let label = if source.is_empty() {
                     other.to_string()
@@ -1933,6 +3307,12 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
 /// (the parser is last-write-wins, so the GUI also normalises: see
 /// `apply_updates`). If the key is missing, `key = value` is appended.
 pub fn set_conf_key(text: &str, key: &str, value: &str) -> String {
+    // As the parser does: a BOM would hide a first-line key, so the write
+    // appended a duplicate. The file is written back as plain UTF-8.
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    // A conf value is one line: a pasted newline would split it, leave an
+    // orphan line behind and never read back, so every later write re-diffed.
+    let value = value.replace(['\r', '\n'], " ");
     let mut out: Vec<String> = Vec::new();
     let mut replaced = false;
     for line in text.lines() {
@@ -2192,6 +3572,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         key_center_column,
         key_consume_left,
         key_consume_right,
+        main_key,
         theme,
         acrylic,
         bar_floating,
@@ -2206,6 +3587,32 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         bar_left,
         bar_center,
         bar_right,
+        bar_palette,
+        bar_workspace_style,
+        bar_font_weight,
+        bar_surface,
+        bar_accent_fg,
+        bar_border,
+        bar_border_width,
+        bar_shape,
+        bar_island_padding,
+        bar_widget_colors,
+        bar_clicks,
+        bar_keyboard_format,
+        bar_disk_drive,
+        bar_disk_format,
+        bar_icon_disk,
+        bar_uptime_format,
+        bar_custom_command,
+        bar_custom_format,
+        bar_custom_interval,
+        bar_workspace_label,
+        bar_workspace_apps,
+        bar_monitors,
+        bar_separator_style,
+        bar_hover,
+        bar_title_format,
+        bar_title_bold,
     } = new;
     let mut g = ReloadGroups::default();
     macro_rules! diff {
@@ -2221,6 +3628,9 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(wm: monitor_layouts, scroll_default_width, scroll_width_presets);
     diff!(wm: scroll_height_presets, scroll_center, tab_bar_height);
     diff!(wm: bar_enabled, bar_height, bar_bottom, bar_floating, bar_margin, bar_autohide);
+    // `shape` decides floating, which changes the reserved height; `monitors`
+    // which screens reserve one at all.
+    diff!(wm: bar_shape, bar_monitors);
     diff!(style: unfocused_opacity, border_enabled, focused_border, unfocused_border);
     // wp_publish: whether any animation reads the wallpaper cache.
     diff!(anim: animations, animation_ms, workspace_slide, workspace_anim, window_anim);
@@ -2238,6 +3648,13 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(bar: bar_cpu_format, bar_mem_format, bar_battery_format, bar_net_format);
     diff!(bar: bar_volume_format, bar_icon_cpu, bar_icon_mem, bar_icon_battery);
     diff!(bar: bar_icon_net, bar_icon_volume, workspace_names, workspace_icons);
+    diff!(bar: bar_palette, bar_workspace_style, bar_font_weight, bar_surface);
+    diff!(bar: bar_accent_fg, bar_border, bar_border_width, bar_shape, bar_island_padding);
+    diff!(bar: bar_widget_colors, bar_clicks, bar_keyboard_format, bar_disk_drive);
+    diff!(bar: bar_disk_format, bar_icon_disk, bar_uptime_format, bar_custom_command);
+    diff!(bar: bar_custom_format, bar_custom_interval, bar_workspace_label);
+    diff!(bar: bar_workspace_apps, bar_monitors, bar_separator_style, bar_hover);
+    diff!(bar: bar_title_format, bar_title_bold);
     // LA_REFRESH: the enumerated app list, and the size its icons resolve at.
     diff!(launcher: launcher_source_apps, launcher_entries, launcher_icon_size);
     // Read where used: hooks and hotkeys (apply_hook_config), popups and the
@@ -2265,6 +3682,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(live: key_shrink_master, key_grow_master, key_promote_master);
     diff!(live: key_toggle_tiling, key_toggle_float, key_close_window);
     diff!(live: key_cycle_width, key_center_column, key_consume_left, key_consume_right);
+    diff!(live: main_key);
     // Fail-safe: a difference none of the above caught (a field compared in
     // the wrong place, a PartialEq quirk) must still apply, so do it all.
     if g.is_empty() && old != new {
@@ -2282,16 +3700,716 @@ pub fn color_to_hex(c: u32) -> String {
 }
 
 /// Map a VK code back to its config key name ("A".."Z", "0".."9", "F1".."F24",
-/// "[", "]"). The inverse of `key_to_vk`, so the settings GUI can save any key
-/// the parser accepts as a `key_*` default.
+/// "Space", "Left", "[", ...), or "" for a key with no name. The inverse of
+/// `key_to_vk`, so the settings GUI can save any key the parser accepts.
 pub fn vk_to_key(vk: u32) -> String {
     match vk {
         0x30..=0x39 | 0x41..=0x5A => char::from_u32(vk).unwrap_or('?').to_string(),
         0x70..=0x87 => format!("F{}", vk - 0x70 + 1),
-        0xDB => "[".to_string(),
-        0xDD => "]".to_string(),
-        _ => String::new(),
+        _ => KEY_NAMES
+            .iter()
+            .find(|k| k.1 == vk)
+            .map_or_else(String::new, |k| k.0.to_string()),
     }
+}
+
+// ---- Hotkeys: the main key, chords and the WM's hotkey table (pure) ----
+
+/// Chord modifier bits, side-agnostic. The WM's lock-free hotkey table is
+/// indexed by these 32 sets x 256 VKs (`Bind::slot`).
+pub const MOD_CTRL: u8 = 1;
+pub const MOD_SHIFT: u8 = 2;
+/// With `main_key = lalt` this is the reserved Left Alt only (Right Alt stays
+/// the apps' Alt), so an old `ALT+...` chord means what it always did.
+/// Otherwise either Alt, passed through to apps.
+pub const MOD_ALT: u8 = 4;
+pub const MOD_WIN: u8 = 8;
+/// The reserved Caps Lock (`main_key = capslock`), which no app sees.
+pub const MOD_HYPER: u8 = 16;
+
+/// The main key: held for every built-in hotkey, the workspace keys, mouse
+/// move / resize and Alt+wheel, and spelled `MOD` in extra_hotkeys.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum MainKey {
+    /// Reserved: the WM swallows it, apps never see Left Alt.
+    #[default]
+    LAlt,
+    /// Passed through; only the bound keys are swallowed.
+    Win,
+    /// Either Alt, passed through (GlazeWM-style).
+    Alt,
+    /// Ctrl and Win held together, passed through.
+    CtrlWin,
+    /// Reserved: Caps Lock becomes a modifier and stops toggling.
+    CapsLock,
+}
+
+impl MainKey {
+    /// Every choice, in the order a picker lists them.
+    pub const ALL: [MainKey; 5] = [
+        MainKey::LAlt,
+        MainKey::Win,
+        MainKey::Alt,
+        MainKey::CtrlWin,
+        MainKey::CapsLock,
+    ];
+
+    /// The `main_key` value astur.conf spells it with.
+    pub fn name(self) -> &'static str {
+        match self {
+            MainKey::LAlt => "lalt",
+            MainKey::Win => "win",
+            MainKey::Alt => "alt",
+            MainKey::CtrlWin => "ctrl+win",
+            MainKey::CapsLock => "capslock",
+        }
+    }
+
+    /// Read a `main_key` value: case and spaces ignored, a few spellings.
+    pub fn from_name(v: &str) -> Option<MainKey> {
+        let v: String = v
+            .split_whitespace()
+            .collect::<String>()
+            .to_ascii_lowercase();
+        Some(match v.as_str() {
+            "lalt" | "leftalt" | "left_alt" => MainKey::LAlt,
+            "win" | "windows" => MainKey::Win,
+            "alt" => MainKey::Alt,
+            "ctrl+win" | "win+ctrl" => MainKey::CtrlWin,
+            "capslock" | "caps" => MainKey::CapsLock,
+            _ => return None,
+        })
+    }
+
+    /// Its name for people.
+    pub fn label(self) -> &'static str {
+        match self {
+            MainKey::LAlt => "Left Alt",
+            MainKey::Win => "Windows key",
+            MainKey::Alt => "Alt (either side)",
+            MainKey::CtrlWin => "Ctrl + Windows key",
+            MainKey::CapsLock => "Caps Lock",
+        }
+    }
+
+    /// What choosing it means, in plain words.
+    pub fn description(self) -> &'static str {
+        match self {
+            MainKey::LAlt => {
+                "Recommended. Astur keeps Left Alt to itself, so apps never react to it. \
+                 Use Right Alt for app shortcuts such as Alt+F4."
+            }
+            MainKey::Win => {
+                "Apps and Windows keep the Windows key; only Astur's own shortcuts take \
+                 it over, replacing Windows ones such as Win+D. Win+L always locks the PC, \
+                 so \"grow\" moves to Win+O (unless one of your shortcuts uses O)."
+            }
+            MainKey::Alt => {
+                "Like GlazeWM. Apps keep Alt, except for the shortcuts Astur uses, such as \
+                 Alt+Space and Alt+1."
+            }
+            MainKey::CtrlWin => {
+                "Hold Ctrl and the Windows key together. Few apps use this pair, but every \
+                 shortcut takes an extra finger."
+            }
+            MainKey::CapsLock => {
+                "Caps Lock becomes the Astur key and no longer turns capital letters on. \
+                 Turn Caps Lock off before you choose this. Pressed in an admin window, \
+                 on the lock screen or a UAC prompt it still turns capitals on: press it \
+                 there again (Win+L locks the PC), or use the on-screen keyboard."
+            }
+        }
+    }
+
+    /// The modifier bits `MOD` stands for.
+    pub fn bits(self) -> u8 {
+        match self {
+            MainKey::LAlt | MainKey::Alt => MOD_ALT,
+            MainKey::Win => MOD_WIN,
+            MainKey::CtrlWin => MOD_CTRL | MOD_WIN,
+            MainKey::CapsLock => MOD_HYPER,
+        }
+    }
+
+    /// The VK the WM swallows and tracks itself for a reserved main key
+    /// (VK_LMENU, VK_CAPITAL); 0 for one passed through to apps.
+    pub fn reserved_vk(self) -> u32 {
+        match self {
+            MainKey::LAlt => 0xA4,
+            MainKey::CapsLock => 0x14,
+            _ => 0,
+        }
+    }
+}
+
+/// What a hotkey does. `Extra` is extra_hotkeys entry `arg`; the workspace
+/// actions take the workspace index. The WM turns each into its command.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Action {
+    Launcher,
+    SystemMenu,
+    FocusNext,
+    FocusPrev,
+    SwapNext,
+    SwapPrev,
+    ShrinkMaster,
+    GrowMaster,
+    ShrinkTile,
+    GrowTile,
+    PromoteMaster,
+    ToggleTiling,
+    ToggleTabbed,
+    ToggleFloat,
+    CloseWindow,
+    CycleWidth,
+    CycleHeight,
+    CenterColumn,
+    ConsumeLeft,
+    ConsumeRight,
+    FirstColumn,
+    LastColumn,
+    MoveFirstColumn,
+    MoveLastColumn,
+    Terminal,
+    Browser,
+    FocusLeft,
+    FocusUp,
+    FocusRight,
+    FocusDown,
+    MoveLeft,
+    MoveUp,
+    MoveRight,
+    MoveDown,
+    SwitchWorkspace,
+    MoveToWorkspace,
+    Extra,
+}
+
+impl Action {
+    /// Every action in declaration order (`ALL[a as usize] == a`), which is
+    /// how a table entry stores it.
+    pub const ALL: [Action; 37] = {
+        use Action::*;
+        [
+            Launcher,
+            SystemMenu,
+            FocusNext,
+            FocusPrev,
+            SwapNext,
+            SwapPrev,
+            ShrinkMaster,
+            GrowMaster,
+            ShrinkTile,
+            GrowTile,
+            PromoteMaster,
+            ToggleTiling,
+            ToggleTabbed,
+            ToggleFloat,
+            CloseWindow,
+            CycleWidth,
+            CycleHeight,
+            CenterColumn,
+            ConsumeLeft,
+            ConsumeRight,
+            FirstColumn,
+            LastColumn,
+            MoveFirstColumn,
+            MoveLastColumn,
+            Terminal,
+            Browser,
+            FocusLeft,
+            FocusUp,
+            FocusRight,
+            FocusDown,
+            MoveLeft,
+            MoveUp,
+            MoveRight,
+            MoveDown,
+            SwitchWorkspace,
+            MoveToWorkspace,
+            Extra,
+        ]
+    };
+
+    /// What it does, in plain words.
+    pub fn label(self) -> &'static str {
+        use Action::*;
+        match self {
+            Launcher => "Open the app launcher",
+            SystemMenu => "Open the power menu",
+            FocusNext => "Focus the next window",
+            FocusPrev => "Focus the previous window",
+            SwapNext => "Swap with the next window",
+            SwapPrev => "Swap with the previous window",
+            ShrinkMaster => "Shrink the main area",
+            GrowMaster => "Grow the main area",
+            ShrinkTile => "Make the window shorter",
+            GrowTile => "Make the window taller",
+            PromoteMaster => "Make the window the main one",
+            ToggleTiling => "Turn tiling on or off",
+            ToggleTabbed => "Stack or tab the column",
+            ToggleFloat => "Float or tile the window",
+            CloseWindow => "Close the window",
+            CycleWidth => "Change the column width",
+            CycleHeight => "Change the window height",
+            CenterColumn => "Centre the column",
+            ConsumeLeft => "Join the column on the left",
+            ConsumeRight => "Join the column on the right",
+            FirstColumn => "Go to the first column",
+            LastColumn => "Go to the last column",
+            MoveFirstColumn => "Move the column to the start",
+            MoveLastColumn => "Move the column to the end",
+            Terminal => "Open the terminal",
+            Browser => "Open the browser",
+            FocusLeft => "Focus the window on the left",
+            FocusUp => "Focus the window above",
+            FocusRight => "Focus the window on the right",
+            FocusDown => "Focus the window below",
+            MoveLeft => "Move the window left",
+            MoveUp => "Move the window up",
+            MoveRight => "Move the window right",
+            MoveDown => "Move the window down",
+            SwitchWorkspace => "Go to a workspace",
+            MoveToWorkspace => "Move the window to a workspace",
+            Extra => "Custom shortcut",
+        }
+    }
+}
+
+/// One hotkey: `mods` + `vk` runs `action` with `arg`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Bind {
+    pub mods: u8,
+    pub vk: u32,
+    pub action: Action,
+    pub arg: u16,
+}
+
+impl Bind {
+    /// Its slot in the WM's table: the modifier set times 256 plus the VK.
+    pub fn slot(&self) -> usize {
+        (self.mods as usize & 31) << 8 | (self.vk as usize & 0xFF)
+    }
+
+    /// Its table value (`decode_bind` reads it back); never 0, which is
+    /// what an unbound slot holds.
+    pub fn entry(&self) -> u32 {
+        (self.action as u32 + 1) | (self.arg as u32) << 8
+    }
+}
+
+/// A table value back to (action, arg); None for an unbound slot.
+pub fn decode_bind(e: u32) -> Option<(Action, u16)> {
+    let a = Action::ALL.get(((e & 0xFF) as usize).checked_sub(1)?)?;
+    Some((*a, (e >> 8) as u16))
+}
+
+/// How bad a `BindIssue` is.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum Level {
+    /// The shortcut does nothing.
+    Error,
+    /// It works but costs something (a Windows shortcut people rely on, typing).
+    Warn,
+    /// It works; worth knowing (it replaces a Windows shortcut).
+    Info,
+}
+
+/// Something worth telling the user about one shortcut.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct BindIssue {
+    pub level: Level,
+    /// Whose shortcut: the action and its arg, as in `Bind`.
+    pub action: Action,
+    pub arg: u16,
+    /// As people read it ("Win+L"), or the chord as written if unreadable.
+    pub chord: String,
+    /// A plain sentence.
+    pub text: String,
+}
+
+/// Every hotkey of a config and what is wrong with any of them.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct Keymap {
+    /// In lookup order; no two share a chord.
+    pub binds: Vec<Bind>,
+    pub issues: Vec<BindIssue>,
+}
+
+/// Read a chord such as `MOD+SHIFT+J` or `win+ctrl+left`: `+`-separated,
+/// case-insensitive, `MOD` = the main key, then CTRL, SHIFT, ALT, WIN and one
+/// key name (`key_to_vk`; the last one wins, as the WM always read it).
+/// None for an unknown word or no key.
+pub fn parse_chord(s: &str, main: MainKey) -> Option<(u8, u32)> {
+    let mut mods = 0;
+    let mut vk = None;
+    for t in s.split('+').map(str::trim).filter(|t| !t.is_empty()) {
+        match t.to_ascii_uppercase().as_str() {
+            "MOD" => mods |= main.bits(),
+            "CTRL" | "CONTROL" => mods |= MOD_CTRL,
+            "SHIFT" => mods |= MOD_SHIFT,
+            "ALT" => mods |= MOD_ALT,
+            "WIN" => mods |= MOD_WIN,
+            k => vk = Some(key_to_vk(k)?),
+        }
+    }
+    Some((mods, vk?))
+}
+
+/// Write a chord as extra_hotkeys spells it, `MOD` for the main key's bits:
+/// `parse_chord` reads it back as (mods, vk).
+pub fn format_chord(mods: u8, vk: u32, main: MainKey) -> String {
+    let mut s = String::new();
+    let mut rest = mods;
+    if mods & main.bits() == main.bits() {
+        s.push_str("MOD+");
+        rest &= !main.bits();
+    }
+    for (bit, name) in [
+        (MOD_CTRL, "CTRL+"),
+        (MOD_ALT, "ALT+"),
+        (MOD_WIN, "WIN+"),
+        (MOD_SHIFT, "SHIFT+"),
+    ] {
+        if rest & bit != 0 {
+            s.push_str(name);
+        }
+    }
+    s + &vk_to_key(vk).to_ascii_uppercase()
+}
+
+/// A chord as people read it: "Win+Shift+J", "Caps Lock+Space".
+pub fn chord_label(mods: u8, vk: u32) -> String {
+    let mut s = String::new();
+    for (bit, name) in [
+        (MOD_HYPER, "Caps Lock+"),
+        (MOD_WIN, "Win+"),
+        (MOD_CTRL, "Ctrl+"),
+        (MOD_ALT, "Alt+"),
+        (MOD_SHIFT, "Shift+"),
+    ] {
+        if mods & bit != 0 {
+            s.push_str(name);
+        }
+    }
+    s + &vk_to_key(vk)
+}
+
+/// Why a chord can never work, if it can't.
+fn refusal(main: MainKey, mods: u8, vk: u32) -> Option<&'static str> {
+    if mods & (MOD_ALT | MOD_WIN | MOD_HYPER) == 0 {
+        // Ctrl/Shift-only chords stay ignored, as in the old WM. WIN-only and
+        // MOD chords, which the old WM dropped for lacking an ALT token, now
+        // bind (plan/known-issues.md, "Old files").
+        return Some(
+            "needs the Astur key, Alt or Win: Ctrl and Shift shortcuts belong to apps, \
+             and a key on its own is typing",
+        );
+    }
+    if main == MainKey::LAlt && mods & MOD_ALT != 0 && vk == 0x09 {
+        return Some("Alt+Tab always switches windows");
+    }
+    if mods == MOD_WIN && vk == 0x4C {
+        return Some("Windows always locks the PC on Win+L");
+    }
+    if mods & (MOD_CTRL | MOD_ALT) == MOD_CTRL | MOD_ALT && vk == 0x2E {
+        return Some("Windows always handles Ctrl+Alt+Delete");
+    }
+    None
+}
+
+/// Windows' own shortcuts a bound chord replaces: (modifiers as Windows sees
+/// them, first VK, last VK, Warn rather than Info, what it does). Notable
+/// ones only; apps' own Alt shortcuts are not listed.
+const WINDOWS_KEYS: &[(u8, u32, u32, bool, &str)] = &[
+    (MOD_WIN, 0x20, 0x20, true, "switches the keyboard language"),
+    (MOD_WIN, 0x09, 0x09, false, "opens Task View"),
+    (MOD_WIN, 0x30, 0x39, false, "opens a taskbar app"),
+    (MOD_WIN, 0x25, 0x28, false, "snaps the window"),
+    (MOD_WIN, 0x24, 0x24, false, "minimises the other windows"),
+    (MOD_WIN, 0x41, 0x41, false, "opens quick settings"),
+    (MOD_WIN, 0x44, 0x44, false, "shows the desktop"),
+    (MOD_WIN, 0x45, 0x45, false, "opens File Explorer"),
+    (MOD_WIN, 0x47, 0x47, false, "opens the Game Bar"),
+    (MOD_WIN, 0x48, 0x48, false, "starts voice typing"),
+    (MOD_WIN, 0x49, 0x49, false, "opens Settings"),
+    (MOD_WIN, 0x4B, 0x4B, false, "opens Cast"),
+    (MOD_WIN, 0x4D, 0x4D, false, "minimises every window"),
+    (MOD_WIN, 0x4E, 0x4E, false, "opens notifications"),
+    (MOD_WIN, 0x50, 0x50, false, "changes the display mode"),
+    (MOD_WIN, 0x52, 0x52, false, "opens Run"),
+    (MOD_WIN, 0x53, 0x53, false, "opens search"),
+    (MOD_WIN, 0x55, 0x55, true, "opens accessibility settings"),
+    (MOD_WIN, 0x56, 0x56, false, "opens clipboard history"),
+    (MOD_WIN, 0x58, 0x58, false, "opens the Start button menu"),
+    (MOD_WIN, 0xBA, 0xBA, false, "opens the emoji panel"),
+    (MOD_WIN, 0xBE, 0xBE, false, "opens the emoji panel"),
+    (MOD_WIN, 0xBB, 0xBB, true, "zooms in with Magnifier"),
+    (MOD_WIN, 0xBD, 0xBD, true, "zooms out with Magnifier"),
+    (MOD_WIN | MOD_SHIFT, 0x53, 0x53, false, "takes a screenshot"),
+    (
+        MOD_WIN | MOD_SHIFT,
+        0x25,
+        0x28,
+        false,
+        "moves the window to another screen",
+    ),
+    (MOD_WIN | MOD_CTRL, 0x0D, 0x0D, true, "starts Narrator"),
+    (
+        MOD_WIN | MOD_CTRL,
+        0x44,
+        0x44,
+        false,
+        "adds a virtual desktop",
+    ),
+    (
+        MOD_WIN | MOD_CTRL,
+        0x25,
+        0x27,
+        false,
+        "switches virtual desktops",
+    ),
+    (
+        MOD_WIN | MOD_CTRL,
+        0x73,
+        0x73,
+        false,
+        "closes the virtual desktop",
+    ),
+    (MOD_ALT, 0x09, 0x09, true, "switches windows"),
+    (MOD_ALT, 0x73, 0x73, true, "closes the window"),
+    (MOD_ALT, 0x20, 0x20, false, "opens the window menu"),
+    (MOD_ALT, 0x1B, 0x1B, false, "cycles windows"),
+];
+
+/// What a working chord costs, if anything.
+fn caution(main: MainKey, mods: u8, vk: u32) -> Option<(Level, String)> {
+    // A chord holding a reserved key (Left Alt under lalt, Caps Lock) costs
+    // nothing: the reserved key never reaches Windows or apps, so the same
+    // combo without it (plain Win+D, AltGr+Q) looks up another slot and does
+    // what it always did. Reporting it as a takeover pushed users off valid
+    // binds.
+    let reserved = match main {
+        MainKey::LAlt => MOD_ALT | MOD_HYPER,
+        _ => MOD_HYPER,
+    };
+    if mods & reserved != 0 {
+        return None;
+    }
+    let seen = mods;
+    let printable = matches!(vk, 0x30..=0x39 | 0x41..=0x5A | 0xBA..=0xC0 | 0xDB..=0xDE);
+    // Win held as well is no AltGr typing.
+    if seen & (MOD_CTRL | MOD_ALT | MOD_WIN) == MOD_CTRL | MOD_ALT && printable {
+        return Some((
+            Level::Warn,
+            "on many non-US keyboards Ctrl+Alt types characters such as @ and \u{20AC}; \
+             this shortcut stops that"
+                .into(),
+        ));
+    }
+    let (_, _, _, warn, what) = WINDOWS_KEYS
+        .iter()
+        .find(|k| k.0 == seen && (k.1..=k.2).contains(&vk))?;
+    let level = if *warn { Level::Warn } else { Level::Info };
+    Some((
+        level,
+        format!("replaces Windows' own shortcut, which {what}"),
+    ))
+}
+
+impl Keymap {
+    fn issue(&mut self, level: Level, act: (Action, u16), chord: String, text: String) {
+        self.issues.push(BindIssue {
+            level,
+            action: act.0,
+            arg: act.1,
+            chord,
+            text,
+        });
+    }
+
+    /// Bind `mods`+`vk` unless it can't work or an earlier bind has it (the
+    /// earlier one is what the WM's old lookup ran). `quiet`: no issue, for
+    /// the legacy Left Alt variants (`put_loose`).
+    fn put(&mut self, c: &Config, mods: u8, vk: u32, act: (Action, u16), quiet: bool) {
+        let chord = chord_label(mods, vk);
+        if let Some(why) = refusal(c.main_key, mods, vk) {
+            if !quiet {
+                self.issue(
+                    Level::Error,
+                    act,
+                    chord,
+                    format!("{why}, so this does nothing"),
+                );
+            }
+            return;
+        }
+        if let Some(b) = self.binds.iter().find(|b| b.mods == mods && b.vk == vk) {
+            if !quiet && (b.action, b.arg) != act {
+                let text = format!("does nothing: {} uses it first", what(c, b.action, b.arg));
+                self.issue(Level::Warn, act, chord, text);
+            }
+            return;
+        }
+        if !quiet {
+            if let Some((level, text)) = caution(c.main_key, mods, vk) {
+                self.issue(level, act, chord, text);
+            }
+        }
+        self.binds.push(Bind {
+            mods,
+            vk,
+            action: act.0,
+            arg: act.1,
+        });
+    }
+
+    /// A built-in, popup or workspace key. Under Left Alt it also takes
+    /// Ctrl: the old hook ignored Ctrl for these, so Alt+Ctrl+J was Alt+J.
+    /// Not under the other main keys: where apps see Alt, Ctrl+Alt is AltGr
+    /// (typing), and Win+Ctrl+arrows switch virtual desktops.
+    fn put_loose(&mut self, c: &Config, mods: u8, vk: u32, act: (Action, u16), quiet: bool) {
+        self.put(c, mods, vk, act, quiet);
+        if c.main_key == MainKey::LAlt {
+            self.put(c, mods | MOD_CTRL, vk, act, true);
+        }
+    }
+
+    /// A built-in key: the action alone, its Shift action with Shift. With
+    /// no Shift action, Left Alt ignores Shift too (Alt+Shift+W always closed
+    /// the window), the other main keys leave that chord free.
+    fn put_builtin(&mut self, c: &Config, vk: u32, plain: Action, shifted: Option<Action>) {
+        let m = c.main_key.bits();
+        self.put_loose(c, m, vk, (plain, 0), false);
+        match shifted {
+            Some(s) => self.put_loose(c, m | MOD_SHIFT, vk, (s, 0), false),
+            None if c.main_key == MainKey::LAlt => {
+                self.put_loose(c, m | MOD_SHIFT, vk, (plain, 0), true)
+            }
+            None => {}
+        }
+    }
+}
+
+/// Who owns a bind, for an issue's text.
+fn what(c: &Config, action: Action, arg: u16) -> String {
+    match action {
+        Action::SwitchWorkspace => format!("workspace {}", arg + 1),
+        Action::MoveToWorkspace => format!("moving a window to workspace {}", arg + 1),
+        Action::Extra => match c.extra_hotkeys.get(arg as usize) {
+            Some(h) => format!("custom shortcut {} ({})", arg + 1, h.action),
+            None => format!("custom shortcut {}", arg + 1),
+        },
+        a => format!("\u{201C}{}\u{201D}", a.label()),
+    }
+}
+
+/// `key_grow_master` as the WM binds it. Under `main_key = win` its shipped
+/// L would be Win+L, which always locks the PC, so it moves to O: a letter
+/// (same meaning on every layout), the key right above L, no Astur default,
+/// and Windows' Win+O (rotation lock) exists only on tablets. Any other key
+/// the user set stays. A user who set L on purpose loses nothing: Win+L can
+/// never reach Astur. Only when O is free: grow_master is looked up before
+/// most `key_*` keys and the workspace keys, so taking Win+O from a key the
+/// user chose (a float key or workspace key on O, an extra on Win+O) would
+/// silently break it. Then L stays, and compile_keys reports it honestly as
+/// a Win+L that does nothing.
+pub fn grow_master_key(c: &Config) -> u32 {
+    const O: u32 = 0x4F;
+    if c.main_key != MainKey::Win || c.key_grow_master != 0x4C {
+        return c.key_grow_master;
+    }
+    let keys = [
+        c.key_focus_next,
+        c.key_focus_prev,
+        c.key_shrink_master,
+        c.key_promote_master,
+        c.key_toggle_tiling,
+        c.key_toggle_float,
+        c.key_close_window,
+        c.key_cycle_width,
+        c.key_center_column,
+        c.key_consume_left,
+        c.key_consume_right,
+    ];
+    let extra_on_o = c.extra_hotkeys.iter().any(|h| {
+        (h.action != "scratchpad" || c.scratchpad_enabled)
+            && matches!(parse_chord(&h.chord, MainKey::Win),
+                Some((m, O)) if m == MOD_WIN || m == MOD_WIN | MOD_SHIFT)
+    });
+    if keys.contains(&O) || c.workspace_keys.contains(&O) || extra_on_o {
+        c.key_grow_master
+    } else {
+        O
+    }
+}
+
+/// Every hotkey of `c` in the order the WM looks them up, plus every problem
+/// with them. The WM fills its table from `binds`; Settings shows `issues`.
+/// Order, first wins on a shared chord (as the old hook's lookup): the power
+/// menu and launcher, extra_hotkeys, the built-in keys (the `key_*` ones,
+/// then Home / End / Enter / arrows), the workspace keys.
+pub fn compile_keys(c: &Config) -> Keymap {
+    use Action::*;
+    let mut k = Keymap::default();
+    let m = c.main_key.bits();
+    if c.system_menu_enabled {
+        k.put_loose(c, m | MOD_SHIFT, 0x20, (SystemMenu, 0), false);
+    }
+    if c.launcher_enabled {
+        k.put_loose(c, m, 0x20, (Launcher, 0), false);
+    }
+    for (i, h) in c.extra_hotkeys.iter().enumerate() {
+        if h.action == "scratchpad" && !c.scratchpad_enabled {
+            continue;
+        }
+        let act = (Extra, i as u16);
+        match parse_chord(&h.chord, c.main_key) {
+            Some((mods, vk)) => k.put(c, mods, vk, act, false),
+            None => k.issue(
+                Level::Error,
+                act,
+                h.chord.clone(),
+                "Astur can't read this shortcut, so it does nothing".into(),
+            ),
+        }
+    }
+    if grow_master_key(c) != c.key_grow_master {
+        k.issue(
+            Level::Info,
+            (GrowMaster, 0),
+            "Win+L".into(),
+            "Win+L always locks the PC, so this uses Win+O".into(),
+        );
+    }
+    for (vk, plain, shifted) in [
+        (c.key_focus_next, FocusNext, Some(SwapNext)),
+        (c.key_focus_prev, FocusPrev, Some(SwapPrev)),
+        (c.key_shrink_master, ShrinkMaster, Some(ShrinkTile)),
+        (grow_master_key(c), GrowMaster, Some(GrowTile)),
+        (c.key_promote_master, PromoteMaster, None),
+        (c.key_toggle_tiling, ToggleTiling, Some(ToggleTabbed)),
+        (c.key_toggle_float, ToggleFloat, None),
+        (c.key_close_window, CloseWindow, None),
+        (c.key_cycle_width, CycleWidth, Some(CycleHeight)),
+        (c.key_center_column, CenterColumn, None),
+        (c.key_consume_left, ConsumeLeft, None),
+        (c.key_consume_right, ConsumeRight, None),
+        (0x24, FirstColumn, Some(MoveFirstColumn)),
+        (0x23, LastColumn, Some(MoveLastColumn)),
+        (0x0D, Terminal, Some(Browser)),
+        (0x25, FocusLeft, Some(MoveLeft)),
+        (0x26, FocusUp, Some(MoveUp)),
+        (0x27, FocusRight, Some(MoveRight)),
+        (0x28, FocusDown, Some(MoveDown)),
+    ] {
+        k.put_builtin(c, vk, plain, shifted);
+    }
+    for (i, &vk) in c.workspace_keys.iter().enumerate() {
+        k.put_loose(c, m, vk, (SwitchWorkspace, i as u16), false);
+        k.put_loose(c, m | MOD_SHIFT, vk, (MoveToWorkspace, i as u16), false);
+    }
+    k
 }
 
 #[cfg(test)]
@@ -2342,6 +4460,16 @@ outer_gap = 4
         );
         assert!(c.unknown_keys.is_empty());
         assert_eq!(c.outer_gap, 4);
+    }
+
+    #[test]
+    fn a_utf8_bom_does_not_hide_the_first_line() {
+        // Notepad's "UTF-8 with BOM": the BOM used to stick to the first key,
+        // which was then ignored (or, before a comment, reported as a typo).
+        let c = parse_pair("\u{FEFF}outer_gap = 12\n", "\u{FEFF}# bar\nheight = 40\n");
+        assert_eq!(c.outer_gap, 12);
+        assert_eq!(c.bar_height, 40);
+        assert!(c.unknown_keys.is_empty(), "{:?}", c.unknown_keys);
     }
 
     #[test]
@@ -2433,6 +4561,20 @@ outer_gap = 4
     }
 
     #[test]
+    fn a_trailing_backslash_survives_a_second_record() {
+        let hk = |arg: &str| HotkeyDef {
+            chord: "ALT+E".to_string(),
+            action: "launch".to_string(),
+            argument: arg.to_string(),
+        };
+        let hotkeys = vec![hk(r"explorer C:\Projects\"), hk("notepad")];
+        let text = format_hotkeys(&hotkeys);
+        assert_eq!(parse_hotkeys(&text), hotkeys);
+        // Each save re-formats what it read: no growth.
+        assert_eq!(format_hotkeys(&parse_hotkeys(&text)), text);
+    }
+
+    #[test]
     fn parse_into_gaps_clamped() {
         let mut c = Config::defaults();
         parse_into(&mut c, "outer_gap = -10\ninner_gap = 99999");
@@ -2455,10 +4597,19 @@ outer_gap = 4
     }
 
     #[test]
+    fn workspaces_past_ten_are_accepted() {
+        // #18: an 11th workspace on an extra key (GlazeWM-style 'G').
+        let c = parse_text("workspaces = 11\nworkspace_keys = 1 2 3 4 5 6 7 8 9 0 G");
+        assert_eq!(c.workspaces, 11);
+        assert_eq!(c.workspace_keys.len(), 11);
+        assert_eq!(parse_text("workspaces = 0").workspaces, 1);
+    }
+
+    #[test]
     fn parse_into_navbar_alias_and_clamps() {
         let mut c = Config::defaults();
-        parse_into(&mut c, "workspaces = 50\nbar_height = 999\nheight = 40");
-        assert_eq!(c.workspaces, 10); // clamp 1..=10
+        parse_into(&mut c, "workspaces = 999\nbar_height = 999\nheight = 40");
+        assert_eq!(c.workspaces, MAX_WORKSPACES); // clamp 1..=MAX_WORKSPACES
         assert_eq!(c.bar_height, 40); // last write wins, clamp 0..=200
     }
 
@@ -2645,6 +4796,22 @@ outer_gap = 4
     }
 
     #[test]
+    fn set_conf_key_replaces_a_key_behind_a_bom() {
+        assert_eq!(
+            set_conf_key("\u{FEFF}outer_gap = 12\n", "outer_gap", "20"),
+            "outer_gap = 20\n"
+        );
+    }
+
+    #[test]
+    fn set_conf_key_writes_a_multi_line_value_on_one_line() {
+        assert_eq!(
+            set_conf_key("terminal = a\n", "terminal", "x\ny\r\nz"),
+            "terminal = x y  z\n"
+        );
+    }
+
+    #[test]
     fn set_conf_key_replaces_in_place() {
         let text = "# comment\nheight = 28\nbottom = false\n";
         let out = set_conf_key(text, "height", "40");
@@ -2697,11 +4864,257 @@ outer_gap = 4
     }
 
     #[test]
+    fn a_pinned_legacy_colour_stays_pinned() {
+        // Settings seeds a pin with the key's legacy default, which reads back
+        // as auto: unticking Auto and saving used to tick it again.
+        for legacy in BAR_DARK.into_iter().chain([0x0016_1616, 0x00FF_FFFF]) {
+            let pinned = pin_theme_color(legacy, legacy);
+            assert_eq!(
+                parse_theme_color(&color_to_hex(pinned), legacy, None),
+                Some(pinned)
+            );
+        }
+        assert_eq!(pin_theme_color(0x0012_3456, BAR_DARK[0]), 0x0012_3456);
+    }
+
+    #[test]
     fn vk_roundtrip() {
-        for name in ["A", "Z", "0", "9", "F1", "F24", "[", "]"] {
+        for name in [
+            "A", "Z", "0", "9", "F1", "F24", "[", "]", "Space", "Left", "`",
+        ] {
             let vk = key_to_vk(name).unwrap();
             assert_eq!(vk_to_key(vk), name);
         }
+        // Every named key reads back from the name it is written as, any case.
+        for &(_, vk) in KEY_NAMES {
+            assert_eq!(key_to_vk(&vk_to_key(vk).to_ascii_lowercase()), Some(vk));
+        }
+        assert_eq!(key_to_vk("pgdn"), Some(0x22));
+        assert_eq!(key_to_vk("ESCAPE"), Some(0x1B));
+    }
+
+    /// Each bind of `c` as chord -> (action, arg).
+    fn keymap(c: &Config) -> std::collections::HashMap<(u8, u32), (Action, u16)> {
+        compile_keys(c)
+            .binds
+            .iter()
+            .map(|b| ((b.mods, b.vk), (b.action, b.arg)))
+            .collect()
+    }
+
+    #[test]
+    fn chords_parse_and_round_trip() {
+        let p = parse_chord;
+        assert_eq!(
+            p("ALT+SHIFT+F2", MainKey::LAlt),
+            Some((MOD_ALT | MOD_SHIFT, 0x71))
+        );
+        assert_eq!(
+            p(" mod + ctrl + left ", MainKey::Win),
+            Some((MOD_WIN | MOD_CTRL, 0x25))
+        );
+        assert_eq!(
+            p("MOD+J", MainKey::CtrlWin),
+            Some((MOD_CTRL | MOD_WIN, 0x4A))
+        );
+        assert_eq!(p("MOD+Space", MainKey::CapsLock), Some((MOD_HYPER, 0x20)));
+        assert_eq!(p("ALT+SHIFT", MainKey::LAlt), None); // no key
+        assert_eq!(p("ALT+FOO+J", MainKey::LAlt), None); // unknown word
+        for main in MainKey::ALL {
+            assert_eq!(MainKey::from_name(main.name()), Some(main));
+            for mods in 0..32u8 {
+                // Caps Lock exists only as the main key.
+                if mods & MOD_HYPER != 0 && main != MainKey::CapsLock {
+                    continue;
+                }
+                for vk in [0x4A, 0x20, 0xBA, 0xDC, 0x70] {
+                    let s = format_chord(mods, vk, main);
+                    assert_eq!(p(&s, main), Some((mods, vk)), "{s}");
+                }
+            }
+        }
+        assert_eq!(MainKey::from_name(" Win + Ctrl "), Some(MainKey::CtrlWin));
+        assert_eq!(chord_label(MOD_WIN | MOD_SHIFT, 0x4A), "Win+Shift+J");
+        assert_eq!(chord_label(MOD_HYPER, 0x20), "Caps Lock+Space");
+    }
+
+    #[test]
+    fn main_key_parses_with_its_alias() {
+        assert_eq!(Config::defaults().main_key, MainKey::LAlt);
+        assert_eq!(parse_text("main_key = win").main_key, MainKey::Win);
+        assert_eq!(parse_text("mod = capslock").main_key, MainKey::CapsLock);
+        assert_eq!(parse_text("main_key = shift").main_key, MainKey::LAlt);
+        assert!(parse_text("mod = alt").unknown_keys.is_empty());
+    }
+
+    #[test]
+    fn actions_decode_from_their_table_entry() {
+        for (i, a) in Action::ALL.iter().enumerate() {
+            assert_eq!(*a as usize, i);
+            let b = Bind {
+                mods: MOD_WIN,
+                vk: 0x4A,
+                action: *a,
+                arg: 19,
+            };
+            assert_eq!(decode_bind(b.entry()), Some((*a, 19)));
+        }
+        assert_eq!(decode_bind(0), None);
+        assert_eq!(decode_bind(Action::ALL.len() as u32 + 1), None);
+    }
+
+    #[test]
+    fn default_keys_compile_without_issues() {
+        let k = compile_keys(&default_config());
+        assert!(k.issues.is_empty(), "{:?}", k.issues);
+        let m = keymap(&default_config());
+        let ws = |i| (Action::SwitchWorkspace, i);
+        assert_eq!(m[&(MOD_ALT, 0x4A)], (Action::FocusNext, 0));
+        assert_eq!(m[&(MOD_ALT | MOD_SHIFT, 0x4A)], (Action::SwapNext, 0));
+        assert_eq!(m[&(MOD_ALT, 0x31)], ws(0));
+        assert_eq!(m[&(MOD_ALT, 0x20)], (Action::Launcher, 0));
+        assert_eq!(m[&(MOD_ALT | MOD_SHIFT, 0x20)], (Action::SystemMenu, 0));
+        // Left Alt's old quirks: Ctrl ignored, Shift ignored with no Shift action.
+        assert_eq!(m[&(MOD_ALT | MOD_CTRL, 0x31)], ws(0));
+        assert_eq!(m[&(MOD_ALT | MOD_SHIFT, 0x57)], (Action::CloseWindow, 0));
+        // The other main keys bind exactly what they say.
+        let mut c = default_config();
+        c.main_key = MainKey::Alt;
+        let m = keymap(&c);
+        assert_eq!(m[&(MOD_ALT, 0x31)], ws(0));
+        assert!(
+            !m.contains_key(&(MOD_ALT | MOD_CTRL, 0x31)),
+            "Ctrl+Alt+1 is AltGr"
+        );
+        assert!(!m.contains_key(&(MOD_ALT | MOD_SHIFT, 0x57)));
+        // An old ALT chord: Left Alt under lalt, the real Alt under the others.
+        c.main_key = MainKey::Win;
+        c.scratchpad_enabled = true;
+        assert_eq!(keymap(&c)[&(MOD_ALT, 0xC0)], (Action::Extra, 0));
+        c.main_key = MainKey::LAlt;
+        assert_eq!(keymap(&c)[&(MOD_ALT, 0xC0)], (Action::Extra, 0));
+    }
+
+    #[test]
+    fn win_main_key_moves_grow_master_off_win_l() {
+        let mut c = default_config();
+        c.main_key = MainKey::Win;
+        let m = keymap(&c);
+        assert_eq!(m[&(MOD_WIN, 0x4F)], (Action::GrowMaster, 0));
+        assert_eq!(m[&(MOD_WIN | MOD_SHIFT, 0x4F)], (Action::GrowTile, 0));
+        assert!(!m.contains_key(&(MOD_WIN, 0x4C)));
+        let k = compile_keys(&c);
+        assert!(
+            k.issues.iter().all(|i| i.level != Level::Error),
+            "{:?}",
+            k.issues
+        );
+        assert!(k
+            .issues
+            .iter()
+            .any(|i| i.action == Action::GrowMaster && i.level == Level::Info));
+        // Win+Space (keyboard language) is a warning.
+        assert!(k
+            .issues
+            .iter()
+            .any(|i| i.chord == "Win+Space" && i.level == Level::Warn));
+        // A key the user picked stays.
+        c.key_grow_master = 0x50;
+        assert_eq!(keymap(&c)[&(MOD_WIN, 0x50)], (Action::GrowMaster, 0));
+        // Not under the other main keys.
+        c = default_config();
+        c.main_key = MainKey::CtrlWin;
+        let m = keymap(&c);
+        assert_eq!(m[&(MOD_CTRL | MOD_WIN, 0x4C)], (Action::GrowMaster, 0));
+    }
+
+    #[test]
+    fn grow_master_takes_win_o_only_when_it_is_free() {
+        let grow = |c: &Config| {
+            let k = compile_keys(c);
+            let levels: Vec<Level> = (k.issues.iter())
+                .filter(|i| i.action == Action::GrowMaster)
+                .map(|i| i.level)
+                .collect();
+            (keymap(c), levels)
+        };
+        // The user's own float key on O keeps Win+O; grow stays an honest
+        // (refused) Win+L rather than a note that it uses Win+O.
+        let mut c = default_config();
+        c.main_key = MainKey::Win;
+        c.key_toggle_float = 0x4F;
+        let (m, levels) = grow(&c);
+        assert_eq!(m[&(MOD_WIN, 0x4F)], (Action::ToggleFloat, 0));
+        assert_eq!(levels, [Level::Error]);
+        // A workspace key on O.
+        let mut c = default_config();
+        c.main_key = MainKey::Win;
+        c.workspace_keys = vec![0x59, 0x55, 0x49, 0x4F];
+        let (m, levels) = grow(&c);
+        assert_eq!(m[&(MOD_WIN, 0x4F)], (Action::SwitchWorkspace, 3));
+        assert_eq!(levels, [Level::Error]);
+        // An extra on Win+Shift+O.
+        let mut c = parse_text("extra_hotkeys = MOD+SHIFT+O|reload|");
+        c.main_key = MainKey::Win;
+        let (m, levels) = grow(&c);
+        assert_eq!(m[&(MOD_WIN | MOD_SHIFT, 0x4F)], (Action::Extra, 0));
+        assert!(!m.contains_key(&(MOD_WIN, 0x4F)));
+        assert_eq!(levels, [Level::Error]);
+        // An extra on another O chord (Ctrl) leaves O free for grow.
+        let mut c = parse_text("extra_hotkeys = MOD+CTRL+O|reload|");
+        c.main_key = MainKey::Win;
+        let (m, levels) = grow(&c);
+        assert_eq!(m[&(MOD_WIN, 0x4F)], (Action::GrowMaster, 0));
+        assert_eq!(levels, [Level::Info]);
+    }
+
+    #[test]
+    fn each_conflict_rule() {
+        use Level::*;
+        let check = |main: MainKey, chord: &str| {
+            let mut c = parse_text(&format!("extra_hotkeys = {chord}|reload|"));
+            c.main_key = main;
+            let k = compile_keys(&c);
+            let bound = k.binds.iter().any(|b| b.action == Action::Extra);
+            let levels: Vec<Level> = k
+                .issues
+                .iter()
+                .filter(|i| i.action == Action::Extra)
+                .map(|i| i.level)
+                .collect();
+            (bound, levels)
+        };
+        // No Astur key, Alt or Win: an app shortcut or typing.
+        assert_eq!(check(MainKey::LAlt, "SHIFT+J"), (false, vec![Error]));
+        assert_eq!(check(MainKey::Win, "J"), (false, vec![Error]));
+        assert_eq!(check(MainKey::Win, "CTRL+Q"), (false, vec![Error]));
+        // Windows owns these.
+        assert_eq!(check(MainKey::Win, "WIN+L"), (false, vec![Error]));
+        assert_eq!(check(MainKey::Win, "CTRL+ALT+DELETE"), (false, vec![Error]));
+        // Reserved Left Alt + Tab is always the window switcher.
+        assert_eq!(check(MainKey::LAlt, "ALT+SHIFT+TAB"), (false, vec![Error]));
+        assert_eq!(check(MainKey::Win, "ALT+FOO"), (false, vec![Error]));
+        // Works, with a cost: Windows' Alt+Tab, AltGr typing.
+        assert_eq!(check(MainKey::Win, "ALT+TAB"), (true, vec![Warn]));
+        assert_eq!(check(MainKey::Alt, "CTRL+ALT+Q"), (true, vec![Warn]));
+        assert_eq!(check(MainKey::LAlt, "CTRL+ALT+Q"), (true, vec![]));
+        // Replaces a Windows shortcut: a note.
+        assert_eq!(check(MainKey::LAlt, "WIN+D"), (true, vec![Info]));
+        assert_eq!(check(MainKey::CapsLock, "MOD+D"), (true, vec![]));
+        // A reserved key held too leaves Windows' plain combo alone: no note.
+        assert_eq!(check(MainKey::CapsLock, "MOD+WIN+D"), (true, vec![]));
+        assert_eq!(check(MainKey::LAlt, "ALT+WIN+D"), (true, vec![]));
+        assert_eq!(check(MainKey::CapsLock, "MOD+CTRL+ALT+Q"), (true, vec![]));
+        assert_eq!(check(MainKey::Alt, "CTRL+ALT+WIN+Q"), (true, vec![]));
+        // A chord an earlier bind has: the earlier one runs, as before.
+        let mut c = default_config();
+        c.workspace_keys[0] = 0x4A; // J
+        let k = compile_keys(&c);
+        assert!(k
+            .issues
+            .iter()
+            .any(|i| i.action == Action::SwitchWorkspace && i.level == Warn));
+        assert_eq!(keymap(&c)[&(MOD_ALT, 0x4A)], (Action::FocusNext, 0));
     }
 
     /// The keys a template assigns (every documented key, at its default).
@@ -2741,6 +5154,12 @@ outer_gap = 4
             "ALT+Q|launch|x",
             "https://x/?q={query}",
             "always",
+            "nord",
+            "pill",
+            "clock:blue",
+            "islands",
+            "win",
+            "dot",
         ];
         let base = parse_pair(DEFAULT_CONFIG, DEFAULT_NAVBAR);
         assert!(reload_groups(&base, &base).is_empty());
@@ -2762,6 +5181,193 @@ outer_gap = 4
                 assert_ne!(g, ReloadGroups::full(), "`{key}` fell through to full");
             }
         }
+    }
+
+    #[test]
+    fn new_bar_keys_default_to_the_bar_before_them() {
+        // Old files have none of these keys, fresh ones state the defaults:
+        // both must draw the bar exactly as before palettes and styles.
+        for c in [Config::defaults(), default_config(), parse_text("")] {
+            assert_eq!(c.bar_palette, "classic");
+            assert_eq!(c.bar_workspace_style, "box");
+            assert_eq!(c.bar_font_weight, 600);
+            assert_eq!(
+                (c.bar_surface, c.bar_accent_fg, c.bar_border),
+                (None, None, None)
+            );
+            assert_eq!(c.bar_border_width, 0);
+            assert_eq!(c.effective_bar_shape(), "strip");
+            // The navbar keys after them: today's bar again.
+            assert!(c.bar_clicks.is_empty());
+            assert_eq!(
+                (c.bar_workspace_label.as_str(), c.bar_monitors.as_str()),
+                ("auto", "all")
+            );
+            assert_eq!(c.bar_separator_style, "line");
+            assert_eq!(c.bar_title_format, "{title}");
+            assert!(!c.bar_hover && !c.bar_title_bold && !c.bar_workspace_apps);
+            assert_eq!(c.bar_disk_drive, "C:\\");
+            assert_eq!(c.bar_custom_command, "");
+            assert_eq!(c.bar_custom_interval, 10);
+            assert_eq!(c.bar_monitor_mask(), !BAR_PRIMARY_ONLY);
+            for (light, old) in [(false, BAR_DARK), (true, BAR_LIGHT)] {
+                let r = c.bar_roles(light);
+                assert_eq!([r.bg, r.fg, r.accent, r.muted], old);
+                assert_eq!(r.accent_fg, old[0], "active label in the bg colour");
+            }
+        }
+        assert!(reload_groups(&Config::defaults(), &default_config()).is_empty());
+    }
+
+    #[test]
+    fn palettes_resolve_by_theme_and_pins_win() {
+        let mut c = parse_text(
+            "palette = Catppuccin
+",
+        );
+        assert_eq!(c.bar_palette, "catppuccin");
+        assert_eq!(c.bar_roles(false).bg, rgb(0x1E1E2E));
+        assert_eq!(c.bar_roles(true).accent, rgb(0x8839EF));
+        assert_eq!(rgb(0x1E1E2E), parse_color("#1E1E2E", 0));
+        // A pinned colour wins over the palette in both themes.
+        parse_into(
+            &mut c,
+            "accent = #123456
+surface = #010203",
+        );
+        for light in [false, true] {
+            let r = c.bar_roles(light);
+            assert_eq!(r.accent, parse_color("#123456", 0));
+            assert_eq!(r.surface, parse_color("#010203", 0));
+        }
+        // accent_fg on auto: the palette's, or the bar bg once bg is pinned.
+        assert_eq!(c.bar_roles(false).accent_fg, rgb(0x11111B));
+        parse_into(&mut c, "bg = #202122");
+        assert_eq!(c.bar_roles(false).accent_fg, parse_color("#202122", 0));
+        parse_into(&mut c, "accent_fg = #FFFFFF");
+        assert_eq!(c.bar_roles(false).accent_fg, 0x00FF_FFFF);
+        // An unknown name keeps the previous palette; lookups fall back to classic.
+        parse_into(&mut c, "palette = solarized");
+        assert_eq!(c.bar_palette, "catppuccin");
+        assert_eq!(palette("solarized").name, "classic");
+        // New colour keys have no legacy default: the old bg hex stays pinned.
+        parse_into(&mut c, "surface = #1A1B26");
+        assert_eq!(c.bar_surface, Some(BAR_DARK[0]));
+        // Every palette is reachable by its own name.
+        for p in PALETTES {
+            assert_eq!(
+                parse_text(&format!("palette = {}", p.name)).bar_palette,
+                p.name
+            );
+        }
+    }
+
+    /// WCAG contrast ratio of two COLORREFs.
+    fn contrast(a: u32, b: u32) -> f32 {
+        let lum = |c: u32| {
+            let ch = |v: u32| {
+                let v = v as f32 / 255.0;
+                if v <= 0.039_28 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * ch(c & 0xFF) + 0.7152 * ch((c >> 8) & 0xFF) + 0.0722 * ch(c >> 16)
+        };
+        let (x, y) = (lum(a), lum(b));
+        (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    #[test]
+    fn text_on_picks_black_on_light_fills_and_white_on_dark() {
+        assert_eq!(text_on(rgb(0xFFB900)), 0, "Windows yellow accent");
+        assert_eq!(text_on(rgb(0xEBCB8B)), 0, "Nord yellow");
+        assert_eq!(text_on(rgb(0xFE640B)), 0, "Latte orange: 7.0:1, not 3.0:1");
+        assert_eq!(text_on(rgb(0x0078D4)), 0x00FF_FFFF, "Windows default blue");
+        assert_eq!(text_on(rgb(0x000080)), 0x00FF_FFFF);
+    }
+
+    #[test]
+    fn every_palette_alert_and_pill_text_is_readable() {
+        for p in PALETTES {
+            for (v, r) in [("dark", p.dark), ("light", p.light)] {
+                // swatches[0] is the low-battery alert, drawn on the bar or
+                // an island. Nord dark's own red on nord1 is 2.46:1 upstream;
+                // Nord keeps its published hex (the hue still tells it apart).
+                let alert = r.swatches[0];
+                assert!(contrast(alert, r.bg) >= 3.0, "{} {v} alert on bg", p.name);
+                if (p.name, v) != ("nord", "dark") {
+                    assert!(
+                        contrast(alert, r.surface) >= 3.0,
+                        "{} {v} alert on surface",
+                        p.name
+                    );
+                }
+                for s in r.swatches {
+                    assert!(
+                        contrast(text_on(s), s) >= 3.0,
+                        "{} {v}: text on {s:06X}",
+                        p.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_shape_line_beats_floating_in_any_order_or_file() {
+        let shape = |wm: &str, nav: &str| parse_pair(wm, nav).effective_bar_shape().to_string();
+        assert_eq!(shape("", "floating = true"), "floating");
+        assert_eq!(shape("bar_floating = true", ""), "floating");
+        assert_eq!(
+            shape(
+                "",
+                "floating = true
+shape = strip"
+            ),
+            "strip"
+        );
+        assert_eq!(
+            shape(
+                "",
+                "shape = strip
+floating = true"
+            ),
+            "strip"
+        );
+        assert_eq!(shape("bar_floating = true", "shape = islands"), "islands");
+        assert_eq!(shape("shape = pills", "floating = true"), "pills");
+        assert_eq!(
+            shape(
+                "",
+                "shape = floating
+floating = false"
+            ),
+            "floating"
+        );
+        // A bad value is ignored: `floating` still decides.
+        assert_eq!(
+            shape(
+                "",
+                "shape = blob
+floating = true"
+            ),
+            "floating"
+        );
+        // The template's `shape =` is empty, i.e. unset, so `floating` keeps
+        // working for a GUI or a hand edit that only knows it...
+        let nav = set_conf_key(default_navbar_text(), "floating", "true");
+        assert_eq!(shape("", &nav), "floating");
+        // ...and Settings' shape write lands on that line, next to the
+        // comment saying it overrides `floating`, not at the end of the file.
+        let t = default_navbar_text();
+        let nav = set_conf_key(t, "shape", "pills");
+        assert_eq!(nav.lines().count(), t.lines().count());
+        assert_eq!(shape("", &nav), "pills");
+        // Switching shape re-reserves the work area (floating adds margins).
+        let g = reload_groups(&Config::defaults(), &parse_text("shape = floating"));
+        assert!(g.wm && g.bar);
     }
 
     #[test]
@@ -2882,5 +5488,365 @@ outer_gap = 4
             assert_eq!(&std::fs::read(&path).unwrap(), bytes, "{name} was modified");
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn widget_colors_parse_and_follow_the_palette() {
+        let c = parse_text(
+            "palette = catppuccin\nwidget_colors = cpu:Orange, mem:#112233 workspaces:blue \
+             bogus:red clock:mauve title:surface volume: date:pink",
+        );
+        let pairs = |v: &[(&str, &str)]| -> Vec<(String, String)> {
+            v.iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        // Not workspaces (draws its own marks), not unknown widgets or colours.
+        assert_eq!(
+            c.bar_widget_colors,
+            pairs(&[
+                ("cpu", "orange"),
+                ("mem", "#112233"),
+                ("title", "surface"),
+                ("date", "pink")
+            ])
+        );
+        let mocha = c.bar_roles(false);
+        assert_eq!(c.bar_widget_fill("cpu", &mocha), Some(rgb(0xFAB387)));
+        assert_eq!(c.bar_widget_fill("mem", &mocha), Some(rgb(0x112233)));
+        assert_eq!(c.bar_widget_fill("title", &mocha), None, "surface");
+        assert_eq!(c.bar_widget_fill("clock", &mocha), None, "unlisted");
+        // A swatch follows the theme and the palette; a #hex stays pinned.
+        assert_eq!(
+            c.bar_widget_fill("cpu", &c.bar_roles(true)),
+            Some(rgb(0xFE640B))
+        );
+        let nord = palette("nord").dark;
+        assert_eq!(c.bar_widget_fill("cpu", &nord), Some(rgb(0xD08770)));
+        assert_eq!(c.bar_widget_fill("mem", &nord), Some(rgb(0x112233)));
+        // The last entry for a widget wins, as lines do.
+        let c = parse_text("widget_colors = cpu:red cpu:blue");
+        assert_eq!(c.bar_widget_fill("cpu", &mocha), Some(mocha.swatches[5]));
+        assert!(parse_text("widget_colors =").bar_widget_colors.is_empty());
+    }
+
+    #[test]
+    fn widget_colors_tolerate_spaces_around_the_colon() {
+        let c =
+            parse_text("widget_colors = cpu: orange, mem :yellow clock : blue volume: date:pink");
+        let got: Vec<(&str, &str)> = c
+            .bar_widget_colors
+            .iter()
+            .map(|(w, c)| (w.as_str(), c.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("cpu", "orange"),
+                ("mem", "yellow"),
+                ("clock", "blue"),
+                ("date", "pink")
+            ]
+        );
+    }
+
+    #[test]
+    fn icon_mode_accepts_glyph() {
+        assert_eq!(parse_text("icon_mode = Glyph").bar_icon_mode, "glyph");
+        assert_eq!(parse_text("icon_mode = emoji").bar_icon_mode, "both");
+    }
+
+    /// A preset's pairs as conf lines.
+    fn preset_text(p: &BarPreset) -> String {
+        p.pairs
+            .iter()
+            .map(|(k, v)| format!("{k} = {v}\n"))
+            .collect()
+    }
+
+    /// `zone` without the widgets its show_* toggles hide: what the bar draws.
+    fn visible(c: &Config, zone: &[String]) -> Vec<String> {
+        let shown = |w: &str| match w {
+            "apps" => c.bar_show_apps,
+            "title" => c.bar_show_title,
+            "layout" => c.bar_show_layout,
+            "cpu" => c.bar_show_cpu,
+            "mem" => c.bar_show_mem,
+            "net" => c.bar_show_net,
+            "volume" => c.bar_show_volume,
+            "battery" => c.bar_show_battery,
+            "date" => c.bar_show_date,
+            "clock" => c.bar_show_clock,
+            "media" => c.bar_show_media && c.media_enabled,
+            _ => true,
+        };
+        zone.iter().filter(|w| shown(w)).cloned().collect()
+    }
+
+    #[test]
+    fn presets_are_clean_complete_and_own_only_the_look() {
+        let keys = |p: &BarPreset| -> Vec<&str> {
+            let mut k: Vec<&str> = p
+                .pairs
+                .iter()
+                .map(|(k, _)| *k)
+                .filter(|k| !k.starts_with("show_"))
+                .collect();
+            k.sort_unstable();
+            k
+        };
+        let classic_keys = keys(&BAR_PRESETS[0]);
+        assert_eq!(BAR_PRESETS[0].name, "classic");
+        let mut names: Vec<&str> = BAR_PRESETS.iter().map(|p| p.name).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), BAR_PRESETS.len(), "unique names");
+        for p in BAR_PRESETS {
+            let c = parse_text(&preset_text(p));
+            assert!(
+                c.unknown_keys.is_empty(),
+                "{}: {:?}",
+                p.name,
+                c.unknown_keys
+            );
+            // The same look keys, each once, so one preset after another
+            // leaves nothing behind.
+            assert_eq!(keys(p), classic_keys, "{}", p.name);
+            let mut all: Vec<&str> = p.pairs.iter().map(|(k, _)| *k).collect();
+            all.sort_unstable();
+            all.dedup();
+            assert_eq!(all.len(), p.pairs.len(), "{}: a key twice", p.name);
+            for k in [
+                "enabled",
+                "bottom",
+                "autohide",
+                "wheel_workspaces",
+                "hide_empty_workspaces",
+                "floating",
+                "media_enabled",
+                "preset",
+            ] {
+                assert!(all.iter().all(|a| *a != k), "{} sets {k}", p.name);
+            }
+            let v = |k: &str| p.pairs.iter().find(|(a, _)| *a == k).map(|(_, v)| *v);
+            // Values the parser would drop silently (keeping the old one).
+            assert_eq!(Some(c.effective_bar_shape()), v("shape"), "{}", p.name);
+            assert_eq!(Some(c.bar_palette.as_str()), v("palette"), "{}", p.name);
+            assert_eq!(Some(c.bar_workspace_style.as_str()), v("workspace_style"));
+            assert_eq!(Some(c.bar_icon_mode.as_str()), v("icon_mode"));
+            let tokens = |k: &str| v(k).map_or(0, |s| s.split_whitespace().count());
+            assert_eq!(c.bar_widget_colors.len(), tokens("widget_colors"));
+            for (zone, list) in [
+                ("left", &c.bar_left),
+                ("center", &c.bar_center),
+                ("right", &c.bar_right),
+            ] {
+                assert_eq!(list.len(), tokens(zone), "{}: unknown widget", p.name);
+                for w in list {
+                    assert_ne!(w, "media", "{}: media needs media_enabled", p.name);
+                    // Zone membership is visibility: every listed widget on
+                    // (those without a show_* key are on by being listed).
+                    let unswitched = [
+                        "workspaces",
+                        "separator",
+                        "spacer",
+                        "keyboard",
+                        "disk",
+                        "uptime",
+                        "custom",
+                        "media_controls",
+                        "logo",
+                    ];
+                    if !unswitched.contains(&w.as_str()) {
+                        let key = format!("show_{w}");
+                        assert_eq!(v(&key), Some("true"), "{}: {key}", p.name);
+                    }
+                }
+                assert_eq!(&visible(&c, list), list, "{}", p.name);
+            }
+        }
+    }
+
+    #[test]
+    fn a_preset_stamps_into_a_file_and_reads_back() {
+        // What the settings GUI does: apply_updates onto the user's file.
+        for p in BAR_PRESETS {
+            let stamped = apply_updates(
+                DEFAULT_NAVBAR,
+                &p.pairs
+                    .iter()
+                    .map(|(k, v)| (*k, v.to_string()))
+                    .collect::<Vec<_>>(),
+            );
+            let got = parse_pair(DEFAULT_CONFIG, &stamped);
+            assert!(got.unknown_keys.is_empty(), "{}", p.name);
+            // The same as the pairs written last, whatever the file had.
+            let want = parse_pair(
+                DEFAULT_CONFIG,
+                &format!("{DEFAULT_NAVBAR}\n{}", preset_text(p)),
+            );
+            assert!(got == want, "{}", p.name);
+            // Stamping again changes nothing.
+            let again = apply_updates(
+                &stamped,
+                &p.pairs
+                    .iter()
+                    .map(|(k, v)| (*k, v.to_string()))
+                    .collect::<Vec<_>>(),
+            );
+            assert_eq!(again, stamped, "{}", p.name);
+        }
+    }
+
+    #[test]
+    fn the_classic_preset_draws_the_default_bar() {
+        let p = &BAR_PRESETS[0];
+        let mut got = parse_pair(
+            DEFAULT_CONFIG,
+            &format!("{DEFAULT_NAVBAR}\n{}", preset_text(p)),
+        );
+        let mut want = default_config();
+        // Classic lists only what the default shows (apps, net and date are
+        // listed but switched off there), and spells out `shape = strip`.
+        for c in [&mut got, &mut want] {
+            c.bar_left = visible(c, &c.bar_left);
+            c.bar_center = visible(c, &c.bar_center);
+            c.bar_right = visible(c, &c.bar_right);
+            c.bar_shape = c.effective_bar_shape().to_string();
+        }
+        assert!(got == want);
+    }
+
+    #[test]
+    fn click_keys_parse_and_fall_back_to_the_defaults() {
+        let c = parse_text(
+            "cpu_right_click = launch wt -p Ubuntu\ncpu_click = Mute\nclock_middle_click = none\n",
+        );
+        assert!(c.unknown_keys.is_empty(), "{:?}", c.unknown_keys);
+        assert_eq!(c.bar_click("cpu", 1), ("launch", "wt -p Ubuntu"));
+        assert_eq!(c.bar_click("cpu", 0), ("mute", ""));
+        assert_eq!(c.bar_click("clock", 2), ("none", ""));
+        // Buttons without a line keep their default; a widget with none
+        // listed does nothing.
+        assert_eq!(c.bar_click("clock", 0), ("calendar", ""));
+        assert_eq!(c.bar_click("title", 0), ("none", ""));
+        assert_eq!(c.bar_click("nonsense", 1), ("none", ""));
+        // An unknown action keeps the previous value; empty is the default
+        // again; the last line wins.
+        let c = parse_text("volume_click = sound_settings\nvolume_click = explode\n");
+        assert_eq!(c.bar_click("volume", 0), ("sound_settings", ""));
+        let c = parse_text("volume_click = sound_settings\nvolume_click =\n");
+        assert_eq!(c.bar_click("volume", 0), ("mute", ""));
+        let c = parse_text("date_click = launcher\ndate_click = switch_workspace 3\n");
+        assert_eq!(c.bar_click("date", 0), ("switch_workspace", "3"));
+        assert_eq!(c.bar_clicks.len(), 1);
+        // The right / middle suffixes are stripped before _click; widgets
+        // with fixed clicks have no keys.
+        assert_eq!(click_key("cpu_right_click"), Some(("cpu", 1)));
+        assert_eq!(click_key("media_middle_click"), Some(("media", 2)));
+        assert_eq!(click_key("logo_click"), Some(("logo", 0)));
+        assert_eq!(click_key("workspaces_click"), None);
+        assert_eq!(click_key("media_controls_click"), None);
+        assert!(!parse_text("workspaces_click = mute")
+            .unknown_keys
+            .is_empty());
+        // Every default is a real action on a real widget.
+        assert_eq!(BAR_ACTIONS[0].0, "none");
+        for w in BAR_CLICK_WIDGETS {
+            assert!(BAR_WIDGETS.contains(w), "{w}");
+        }
+        for (w, acts) in BAR_CLICK_DEFAULTS {
+            assert!(BAR_CLICK_WIDGETS.contains(w), "{w}");
+            for a in acts {
+                assert!(BAR_ACTIONS.iter().any(|x| x.0 == *a), "{w}: {a}");
+            }
+        }
+    }
+
+    #[test]
+    fn monitors_pick_screens_by_number_or_the_primary() {
+        let mask = |v: &str| parse_text(&format!("monitors = {v}")).bar_monitor_mask();
+        for i in 0..8 {
+            assert!(bar_on(mask("all"), i, i == 3));
+        }
+        assert!(bar_on(mask("primary"), 2, true));
+        assert!(!bar_on(mask("primary"), 0, false));
+        assert_eq!(parse_text("monitors = 3, 1").bar_monitors, "1 3");
+        let m = mask("3, 1");
+        assert!(bar_on(m, 0, false) && !bar_on(m, 1, true) && bar_on(m, 2, false));
+        assert!(!bar_on(m, 63, false), "past the mask: no bar, no panic");
+        // Anything else keeps the previous value.
+        let keep =
+            |v: &str| parse_text(&format!("monitors = primary\nmonitors = {v}")).bar_monitors;
+        for v in ["left", "0", "64", "1 x"] {
+            assert_eq!(keep(v), "primary", "{v}");
+        }
+        assert_eq!(parse_text("bar_monitors = Main").bar_monitors, "primary");
+    }
+
+    #[test]
+    fn workspace_labels_fall_back_to_the_number() {
+        assert_eq!(workspace_label("auto", 3, "Web", ""), "Web");
+        assert_eq!(workspace_label("auto", 3, "Web", "W"), "W");
+        assert_eq!(workspace_label("auto", 3, "", ""), "3");
+        assert_eq!(workspace_label("number", 3, "Web", "W"), "3");
+        assert_eq!(workspace_label("name", 3, "", "W"), "3");
+        assert_eq!(workspace_label("icon", 3, "Web", ""), "3");
+        assert_eq!(workspace_label("icon_name", 3, "Web", "W"), "W Web");
+        assert_eq!(workspace_label("icon_name", 3, "Web", ""), "Web");
+        assert_eq!(
+            parse_text("workspace_label = Icon_Name").bar_workspace_label,
+            "icon_name"
+        );
+        assert_eq!(
+            parse_text("workspace_label = big").bar_workspace_label,
+            "auto"
+        );
+    }
+
+    #[test]
+    fn clock_and_date_formats_keep_old_output_and_add_tokens() {
+        // Golden values of the WM's formatters before they moved here.
+        assert_eq!(format_clock("HH:mm", true, 9, 5, 7), "09:05");
+        assert_eq!(format_clock("", true, 21, 41, 0), "21:41");
+        assert_eq!(format_clock("", false, 21, 41, 0), "9:41 pm");
+        assert_eq!(format_clock("h:mm tt", true, 0, 1, 0), "12:01 am");
+        assert_eq!(format_clock("hh:mm", true, 13, 0, 0), "01:00");
+        assert_eq!(format_clock("H.mm", true, 7, 30, 0), "7.30");
+        assert_eq!(format_date("ddd dd MMM", 2026, 10, 4, 0), "Sun 04 Oct");
+        assert_eq!(format_date("yyyy-MM-dd", 2026, 1, 9, 5), "2026-01-09");
+        assert_eq!(format_date("dd/MM/yy", 2026, 12, 31, 4), "31/12/26");
+        assert_eq!(format_date("MMM dd, yyyy", 2026, 9, 1, 2), "Sep 01, 2026");
+        assert_eq!(format_date("Today ddd", 2026, 9, 1, 2), "Today Tue");
+        assert_eq!(format_date("MMM ddd", 2026, 13, 7, 9), " ");
+        // The new tokens.
+        assert_eq!(format_clock("HH:mm:ss", true, 9, 5, 7), "09:05:07");
+        assert_eq!(format_clock("h:mm TT", true, 21, 41, 0), "9:41 PM");
+        assert_eq!(format_clock("h:mm:ss TT", true, 12, 0, 59), "12:00:59 PM");
+        assert_eq!(format_date("ddd d MMM", 2026, 10, 4, 6), "Sat 4 Oct");
+        assert_eq!(
+            format_date("dddd d MMMM", 2026, 10, 24, 6),
+            "Saturday 24 October"
+        );
+        assert_eq!(format_date("d/MM/yyyy", 2026, 3, 7, 6), "7/03/2026");
+    }
+
+    #[test]
+    fn disk_drive_takes_a_letter_or_a_folder() {
+        assert_eq!(disk_root("c").as_deref(), Some("C:\\"));
+        assert_eq!(disk_root("C:").as_deref(), Some("C:\\"));
+        assert_eq!(disk_root("d:\\").as_deref(), Some("D:\\"));
+        assert_eq!(disk_root("D:\\Games").as_deref(), Some("D:\\Games\\"));
+        assert_eq!(
+            disk_root("\\\\nas\\share").as_deref(),
+            Some("\\\\nas\\share\\")
+        );
+        assert_eq!(disk_root("  "), None);
+        assert_eq!(parse_text("disk_drive =").bar_disk_drive, "C:\\");
+        assert_eq!(parse_text("custom_interval = 0").bar_custom_interval, 1);
+        assert_eq!(
+            parse_text("custom_interval = 99999").bar_custom_interval,
+            3600
+        );
     }
 }

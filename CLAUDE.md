@@ -25,8 +25,10 @@ Honest docs are a project goal (see `AGENTS.md` "bar to hold" #5).
 
 Fast, free, portable tiling window manager for Windows 10/11. Single Rust `.exe`,
 no installer, no required config. Alt-drag move, nearest-corner resize, dwindle/
-master tiling, ≤10 workspaces, per-monitor status bar, composited workspace +
-window animations. Left Alt is the reserved modifier (apps never see it).
+master tiling, ≤20 workspaces, per-monitor status bar, composited workspace +
+window animations. The main key (`main_key`) is the modifier: Left Alt by default,
+reserved (apps never see it); Win / Alt / Ctrl+Win (passed through, masked) or
+Caps Lock (reserved) are options.
 
 ## The bar to hold (don't regress these)
 
@@ -60,9 +62,13 @@ pre-workspace); the workspace below is the evolving full "Astur" (v2). See
   Uses the `RECT` type only; no Win32 calls.
 - `crates/astur-config/src/lib.rs` — pure parsing → `Config`. **No Win32.** Shared by
   the WM and the settings GUI so they never drift; aliased as `config` in the WM.
-- `crates/astur-settings/` — the settings GUI (egui). Shipped, ~1.2k lines, 13
-  sections; the installer bundles it and the tray launches it. It parses config
-  through `astur-config` so it cannot drift from the WM.
+- `crates/astur-settings/` — the settings GUI (egui). ~11.5k lines (much of it
+  rustfmt-spread row declarations and tests), 14 pages, instant apply with
+  undo, search, table editors, bar preset gallery; the installer bundles it and
+  the tray launches it. It parses config through `astur-config` so it cannot
+  drift from the WM. `cargo test -p astur-settings -- --ignored render_pages`
+  renders every page to PNGs in %TEMP%\astur-settings-render without opening a
+  window.
 
 NOTE: plan/ docs written before the workspace say `src/main.rs` / `src/config.rs` —
 those now map to `crates/astur/src/main.rs` / `crates/astur-config/src/lib.rs`.
