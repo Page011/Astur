@@ -14,8 +14,16 @@ single Rust `.exe` with no installer and no required config. Core hooks:
   `monocle`, or Niri-style `scrolling` (column strip, off-screen columns
   parked outside the virtual screen, tabbed columns; `plan/scrolling.md`).
   Layout is per monitor (`monitor_layouts`).
-- **Up to 10 virtual workspaces**, shared or per-monitor.
-- **Per-monitor status bar** (workspace pills, title, clock, CPU/RAM/battery).
+- **Up to 20 virtual workspaces** (`MAX_WORKSPACES`), shared or per-monitor.
+- **Per-monitor status bar** (workspace pills, title, clock, CPU/RAM/battery,
+  keyboard language, disk, uptime, custom command text, music buttons, logo;
+  palettes, strip/floating/islands/pills shapes, anti-aliased shapes on a
+  cached DIB, Segoe Fluent / MDL2 glyph icons, per-widget pill colours,
+  powerline segments, hover highlight; per-widget left/right/middle click
+  actions from astur-config `BAR_ACTIONS` run by the manager
+  (`Cmd::BarAction` -> `run_bar_action`, sharing `run_action` with extra
+  hotkeys); `monitors` picks the screens; 9 presets as data in astur-config
+  `BAR_PRESETS`, stamped by Settings).
 - **Workspace-switch animation** — overlay compositor: off/slide/spring/fade.
 - **Window glide** — windows animate to their tile slot on open/move/resize/
   re-tile/scroll via an overlay of live DWM thumbnails (off/glide).
@@ -24,8 +32,14 @@ single Rust `.exe` with no installer and no required config. Core hooks:
 - Coloured DWM borders, unfocused dimming, focus-follows-mouse, per-app rules,
   live config hot-reload.
 
-Left Alt is fully reserved as the Astur modifier (apps never see it). Right Alt is
-untouched. Alt+Tab still works via a synthetic Alt.
+The Astur modifier is the **main key** (`main_key`, config `MainKey`): Left Alt by
+default, fully reserved (apps never see it; Left Alt + an unbound
+typing/editing/navigation key is swallowed, never passed bare — see
+`swallow_unbound`; Right Alt is untouched; Alt+Tab still works via a synthetic
+Alt). Caps Lock can be reserved the same way. Win, Alt or Ctrl+Win are passed
+through instead: only bound keys are swallowed, plus the 0xE8 mask key so Start /
+menu bars don't open (`needs_mask`). Every hotkey is one load from the lock-free
+`BINDS` table, filled from astur-config's pure `compile_keys`.
 
 ## Project goals (the bar to hold)
 
@@ -53,8 +67,10 @@ cargo run -p astur             # run the WM from source
 ```
 
 Quit: tray Quit or `Ctrl+C` in the console (runs `restore_all_windows`: shows
-hidden windows and unparks parked ones), or kill the process (the next launch's
-crash rescue does the same from `~/.astur/rescue.lst`).
+hidden windows and unparks parked ones; an exit watchdog ends the process 2 s
+after the restore starts, so a hung app cannot keep it alive), or kill the
+process (the next launch's crash rescue does the same from
+`~/.astur/rescue.lst`).
 
 Config lives in `%USERPROFILE%\.astur\astur.conf` + `navbar.conf`, both created
 on first run, fully commented, **hot-reloaded on save**.
@@ -63,11 +79,11 @@ on first run, fully commented, **hot-reloaded on save**.
 
 | File | Lines (approx) | What |
 |---|---|---|
-| `crates/astur/src/main.rs` | ~23800 | Everything Win32: hooks, worker threads, manager, scrolling strip model, bar, tab bars, compositors, launcher, file search, system menu. One big file by preference (see CLAUDE.md; splitting would not change build time). |
+| `crates/astur/src/main.rs` | ~28700 | Everything Win32: hooks, worker threads, manager, scrolling strip model, bar, tab bars, compositors, launcher, file search, system menu. One big file by preference (see CLAUDE.md; splitting would not change build time). |
 | `crates/astur/src/layout.rs` | ~1300 | Pure tiling geometry (dwindle, master, columns, grid, monocle, scrolling strip: spans, offset clamp, peek/park `classify`, `park_spot`) + tests. `RECT` type only, no Win32 calls. |
 | `crates/astur/src/yasb.rs` | ~800 | GlazeWM-compatible workspace WebSocket API for YASB (loopback only, off by default). |
-| `crates/astur-config/src/lib.rs` | ~2900 | `Config` struct, `LAYOUTS` (the one list of layout names), documented-default file templates, key/value parser. **No Win32** — pure data, shared with the settings GUI (aliased `config` in the WM). |
-| `crates/astur-settings/` | ~1400 | Settings GUI (egui), shipped. Separate process — a GUI crash can't touch the WM. |
+| `crates/astur-config/src/lib.rs` | ~5800 | `Config` struct, `LAYOUTS` (the one list of layout names), bar `PALETTES`, `BAR_PRESETS`, `BAR_ACTIONS` / `BAR_CLICK_DEFAULTS` and the shared bar formatters (`format_clock`, `format_date`, `workspace_label`, `bar_on`), documented-default file templates, key/value parser. **No Win32** — pure data, shared with the settings GUI (aliased `config` in the WM). |
+| `crates/astur-settings/` | ~11200 (~1900 tests) | Settings GUI (egui), shipped. Separate process — a GUI crash can't touch the WM. Instant apply with Undo, Ctrl+F search, card rows (`row_core`), tables for record keys (`table`, `Rows`, `fold_*` / `*_check`), key capture chips, the Astur key picker with its 15 s Keep / revert trial (`key_picker`, `switch_key`, `Trial`) and per-shortcut notes from astur-config's `compile_keys` (`notes`, `row_noted`; the GUI has no conflict model of its own), the Status bar page (preset gallery `presets_ui` / `stamp` / `preset_diff`, egui previews `bar_preview` built from astur-config's own `format_clock` / `format_date` / `workspace_label`, drag-and-drop zones `zone_editor` / `move_widget`, format drop-downs `format_pick`, click actions `click_rows` / `click_ui` / `set_click` (the default is kept as no line), the screens picker `monitors_row`; `status_bar_rows_fit_their_width` guards against a row pushing the page past the window), Home's Quick setup (`bar_style_row`, `gaps_row`, `tips`), and pickers for non-technical users (`choice_row` drop-downs of detected apps / web searches with Custom… into More options, `font_row` with a GDI-drawn sample, `path_row` / `browse_button`, `window_picker`). Its only Win32 is `mod sys` (windows 0.58, the WM's version): font families, a font sample, installed browsers and App Paths, the open windows, the screen count, the file / folder dialog on its own thread. Never launch it to check a visual change: `cargo test -p astur-settings -- --ignored render_pages` renders every page to PNGs in %TEMP%\astur-settings-render. |
 | `Cargo.toml` (root) | — | `[workspace]` manifest + release profile. WM deps live in `crates/astur/Cargo.toml`. |
 
 `main.rs` is large but sectioned with `// ====` banners. Use the function map
@@ -81,13 +97,15 @@ queues. Keep it that way — do not move work onto the hooks (main thread).
 - **Main thread** — installs and runs the hooks: `mouse_proc` / `keyboard_proc`
   (`WH_MOUSE_LL` / `WH_KEYBOARD_LL`) and `win_event_proc` (out-of-context
   WinEvents). Hooks must return fast: push a `Cmd`, do no work, no lock without
-  an atomic guard (`ANY_DRAG`/`ALT_DOWN`/`SCROLLMON_N` let them early-out).
+  an atomic guard (`ANY_DRAG`/`MAIN_DOWN`/`BIND_LIVE`/`SCROLLMON_N` let them early-out).
   Also owns the bar windows, the tray and the scrolling layout's tab-bar
   windows (`astur_tabs`, synced from the manager's `TAB_SNAPSHOT` by
   `tab_bars_sync`; clicks push `Cmd::TabClick`, nothing places windows).
 - **Manager loop** (`manager_loop` / `Manager`) — owns all window/workspace/
   strip state. Drains the command queue (`CMDQ`). All `SetWindowPos`/tiling/
   switching/parking here, live Alt-drag placement included (`place_drag_frame`).
+  Between commands it also runs the #19.1 border re-assert passes on a
+  deadline in its own wait (`BorderRecheck`), with no extra thread.
 - **Transition worker** (`transition_worker` / `run_transition`) — owns the
   workspace-switch overlay, pumps its own message loop, GDI-composites frames
   (fade: DWM blends a second, layered overlay instead).
@@ -103,11 +121,16 @@ queues. Keep it that way — do not move work onto the hooks (main thread).
   the only thread that PrintWindows (never the manager, a compositor or a
   hook). A hung app may block it; nothing waits on it.
 - **Stats worker** (`stats_worker`) — polls CPU/RAM/battery ~2s for the bar.
+- **Slow stats worker** (`slow_worker`, thread "slow-stats") — the disk
+  widget's free space (30 s) and the custom widget's command (its own
+  interval, killed after 5 s); both can block, so never on the stats worker.
+  Idle unless those widgets are listed.
 - **Disk writers** (`state_worker`, `mru_worker`, `rescue_worker`) — the
   manager only fills a latest-wins slot; the disk I/O (state, launcher MRU,
   `rescue.lst`) runs here, so a slow disk never delays a command.
 - **Focus-follow worker**, **config watcher**, **launcher**, **sysmenu**,
-  **icon/file-search workers**, **IPC**, **YASB**, **hook watchdog** — as named.
+  **icon/file-search workers**, **IPC**, **YASB**, **hook watchdog**,
+  **exit watchdog** (spawned only once an exit restore starts) — as named.
 
 ## Conventions
 

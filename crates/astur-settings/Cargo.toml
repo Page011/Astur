@@ -1,6 +1,6 @@
 [package]
 name = "astur-settings"
-version = "2.3.0"
+version = "2.4.0"
 edition = "2021"
 description = "Astur settings GUI — friendly editor for astur.conf / navbar.conf"
 license = "Apache-2.0"
@@ -16,3 +16,20 @@ embed-resource = "2"
 [dependencies]
 astur-config = { path = "../astur-config" }
 eframe = "0.31"
+
+# The WM's version, so nothing new is downloaded. Only what the pickers need:
+# installed fonts, browsers and App Paths, the open windows, a font sample,
+# and the native file / folder dialog.
+[dependencies.windows]
+version = "0.58"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+]
