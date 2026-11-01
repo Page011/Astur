@@ -170,8 +170,9 @@ them.
 - **Tray icon** *(Astur)* — no console window; left-click for Settings, right-click for
   Settings / Quit.
 - **Light / dark theme** *(Astur)* — the launcher and menus follow `theme = dark |
-  light | auto` (auto tracks the Windows app theme); optional experimental acrylic
-  blur behind the popups.
+  light | auto` (auto tracks the Windows app theme) and the bar's colour `palette`
+  (any but classic: `palette = catppuccin` gives Mocha in dark, Latte in light);
+  optional experimental acrylic blur behind the popups.
 - **High-DPI aware** — per-monitor DPI v2. Tiles fill the whole work area at any
   display scale, and the bar, launcher and menus are scaled per monitor, so a
   100% screen next to a 150% one both look right. Sizes in the config are
