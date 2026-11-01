@@ -131,6 +131,10 @@ queues. Keep it that way — do not move work onto the hooks (main thread).
 - **Focus-follow worker**, **config watcher**, **launcher**, **sysmenu**,
   **icon/file-search workers**, **IPC**, **YASB**, **hook watchdog**,
   **exit watchdog** (spawned only once an exit restore starts) — as named.
+- **Focus sink** (`focus_sink_thread`, thread "focus-sink") — owns one hidden
+  `astur_sink` window and pumps it. The manager's loop tail
+  (`claim_empty_focus`) makes it the foreground when Astur's focus turns to
+  nothing (#25), so keys typed then land here, never on the hook thread.
 
 ## Conventions
 

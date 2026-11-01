@@ -70,7 +70,8 @@ use windows::Win32::Security::{
     TOKEN_USER,
 };
 use windows::Win32::Storage::FileSystem::{
-    ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES, PIPE_ACCESS_DUPLEX,
+    FlushFileBuffers, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
+    PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
@@ -107,10 +108,10 @@ use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount, GetT
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetLastInputInfo, SendInput, ToUnicode, TrackMouseEvent, INPUT,
-    INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, LASTINPUTINFO,
-    TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL, VK_DOWN, VK_ESCAPE,
-    VK_LBUTTON, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RBUTTON, VK_RCONTROL,
-    VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SPACE, VK_TAB, VK_UP,
+    INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+    LASTINPUTINFO, TME_LEAVE, TRACKMOUSEEVENT, VIRTUAL_KEY, VK_BACK, VK_CAPITAL, VK_CONTROL,
+    VK_DOWN, VK_ESCAPE, VK_LBUTTON, VK_LCONTROL, VK_LEFT, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RBUTTON,
+    VK_RCONTROL, VK_RETURN, VK_RMENU, VK_RSHIFT, VK_SPACE, VK_TAB, VK_UP,
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, IEnumShellItems, IShellItem, IShellItemImageFactory,
@@ -122,8 +123,8 @@ use windows::Win32::UI::Shell::{
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CopyIcon, CreateIconFromResourceEx, CreateIconIndirect, CreatePopupMenu,
     DestroyIcon, DestroyMenu, DrawIconEx, LoadIconW, PostQuitMessage, TrackPopupMenu, DI_NORMAL,
-    HICON, ICONINFO, IDI_APPLICATION, LR_DEFAULTCOLOR, MF_STRING, TPM_RETURNCMD, TPM_RIGHTBUTTON,
-    WM_LBUTTONDBLCLK,
+    HICON, ICONINFO, IDI_APPLICATION, LR_DEFAULTCOLOR, MF_STRING, SC_KEYMENU, TPM_RETURNCMD,
+    TPM_RIGHTBUTTON, WM_LBUTTONDBLCLK, WM_SYSCOMMAND,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetAncestor,
@@ -519,7 +520,8 @@ fn counters_line() -> String {
 // =========================================================================
 // Thread scheduling
 // =========================================================================
-// Every Astur window is WS_EX_NOACTIVATE, so the process is never in focus:
+// Every Astur window but the hidden focus sink (#25, held only while focus is
+// on nothing) is WS_EX_NOACTIVATE, so the process is rarely in focus:
 // Windows gives it at best Medium QoS (Low when no bar is visible), and every
 // thread runs at NORMAL. Under load a hook callback, a command wake-up or an
 // animation frame then queues behind the user's own busy threads, and on a
@@ -2710,6 +2712,9 @@ static INDEX: Mutex<Option<HashMap<isize, (usize, usize)>>> = Mutex::new(None);
 static FOLLOW_MOUSE: AtomicBool = AtomicBool::new(false);
 // Last window seen as foreground, to collapse duplicate foreground events.
 static LAST_FG: AtomicIsize = AtomicIsize::new(0);
+// now_ms() when LAST_FG last changed: claim_empty_focus leaves a foreground
+// alone that is older than its command (no Windows pick took it).
+static LAST_FG_MS: AtomicU64 = AtomicU64::new(0);
 // Config-driven window-class filters, populated once at startup so the hooks and
 // is_manageable can read them without threading the whole Config through.
 static IGNORE_CLASSES: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -3779,9 +3784,13 @@ fn hook_watchdog() {
             }
             let idle_ms = GetTickCount().wrapping_sub(lii.dwTime);
             let silence_ms = GetTickCount64().saturating_sub(HOOK_TICK.load(Ordering::Relaxed));
+            // The last input is focus_window's own nudge, which no hook sees:
+            // nothing to judge this round (a re-arm for every idle refusal).
+            let own_nudge = lii.dwTime.wrapping_sub(NUDGE_TICK.load(Ordering::Relaxed)) < 100;
             // The two syscall checks run only once the hooks already look
             // silent, so a healthy poll stays one GetLastInputInfo.
-            let dead = hooks_look_dead(silence_ms, idle_ms, false, self_elevated, false)
+            let dead = !own_nudge
+                && hooks_look_dead(silence_ms, idle_ms, false, self_elevated, false)
                 && hooks_look_dead(
                     silence_ms,
                     idle_ms,
@@ -4802,7 +4811,8 @@ impl Manager {
         ws.floating.retain(|&x| x != h);
         ws.strip.forget(h);
         if ws.focused == h {
-            ws.focused = next.unwrap_or_else(|| ws.windows.first().copied().unwrap_or(0));
+            ws.focused = 0; // gone, so focus_target picks a window that is left
+            ws.focused = next.unwrap_or_else(|| focus_target(ws));
         }
         if scrolling {
             unsafe { ensure_visible(self, mi, wi) };
@@ -6172,6 +6182,12 @@ fn ipc_worker() {
                 }
                 let mut written = 0u32;
                 let _ = WriteFile(pipe, Some(output.as_bytes()), Some(&mut written), None);
+                // DisconnectNamedPipe drops a reply the client has not read
+                // yet (a slow first PowerShell call read 0 bytes): wait for
+                // the read. Returns early when the client closes.
+                // ponytail: a same-user client that never reads or closes
+                // holds the IPC thread; add a timeout if that ever happens.
+                let _ = FlushFileBuffers(pipe);
             }
             let _ = DisconnectNamedPipe(pipe);
             let _ = CloseHandle(pipe);
@@ -7795,6 +7811,8 @@ unsafe fn active_window_rects(mgr: &Manager, mi: usize) -> Vec<(isize, RECT)> {
             items.push((h, r));
         }
     }
+    // A hidden window still has a rect: Alt+arrow picked the scratchpad.
+    items.retain(|&(h, _)| !scratch_hidden(h));
     items
 }
 
@@ -7811,11 +7829,16 @@ fn adjacent_monitor(mgr: &Manager, mi: usize, dir: Dir) -> Option<usize> {
 /// Best-effort focus that defeats the Windows foreground lock by briefly
 /// attaching to the current foreground thread's input queue.
 unsafe fn focus_window(h: isize) {
-    if h == 0 {
+    // Backstop: the SW_SHOW below would reveal a toggled-away scratchpad.
+    if h == 0 || scratch_hidden(h) {
         return;
     }
     let hwnd = hwnd_from(h);
-    let _ = ShowWindow(hwnd, SW_SHOW);
+    // The focus sink stays hidden (paste_text hands it back as the launcher's
+    // previous foreground): shown, Windows could activate it on its own.
+    if h != FOCUS_SINK.load(Ordering::Relaxed) {
+        let _ = ShowWindow(hwnd, SW_SHOW);
+    }
     let fg = GetForegroundWindow();
     let cur = GetCurrentThreadId();
     let fgt = GetWindowThreadProcessId(fg, None);
@@ -7844,6 +7867,23 @@ unsafe fn focus_window(h: isize) {
         let _ = BringWindowToTop(hwnd);
         took
     };
+    // Refused by the foreground lock: an input event from Astur makes it the
+    // process that received the last input, which may take the foreground
+    // (komorebi's trick). Only on a refusal, so a focus that took sends
+    // nothing. Measured: the #25 sink was refused on 2 of 3 empty switches.
+    let took = if took.as_bool() {
+        took
+    } else {
+        let nudge = INPUT {
+            r#type: INPUT_MOUSE,
+            ..Default::default()
+        };
+        NUDGE_TICK.store(GetTickCount(), Ordering::Relaxed);
+        SendInput(&[nudge], core::mem::size_of::<INPUT>() as i32);
+        let took = SetForegroundWindow(hwnd);
+        let _ = BringWindowToTop(hwnd);
+        took
+    };
     if !took.as_bool() {
         let n = FOCUS_REFUSED.fetch_add(1, Ordering::Relaxed) + 1;
         if focus_fail_log_due() {
@@ -7859,6 +7899,10 @@ unsafe fn focus_window(h: isize) {
 /// prints them); logged at most once per FOCUS_FAIL_LOG_GAP_MS, since a
 /// foreground lock can refuse every call.
 static FOCUS_REFUSED: AtomicU64 = AtomicU64::new(0);
+/// GetTickCount() at focus_window's input nudge. The empty mouse input moves
+/// GetLastInputInfo but reaches no LL hook (measured, a zero move too), so the
+/// hook watchdog must not read it as user input its hooks missed.
+static NUDGE_TICK: AtomicU32 = AtomicU32::new(0);
 static FOCUS_MISSED: AtomicU64 = AtomicU64::new(0);
 static FOCUS_FAIL_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
 const FOCUS_FAIL_LOG_GAP_MS: u64 = 30_000;
@@ -7893,6 +7937,77 @@ unsafe fn check_focus_landed(f: isize) {
             fg.0 as isize
         );
     }
+}
+
+/// Did Astur's focus just turn to nothing? before/now = Manager::focused()
+/// around one command. Already empty is never claimed again by an unrelated
+/// command: that would steal the keyboard back from wherever the user went.
+fn focus_became_empty(before: (usize, usize, isize), now: (usize, usize, isize)) -> bool {
+    now.2 == 0 && now != before
+}
+
+/// A foreground older than this was not Windows' pick after a close: the
+/// pick's event lands a few ms before the manager handles the Remove. A
+/// manager lagging past it just skips the claim (the old behaviour).
+const FG_PICK_MS: u64 = 500;
+
+/// #25: run after every command, so no path can forget it. Focus just turned
+/// to nothing (last window closed or hidden, a switch or focus move to an
+/// empty workspace or monitor): Windows hands the keyboard to the next window
+/// in z-order, often on another monitor, and Cmd::Focused would follow it
+/// there. Take the foreground with the sink, moved onto the focused monitor
+/// (for launcher_placement = focused_monitor); the queued FOREGROUND for
+/// Windows' pick then fails Cmd::Focused's check. Never taken from a visible
+/// window Astur does not manage (Start, an elevated app, one not adopted yet),
+/// nor from one that has held the foreground over FG_PICK_MS: Windows' pick
+/// is always fresh, while a window that showed without activating (Cmd::Add
+/// still moves focused_mon to it) and then closed leaves the keyboard where
+/// the user is typing. A refused claim leaves the old behaviour
+/// (FOCUS_REFUSED counts it).
+// ponytail: assumes HIDE is processed before Windows' pick. A pick processed
+// first (a HIDE dropped under SUPPRESS, an app that cloaks to close) still
+// moves focused_mon, and focus never turns empty here; guard Cmd::Focused if
+// a log shows that order.
+unsafe fn claim_empty_focus(mgr: &Manager, before: (usize, usize, isize)) {
+    let now = mgr.focused();
+    let sink = FOCUS_SINK.load(Ordering::Relaxed);
+    if !focus_became_empty(before, now) || sink == 0 {
+        return;
+    }
+    let Some(m) = mgr.monitors.get(now.0) else {
+        return;
+    };
+    let fg = GetForegroundWindow();
+    let root = GetAncestor(fg, GA_ROOTOWNER);
+    let r = root.0 as isize;
+    // Raw fg against LAST_FG: the event's window, maybe an owned dialog.
+    let held = fg.0 as isize == LAST_FG.load(Ordering::Relaxed)
+        && now_ms().saturating_sub(LAST_FG_MS.load(Ordering::Relaxed)) > FG_PICK_MS;
+    if r != 0
+        && r != before.2
+        && r != sink
+        && (held
+            || (mgr.locate(r).is_none()
+                && IsWindowVisible(root).as_bool()
+                && !is_wallpaper_class(root)))
+    {
+        return;
+    }
+    let wa = m.work_area;
+    let _ = SetWindowPos(
+        hwnd_from(sink),
+        None,
+        wa.left,
+        wa.top,
+        1,
+        1,
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS,
+    );
+    // The sink's own FOREGROUND is skipped (WINEVENT_SKIPOWNPROCESS), so
+    // LAST_FG would keep naming the window it took over from, and the user's
+    // next click on that window would be dropped as a repeat.
+    LAST_FG.store(0, Ordering::Relaxed);
+    focus_window(sink);
 }
 
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
@@ -11150,9 +11265,7 @@ unsafe fn switch_plain(mgr: &mut Manager, mi: usize, old: usize, n: usize) {
     {
         let ws = &mgr.monitors[mi].workspaces[n].windows;
         for &h in ws.iter() {
-            if h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
-                && SCRATCHPAD_HIDDEN.load(Ordering::Relaxed)
-            {
+            if scratch_hidden(h) {
                 mark_hidden_by_us(h);
                 continue;
             }
@@ -11223,6 +11336,7 @@ unsafe fn ws_window_rects(mgr: &Manager, mi: usize, wsi: usize, origin: RECT) ->
     mgr.monitors[mi].workspaces[wsi]
         .windows
         .iter()
+        .filter(|&&hwin| !scratch_hidden(hwin))
         .filter_map(|&hwin| {
             let mut r = RECT::default();
             GetWindowRect(hwnd_from(hwin), &mut r).ok()?;
@@ -11430,11 +11544,7 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     // and dimming a frame later; it happens under the overlay, so it's invisible.
     let f = {
         let ws = &mut mgr.monitors[mi].workspaces[n];
-        let f = if ws.focused != 0 {
-            ws.focused
-        } else {
-            ws.windows.first().copied().unwrap_or(0)
-        };
+        let f = focus_target(ws);
         ws.focused = f;
         f
     };
@@ -11592,7 +11702,7 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             if floating && !ws.floating.contains(&h) {
                 ws.floating.push(h);
             }
-            if ws.focused == 0 {
+            if ws.focused == 0 && !scratch_hidden(h) {
                 ws.focused = h;
             }
         }
@@ -11631,9 +11741,7 @@ unsafe fn normalize_visibility(mgr: &Manager) {
                 // A scratchpad toggled away stays away, as on a switch: shown
                 // here it popped back while SCRATCHPAD_HIDDEN stayed true, so
                 // the next toggle press only re-hid it.
-                if h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
-                    && SCRATCHPAD_HIDDEN.load(Ordering::Relaxed)
-                {
+                if scratch_hidden(h) {
                     mark_hidden_by_us(h);
                     continue;
                 }
@@ -11693,6 +11801,41 @@ fn focused_index(ws: &Workspace) -> Option<usize> {
     ws.windows.iter().position(|&h| h == ws.focused).or(Some(0))
 }
 
+/// The scratchpad while toggled away. It stays in its workspace's `windows`
+/// (exit restore and rescue find it there), so every focus pick skips it:
+/// focus_window would show it with SCRATCHPAD_HIDDEN still set (#22). Not
+/// once visible: an app that showed itself is an ordinary window again.
+fn scratch_hidden(h: isize) -> bool {
+    h != 0
+        && h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
+        && SCRATCHPAD_HIDDEN.load(Ordering::Relaxed)
+        && !unsafe { IsWindowVisible(hwnd_from(h)) }.as_bool()
+}
+
+/// Where focus lands on `ws`: `focused`, else its first window, never the
+/// toggled-away scratchpad. 0 when nothing is left.
+fn focus_target(ws: &Workspace) -> isize {
+    if ws.focused != 0 && !scratch_hidden(ws.focused) {
+        return ws.focused;
+    }
+    ws.windows
+        .iter()
+        .copied()
+        .find(|&w| !scratch_hidden(w))
+        .unwrap_or(0)
+}
+
+/// Alt+J / Alt+K: the window `d` (+1 / -1) steps from the focused one in
+/// `windows` order, wrapping, past the toggled-away scratchpad. Can come back
+/// to the focused window itself; None only when nothing else is left.
+fn focus_step(ws: &Workspace, d: i32) -> Option<isize> {
+    let idx = focused_index(ws)? as i32;
+    let len = ws.windows.len() as i32;
+    (1..=len)
+        .map(|k| ws.windows[(idx + d * k).rem_euclid(len) as usize])
+        .find(|&w| !scratch_hidden(w))
+}
+
 unsafe fn toggle_scratchpad(mgr: &mut Manager) {
     if !mgr.cfg.scratchpad_enabled {
         return;
@@ -11706,7 +11849,9 @@ unsafe fn toggle_scratchpad(mgr: &mut Manager) {
         launch(&mgr.cfg.scratchpad_command);
         return;
     }
-    if !SCRATCHPAD_HIDDEN.load(Ordering::Relaxed) && IsWindowVisible(hwnd_from(h)).as_bool() {
+    // Visible means hide, even with SCRATCHPAD_HIDDEN still set: an app that
+    // showed itself took two presses to hide before (#22).
+    if IsWindowVisible(hwnd_from(h)).as_bool() {
         SCRATCHPAD_HIDDEN.store(true, Ordering::Relaxed);
         mark_hidden_by_us(h);
         SUPPRESS.store(true, Ordering::Relaxed);
@@ -11714,6 +11859,11 @@ unsafe fn toggle_scratchpad(mgr: &mut Manager) {
         SUPPRESS.store(false, Ordering::Relaxed);
         if let Some((mi, wi)) = mgr.locate(h) {
             let ws = &mut mgr.monitors[mi].workspaces[wi];
+            // A scratchpad tiled by hand left its tile empty while away; the
+            // show path floats it again anyway.
+            if !ws.floating.contains(&h) {
+                ws.floating.push(h);
+            }
             if ws.focused == h {
                 ws.focused = ws.windows.iter().copied().find(|x| *x != h).unwrap_or(0);
             }
@@ -11759,10 +11909,13 @@ unsafe fn toggle_scratchpad(mgr: &mut Manager) {
     retile_monitor(mgr, to_mi);
 }
 
+// Check the other popup before the swap (as the hook's bind path does): a
+// swap first left this popup's flag set on a refused open, and a stale flag
+// makes the keyboard hook swallow every key into a hidden popup (#23).
 unsafe fn open_launcher_popup() {
     if !LAUNCHER_ENABLED.load(Ordering::Relaxed)
-        || LAUNCHER_OPEN.swap(true, Ordering::Relaxed)
         || SYSMENU_OPEN.load(Ordering::Relaxed)
+        || LAUNCHER_OPEN.swap(true, Ordering::Relaxed)
     {
         return;
     }
@@ -11776,8 +11929,8 @@ unsafe fn open_launcher_popup() {
 
 unsafe fn open_system_popup() {
     if !SYSMENU_ENABLED.load(Ordering::Relaxed)
-        || SYSMENU_OPEN.swap(true, Ordering::Relaxed)
         || LAUNCHER_OPEN.load(Ordering::Relaxed)
+        || SYSMENU_OPEN.swap(true, Ordering::Relaxed)
     {
         return;
     }
@@ -12096,6 +12249,15 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             ev_count(EVC_ADD);
             match mgr.locate(h) {
                 Some((mi, wi)) => {
+                    // The app showed its toggled-away scratchpad itself (tray,
+                    // its own hotkey): an ordinary window again, so a switch
+                    // away and back keeps it (#22). Checked now, so a SHOW
+                    // queued behind a later toggle-hide changes nothing.
+                    if h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
+                        && IsWindowVisible(hwnd_from(h)).as_bool()
+                    {
+                        SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
+                    }
                     // Already tracked. If an app just surfaced it on a HIDDEN
                     // workspace (link click opening the browser, taskbar
                     // activation, …), FOLLOW it: switch to its workspace. Never
@@ -12275,10 +12437,22 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 // the user to its workspace, which only this branch does
                 // (Cmd::Add's follow needs a visible window). Root owner, so a
                 // dialog the app raised right after still counts. Residual:
-                // after a switch to an empty workspace, or a focus_window that
-                // failed, a stale event for the old foreground still passes.
+                // after a refused focus_window or focus-sink claim, or a pick
+                // processed before its window's Remove, a stale event still
+                // passes.
                 let fg_root = GetAncestor(GetForegroundWindow(), GA_ROOTOWNER).0 as isize;
                 if !focused_follow_allowed(fg_root, h) {
+                    // Forget it (Windows' pick the sink took over from, a
+                    // switch echo), or the next real click on h repeats
+                    // LAST_FG and is dropped.
+                    let _ = LAST_FG.compare_exchange(h, 0, Ordering::Relaxed, Ordering::Relaxed);
+                    return;
+                }
+                // The app foregrounded its toggled-away scratchpad before (or
+                // without) showing it: a summon, so it shows and `focused`
+                // never holds a hidden window (#22).
+                if scratch_hidden(h) {
+                    toggle_scratchpad(mgr);
                     return;
                 }
                 touch_window_mru(h);
@@ -12319,6 +12493,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
         }
         Cmd::ActivateWindow(h) => {
+            // A launcher list opened before the scratchpad went away.
+            if scratch_hidden(h) {
+                toggle_scratchpad(mgr);
+                return;
+            }
             if let Some((mi, wi)) = mgr.locate(h) {
                 mgr.focused_mon = mi;
                 mgr.monitors[mi].workspaces[wi].focused = h;
@@ -12487,11 +12666,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             let mi = mgr.focused_mon;
             let a = mgr.monitors[mi].active;
-            if let Some(idx) = focused_index(&mgr.monitors[mi].workspaces[a]) {
-                let ws = &mgr.monitors[mi].workspaces[a];
-                let len = ws.windows.len() as i32;
-                let ni = (idx as i32 + d).rem_euclid(len) as usize;
-                let target = ws.windows[ni];
+            if let Some(target) = focus_step(&mgr.monitors[mi].workspaces[a], d) {
                 mgr.monitors[mi].workspaces[a].focused = target;
                 focus_window(target);
                 bump_follow_settle();
@@ -13119,16 +13294,7 @@ unsafe fn focus_adjacent_monitor(mgr: &mut Manager, mi: usize, dir: Dir) {
     };
     mgr.focused_mon = to_mi;
     let ta = mgr.monitors[to_mi].active;
-    let f = mgr.monitors[to_mi].workspaces[ta].focused;
-    let f = if f != 0 {
-        f
-    } else {
-        mgr.monitors[to_mi].workspaces[ta]
-            .windows
-            .first()
-            .copied()
-            .unwrap_or(0)
-    };
+    let f = focus_target(&mgr.monitors[to_mi].workspaces[ta]);
     if f != 0 {
         mgr.monitors[to_mi].workspaces[ta].focused = f;
         // Before the warp, which skips a parked tile.
@@ -13233,12 +13399,9 @@ unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
         FocusDir(d) => {
             // Flat next/prev over `windows`, as on every layout (columns are
             // runs of it, so this is column-major), plus the scroll.
-            let Some(idx) = focused_index(ws) else {
-                return true;
-            };
-            let len = ws.windows.len() as i32;
-            let target = ws.windows[(idx as i32 + d).rem_euclid(len) as usize];
-            strip_focus(mgr, mi, a, target);
+            if let Some(target) = focus_step(ws, d) {
+                strip_focus(mgr, mi, a, target);
+            }
             return true;
         }
         ScrollFocus(n) => {
@@ -14798,7 +14961,7 @@ unsafe fn update_bar(mgr: &Manager) {
                 .map(|ws| {
                     ws.windows
                         .iter()
-                        .filter(|h| IsWindow(hwnd_from(**h)).as_bool())
+                        .filter(|h| IsWindow(hwnd_from(**h)).as_bool() && !scratch_hidden(**h))
                         .map(|&h| {
                             let hwnd = hwnd_from(h);
                             let label = tracked_exe(hwnd)
@@ -18261,6 +18424,7 @@ fn manager_loop(cfg: Config) {
         }
         // #19.1: what the tail compares against to owe a border pass.
         let styled_before = STYLED_FOCUS.load(Ordering::Relaxed);
+        let focus_before = mgr.focused();
         let foreground = matches!(cmd, Cmd::Focused(_));
         // Per-command probe: time in `process` and in the fixed tail (styles,
         // bar, index sync), SetWindowPos calls issued and skipped as already in
@@ -18298,6 +18462,7 @@ fn manager_loop(cfg: Config) {
         let t1 = probe.map(|_| Instant::now());
         strip_after_command(&mut mgr);
         unsafe {
+            claim_empty_focus(&mgr, focus_before);
             // The focus moved with no retile (a focus key off scrolling,
             // FocusMouse, Windows' own pick after a close) while a motion
             // aimed at the old one runs: re-aim it, so the two windows' dims
@@ -18949,6 +19114,7 @@ unsafe extern "system" fn win_event_proc(
             if LAST_FG.swap(h, Ordering::Relaxed) == h {
                 return;
             }
+            LAST_FG_MS.store(now_ms(), Ordering::Relaxed);
             push_cmd(Cmd::Focused(h));
             if show_needs_add(SUPPRESS.load(Ordering::Relaxed), is_managed(h)) {
                 push_cmd(Cmd::Add(h, event));
@@ -20448,10 +20614,7 @@ unsafe fn launcher_windows() -> Vec<WindowHit> {
     let managed = MANAGED.lock().unwrap().clone();
     for h in managed {
         let hwnd = hwnd_from(h);
-        if (h == SCRATCHPAD_HWND.load(Ordering::Relaxed)
-            && SCRATCHPAD_HIDDEN.load(Ordering::Relaxed))
-            || !IsWindow(hwnd).as_bool()
-        {
+        if scratch_hidden(h) || !IsWindow(hwnd).as_bool() {
             continue;
         }
         let title = window_title(hwnd);
@@ -22276,7 +22439,12 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                         st.scroll = 0;
                         st.sel = 0;
                         launcher_refilter(&mut st);
-                        if st.filtered.len() > 1 {
+                        // Row 0 is the window to leave, unless focus is on
+                        // nothing (the #25 sink): then it is the one to go to.
+                        if st.filtered.len() > 1
+                            && GetForegroundWindow().0 as isize
+                                != FOCUS_SINK.load(Ordering::Relaxed)
+                        {
                             st.sel = 1;
                         }
                     }
@@ -23543,6 +23711,57 @@ fn sysmenu_thread() {
     }
 }
 
+/// #25: Astur's keyboard target while its focus is on nothing
+/// (claim_empty_focus). Hidden, never shown, own thread, so keys and IME
+/// typed into "nothing" never run on the hook (main) thread. 0 until made.
+static FOCUS_SINK: AtomicIsize = AtomicIsize::new(0);
+
+/// Keys die here, which is the point. Alt+F4 (WM_CLOSE) must not destroy it;
+/// F10 / Right Alt (SC_KEYMENU) must not enter menu mode or beep.
+unsafe extern "system" fn sink_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
+    if msg == WM_CLOSE || (msg == WM_SYSCOMMAND && (w.0 & 0xFFF0) as u32 == SC_KEYMENU) {
+        return LRESULT(0);
+    }
+    DefWindowProcW(h, msg, w, l)
+}
+
+fn focus_sink_thread() {
+    unsafe {
+        let hinst = HINSTANCE(BAR_HINST.load(Ordering::Relaxed) as *mut c_void);
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(sink_wndproc),
+            hInstance: hinst,
+            lpszClassName: w!("astur_sink"),
+            ..Default::default()
+        };
+        RegisterClassW(&wc);
+        // Not NOACTIVATE: it must take the foreground. TOOLWINDOW: no taskbar
+        // or Alt+Tab entry.
+        let Ok(hwnd) = CreateWindowExW(
+            WS_EX_TOOLWINDOW,
+            w!("astur_sink"),
+            w!(""),
+            WS_POPUP,
+            0,
+            0,
+            1,
+            1,
+            None,
+            None,
+            hinst,
+            None,
+        ) else {
+            return;
+        };
+        FOCUS_SINK.store(hwnd.0 as isize, Ordering::Relaxed);
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
 // =========================================================================
 // System tray icon (Astur Full): the control surface when there's no console.
 // Left/double-click -> Settings; right-click -> Settings / Quit. Quit restores
@@ -24495,6 +24714,8 @@ fn main() {
         }
         // System / power menu (Alt+Shift+Space): owns its popup + message pump.
         spawn_named("sysmenu", sysmenu_thread);
+        // Hidden window that holds the keyboard when focus is on nothing (#25).
+        spawn_named("focus-sink", focus_sink_thread);
         // Hot-reload config files on save.
         spawn_named("config-watcher", move || config_watcher(cfg_unread));
         // Put the input hooks back if Windows silently drops them.
@@ -24564,6 +24785,42 @@ mod tests {
         // Cancellable: Astur keeps running after these.
         assert!(!exit_restore_msg(WM_QUERYENDSESSION, 0));
         assert!(!exit_restore_msg(WM_ENDSESSION, 0));
+    }
+
+    #[test]
+    fn a_popup_refused_for_the_other_leaves_its_flag_clear() {
+        // The only test that touches LAUNCHER_OPEN / SYSMENU_OPEN (#23).
+        LAUNCHER_OPEN.store(true, Ordering::Relaxed);
+        SYSMENU_OPEN.store(false, Ordering::Relaxed);
+        unsafe { open_system_popup() };
+        assert!(!SYSMENU_OPEN.load(Ordering::Relaxed));
+        LAUNCHER_OPEN.store(false, Ordering::Relaxed);
+        SYSMENU_OPEN.store(true, Ordering::Relaxed);
+        unsafe { open_launcher_popup() };
+        assert!(!LAUNCHER_OPEN.load(Ordering::Relaxed));
+        SYSMENU_OPEN.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn focus_never_lands_on_the_hidden_scratchpad() {
+        // The only test that touches SCRATCHPAD_HWND / SCRATCHPAD_HIDDEN (#22).
+        // Fake handles: IsWindowVisible is false for them, as when hidden.
+        let (a, s, b) = (0x5C_0A01, 0x5C_0A03, 0x5C_0A05);
+        SCRATCHPAD_HWND.store(s, Ordering::Relaxed);
+        SCRATCHPAD_HIDDEN.store(true, Ordering::Relaxed);
+        let mut ws = Workspace::new();
+        ws.windows = vec![a, s, b];
+        ws.focused = a;
+        assert_eq!(focus_step(&ws, 1), Some(b));
+        assert_eq!(focus_step(&ws, -1), Some(b));
+        ws.focused = s; // stale
+        assert_eq!(focus_target(&ws), a);
+        ws.windows = vec![s];
+        assert_eq!(focus_step(&ws, 1), None);
+        assert_eq!(focus_target(&ws), 0);
+        SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
+        assert_eq!(focus_target(&ws), s); // toggled back: an ordinary window
+        SCRATCHPAD_HWND.store(0, Ordering::Relaxed);
     }
 
     #[test]
@@ -26008,6 +26265,42 @@ mod tests {
             ws.floating.push(h);
         }
         ws.focused = h;
+    }
+
+    #[test]
+    fn focus_became_empty_only_when_focus_turns_to_nothing() {
+        // #25: a terminal on monitor 0, a window on monitor 1.
+        let mut mgr = test_manager(2, 2);
+        add(&mut mgr, 1, 0, 0xB, false);
+        add(&mut mgr, 0, 0, 0xA, false);
+        let before = mgr.focused();
+        assert_eq!(mgr.detach_window(0xA), Some((0, 0, false)));
+        assert!(
+            focus_became_empty(before, mgr.focused()),
+            "last window closed"
+        );
+        assert!(
+            !focus_became_empty(mgr.focused(), mgr.focused()),
+            "still empty: no re-claim"
+        );
+        let before = mgr.focused();
+        mgr.focused_mon = 1;
+        assert!(
+            !focus_became_empty(before, mgr.focused()),
+            "focus on a window"
+        );
+        let before = mgr.focused();
+        mgr.focused_mon = 0;
+        assert!(
+            focus_became_empty(before, mgr.focused()),
+            "focus moved to the empty monitor"
+        );
+        let before = mgr.focused();
+        mgr.monitors[0].active = 1;
+        assert!(
+            focus_became_empty(before, mgr.focused()),
+            "empty to empty workspace"
+        );
     }
 
     #[test]
