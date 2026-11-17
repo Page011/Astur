@@ -493,6 +493,16 @@ Astur is an independent project, not affiliated with or endorsed by any other wi
 manager. It is a clean-room Rust implementation for Windows. All trademarks belong to
 their respective owners.
 
+## Star History
+
+<a href="https://www.star-history.com/?repos=page011%2Fastur&type=date&legend=bottom-right">
+ <picture>
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=page011/astur&type=date&theme=dark&legend=bottom-right" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=page011/astur&type=date&legend=bottom-right" />
+   <img alt="Star History Chart" src="https://api.star-history.com/chart?repos=page011/astur&type=date&legend=bottom-right" />
+ </picture>
+</a>
+
 ## Licence
 
 Apache-2.0 — see [LICENSE](LICENSE).
