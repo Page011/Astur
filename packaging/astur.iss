@@ -25,6 +25,10 @@ AppVersion={#AppVersion}
 AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
+; setup.exe's own version info (#30: no version info reads as suspect to AV).
+; Numbers only (Inno rejects "2.5.0-beta.1"): read from astur.exe's VERSIONINFO.
+VersionInfoVersion={#GetVersionNumbersString(SourcePath + "..\target\release\astur.exe")}
+VersionInfoCopyright=Licensed under the Apache License 2.0
 AppSupportURL={#AppURL}
 DefaultDirName={autopf}\Astur
 DefaultGroupName=Astur
