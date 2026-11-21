@@ -3419,7 +3419,8 @@ fn layout_row(ui: &mut Ui, f: &mut Find, v: &mut String, d: &str) {
 /// an app…" (or a folder: the native dialog), and "Custom…", which opens the
 /// page's More options (`salt`), where the value can be typed. A value
 /// matching no option shows as itself and is never rewritten, so nothing set
-/// by hand is lost. Returns true when the value changed (picked or reset).
+/// by hand is lost. Returns true when the value changed (picked or reset), or
+/// an option was clicked even if already set (the scratchpad resets its class).
 fn choice_row(
     ui: &mut Ui,
     f: &mut Find,
@@ -3430,6 +3431,7 @@ fn choice_row(
     salt: &str,
 ) -> bool {
     let before = v.clone();
+    let mut chose = false;
     let id = egui::Id::new(("choice", meta.2, meta.0));
     if let Some(p) = take_pick(id) {
         *v = p;
@@ -3447,6 +3449,7 @@ fn choice_row(
                         .clicked()
                     {
                         v.clone_from(&o.command);
+                        chose = true;
                     }
                 }
                 if !opts.is_empty() {
@@ -3468,7 +3471,7 @@ fn choice_row(
     }) {
         *v = d.to_string();
     }
-    *v != before
+    *v != before || chose
 }
 
 /// A folder or file path: typed, or picked with Browse. `hint` says what

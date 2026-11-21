@@ -5257,7 +5257,8 @@ fn rect_covers_monitor(window: RECT, monitor: RECT) -> bool {
 
 /// #32: did the app itself put this tile into borderless fullscreen (F11, a
 /// video, a game) on `monitor`, its slot's monitor, or did the user or app
-/// maximise it after Astur placed it (`zoomed` with a `sent`)? Placement
+/// maximise it after Astur placed it (`zoomed` with a `sent`, on `monitor`:
+/// one moved to another monitor's workspace is placed there)? Placement
 /// leaves such a tile alone: SetWindowPos into the tile is what dropped it
 /// out of fullscreen (and SW_RESTORE out of maximised) on every workspace
 /// reveal. A maximised window with no LAST_SENT entry (just adopted, after a
@@ -5276,7 +5277,10 @@ fn is_app_fullscreen(
     sent: Option<RECT>,
 ) -> bool {
     if zoomed {
-        return sent.is_some();
+        let (x, y) = ((live.left + live.right) / 2, (live.top + live.bottom) / 2);
+        return sent.is_some()
+            && monitor
+                .is_some_and(|m| (m.left..m.right).contains(&x) && (m.top..m.bottom).contains(&y));
     }
     style & WS_CAPTION.0 != WS_CAPTION.0
         && monitor.is_some_and(|m| {
@@ -5747,16 +5751,18 @@ fn launch(cmd: &str) {
 /// cmd.exe used to open a console window of its own for the moment `start`
 /// ran, which could flash and be adopted then retiled away. `start` still
 /// gives a console target (cmd, pwsh) its own new console window.
-/// Elevated (`uac_elevated`): both routes go through Explorer instead
+/// Elevated (`uac_elevated`): the cmd route only, started through Explorer
 /// (`shell_execute_unelevated`), so a command from a user-writable file
-/// never runs as admin; no fall-through, Explorer shows its own error.
+/// never runs as admin. Explorer's ShellExecute reports no failure to fall
+/// through on, and `start` runs what the direct route cannot (cmd's own
+/// commands).
 fn launch_now(cmd: &str) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let text = expand_env(cmd, |n| std::env::var(n).ok());
     let is_path = std::path::Path::new(&text).exists();
     let elevated = unsafe { uac_elevated() };
-    if let Some((file, args)) = split_command(&text, is_path) {
+    if let Some((file, args)) = split_command(&text, is_path).filter(|_| !elevated) {
         // ShellExecuteEx searches the cwd first; `start` swaps a bare `cmd`
         // for COMSPEC so a cmd.exe there cannot run instead.
         let system_cmd = cmd_exe();
@@ -5765,10 +5771,6 @@ fn launch_now(cmd: &str) {
         } else {
             file
         };
-        if elevated {
-            unsafe { shell_execute_unelevated(file, args, SW_SHOWNORMAL.0) };
-            return;
-        }
         let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
         let (file, args) = (wide(file), wide(args));
         let mut info = SHELLEXECUTEINFOW {
@@ -6495,6 +6497,12 @@ fn ipc_worker() {
             // already restrictive in practice, but "in practice" is not a
             // security property — say what is allowed (review S-02).
             let sd = owner_only_security_descriptor();
+            // Elevated, the default descriptor has no high label, so an
+            // unelevated program could connect. No IPC rather than that.
+            if sd.is_none() && uac_elevated() {
+                log_error!("IPC off: no pipe security descriptor while elevated");
+                return;
+            }
             let sa = sd.map(|sd| SECURITY_ATTRIBUTES {
                 nLength: core::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
                 lpSecurityDescriptor: sd,
@@ -27234,12 +27242,15 @@ mod tests {
         assert!(is_app_fullscreen(false, popup, full, mon, tile));
         // No LAST_SENT entry: placed, or a declined tile never gets one.
         assert!(!is_app_fullscreen(false, popup, full, mon, None));
-        // Maximised after Astur placed it: left maximised, whatever its rect.
-        assert!(is_app_fullscreen(
+        // Maximised after Astur placed it: left maximised.
+        let max = rc(-8, -8, 1928, 1048);
+        assert!(is_app_fullscreen(true, caption, max, mon, tile));
+        // ... but not once moved to another monitor's workspace: placed there.
+        assert!(!is_app_fullscreen(
             true,
             caption,
-            rc(0, 0, 1920, 1040),
-            mon,
+            max,
+            Some(rc(1920, 0, 3840, 1080)),
             tile
         ));
         // Maximised and never placed (adopted, after a restart): tiled.
