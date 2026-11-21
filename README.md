@@ -64,7 +64,9 @@ menu, tray, and a settings GUI — with the same motion polish and core tiling.
 No admin required. Elevated windows (an admin terminal, or Task Manager on an admin
 account) are left untiled where they are, and stay visible on every workspace,
 unless Astur runs as admin too: Windows does not let a normal process move or hide
-them.
+them. An admin Astur still starts the apps it launches unelevated (through
+Explorer), keeps the custom bar widget off, and takes IPC only from elevated clients:
+its config files are writable by any program you run.
 
 ## What it does
 
@@ -449,7 +451,11 @@ power menu, with a single-exe (Lite) option and no required config file.
 
 **Do I need admin rights?** No. Without them Astur leaves elevated windows (an admin
 terminal, or Task Manager on an admin account) untiled, because Windows does not let a
-normal process move or hide them. Run Astur as admin to tile those too.
+normal process move or hide them. Run Astur as admin to tile those too. Then the
+apps Astur launches (hotkeys, launcher, bar, IPC) still start unelevated through
+Explorer (an admin terminal needs a shortcut set to "Run as administrator"), the
+custom bar widget is off, and IPC scripts must run elevated: Astur's config files can
+be changed by any program you run, so they must not name what runs as admin.
 
 **Does it work with display scaling (125% / 150%)?** Yes, from 2.1.3 on. Astur is
 per-monitor-DPI aware, including mixed-scale multi-monitor setups. (Earlier

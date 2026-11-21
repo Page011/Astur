@@ -2847,13 +2847,14 @@ impl App {
             d.scratchpad_enabled,
         );
         when(ui, f, c.scratchpad_enabled, |ui, f| {
-            let apps = APPS.get().map_or(&[][..], |a| a.terminals.as_slice());
+            let mut apps = APPS.get().map_or_else(Vec::new, |a| a.terminals.clone());
+            apps.push(Choice::new("Notepad", "notepad.exe"));
             if choice_row(
                 ui,
                 f,
                 ("App", "The app that drops down.", "scratchpad_command"),
                 (&mut c.scratchpad_command, &d.scratchpad_command),
-                apps,
+                &apps,
                 Some(Pick::App),
                 "extras",
             ) {
@@ -7343,7 +7344,7 @@ fn custom_rows(ui: &mut Ui, f: &mut Find, c: &mut Config, d: &Config) {
     text(
         ui,
         f,
-        ("Command", "Optional. It runs hidden every so often, as you, and the first line it prints is shown; one that takes over 5 seconds is stopped. Only use a command you trust.", "custom_command"),
+        ("Command", "Optional. It runs hidden every so often, as you, and the first line it prints is shown; one that takes over 5 seconds is stopped. Off while Astur runs as administrator. Only use a command you trust.", "custom_command"),
         &mut c.bar_custom_command,
         &d.bar_custom_command,
     );
@@ -9103,6 +9104,8 @@ fn scratch_fields(w: &OpenWindow, command: &str) -> (String, String) {
 fn scratch_class(command: &str) -> &'static str {
     if same_app("wt.exe", command) {
         "CASCADIA_HOSTING_WINDOW_CLASS"
+    } else if same_app("notepad.exe", command) {
+        "Notepad"
     } else {
         ""
     }
@@ -11151,6 +11154,7 @@ key_close_window = F4
         let d = Config::defaults();
         assert_eq!(scratch_class(&d.scratchpad_command), d.scratchpad_class);
         assert_eq!(scratch_class("alacritty.exe"), "");
+        assert_eq!(scratch_class("notepad.exe"), "Notepad");
         assert_eq!(clip("abcdef", 4), "abc\u{2026}");
         assert_eq!(clip("abc", 4), "abc");
         assert_eq!(file_name(r"C:\a\b.exe"), "b.exe");

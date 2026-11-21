@@ -72,7 +72,7 @@ use windows::Win32::Security::{
 };
 use windows::Win32::Storage::FileSystem::{
     FlushFileBuffers, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, FILE_FLAGS_AND_ATTRIBUTES,
-    PIPE_ACCESS_DUPLEX,
+    FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Com::{
     CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
@@ -1269,7 +1269,9 @@ fn swallow_unbound(vk: u32) -> bool {
 /// leave the key stuck down in the app. Hook thread only. A stale 2 (an up the
 /// hook never saw) clears on the next press that passes, or is spent by the
 /// next up the hook sees, which still passes if the OS holds the key (a down
-/// it took while the hook was blind). main_reset zeroes every slot.
+/// it took while the hook was blind). An up the launcher / power menu capture
+/// sees zeroes its slot too (it returns before the tail), or a stale 1 would
+/// pass the next Left Alt+key bare. main_reset zeroes every slot.
 static UNBOUND_KEY: [AtomicU8; 256] = [const { AtomicU8::new(0) }; 256];
 
 /// Is the main key held? For the mouse (move, resize, Alt+wheel) and the
@@ -1320,6 +1322,16 @@ static BINDS_WRITE: Mutex<()> = Mutex::new(());
 const WM_KEYS_RESET: u32 = WM_USER + 9;
 /// The mask key: an unassigned VK. See `needs_mask`.
 const VK_MASK: VIRTUAL_KEY = VIRTUAL_KEY(0xE8);
+/// A mouse chord (drag, eaten wheel) ran under a passed-through Win / Alt
+/// main key: mask at that key's next up, not at the trigger. A mouse gesture
+/// presses no other key, so Win / Alt keeps auto-repeating through it, and a
+/// repeat after a trigger-time mask makes the release look lone again: Start
+/// (or the menu bar) opens (#35; AutoHotkey's #MenuMaskKey masks at the up
+/// for this reason). Set by `mask_main`, spent by keyboard_proc at a Win /
+/// Alt up (injected too), dropped there at a fresh Win / Alt press (its up
+/// was missed) and by `main_reset`. Both hooks run on one thread, so Relaxed
+/// is enough.
+static MASK_ON_UP: AtomicBool = AtomicBool::new(false);
 
 /// Fill the hook's table from compiled binds and switch the main key. Each
 /// slot goes straight from its old value to its new one (no zeroing pass),
@@ -1392,9 +1404,9 @@ unsafe fn live_mods(main_vk: u32, held: bool) -> u8 {
 /// Start, or the app its menu bar, as it saw a lone Win / Alt press. Any key
 /// event in between stops that, and VK 0xE8 is unassigned, so nothing acts
 /// on it (AutoHotkey's #MenuMaskKey; win-hotkeys, behind komorebi's whkd and
-/// Seelen, sends 0xE8 when it blocks a key). Sent at the trigger, as
-/// win-hotkeys does, which also covers a mouse drag. Reserved Left Alt never
-/// reaches apps, so its ALT needs none.
+/// Seelen, sends 0xE8 when it blocks a key). A keyboard chord sends it at the
+/// trigger, as win-hotkeys does; a mouse chord at the main key's up
+/// (`MASK_ON_UP`). Reserved Left Alt never reaches apps, so its ALT needs none.
 fn needs_mask(alt_reserved: bool, mods: u8) -> bool {
     mods & config::MOD_WIN != 0 || (mods & config::MOD_ALT != 0 && !alt_reserved)
 }
@@ -1405,21 +1417,23 @@ unsafe fn inject_mask() {
 }
 
 /// A drag or wheel took a click under a passed-through Win or Alt main key:
-/// mask it, as a bound chord does (`needs_mask`).
+/// mask its release (`MASK_ON_UP`, `needs_mask`). One store, no SendInput in
+/// the mouse hook.
 unsafe fn mask_main() {
     let mods = MAIN_BITS.load(Ordering::Relaxed);
     if MAIN_VK.load(Ordering::Relaxed) == 0 && needs_mask(false, mods) {
-        inject_mask();
+        MASK_ON_UP.store(true, Ordering::Relaxed);
     }
 }
 
-/// A wheel the hook eats (bar, launcher, power menu) under a held
-/// passed-through Win or Alt main key: mask it, as the strip wheel and a drag
-/// do, or the shell sees a lone Win press and release and opens Start (an
-/// app its menu bar). The MAIN_VK load first, so a reserved key (nothing to
-/// mask) costs no key-state reads.
+/// Any wheel under a held passed-through Win or Alt main key: mask its
+/// release, as a drag does, or the shell sees a lone Win press and release and
+/// opens Start (an app its menu bar). Eaten (bar, launcher, power menu) or
+/// passed to the app (a monitor not scrolling, #35): the release is the same.
+/// The MAIN_VK load first, so a reserved key (nothing to mask) costs no
+/// key-state reads.
 #[inline]
-unsafe fn mask_eaten_wheel() {
+unsafe fn mask_wheel() {
     if MAIN_VK.load(Ordering::Relaxed) == 0 && main_held() {
         mask_main();
     }
@@ -1519,6 +1533,11 @@ unsafe fn main_reset(why: &str) {
         log_info!("main key hold forgotten ({why})");
     }
     FAKE_ALT.store(false, Ordering::Relaxed);
+    // A missed Win / Alt up would mask the next lone Start tap. Not the only
+    // guard: the elevated-foreground reset runs only while a hold is tracked
+    // (never for a passed-through key's mouse chord), so keyboard_proc also
+    // drops the flag at the next fresh Win / Alt press.
+    MASK_ON_UP.store(false, Ordering::Relaxed);
     // The switcher commits on a Left Alt release that will never come.
     if ALT_SWITCHER_MODE.swap(false, Ordering::Relaxed) {
         let h = LAUNCHER_HWND.load(Ordering::Relaxed);
@@ -1556,15 +1575,32 @@ fn exit_restore_msg(msg: u32, wparam: usize) -> bool {
     msg == WM_CLOSE || (msg == WM_ENDSESSION && wparam != 0)
 }
 
+/// WM_CLOSE on a bar, tab bar, launcher, power menu or slide overlay: hand it
+/// to the marker, whose WM_CLOSE is the exit. `taskkill` without /F posts
+/// WM_CLOSE only to the process's visible top-level windows, never the hidden
+/// marker; DefWindowProc destroyed the bars and Astur ran on headless (a
+/// destroyed launcher / power menu also left its capture flag eating every
+/// key). All are WS_EX_NOACTIVATE, so Alt+F4 never reaches them.
+unsafe fn close_to_marker() -> LRESULT {
+    let marker = hwnd_from(MARKER_HWND.load(Ordering::Relaxed));
+    let _ = PostMessageW(marker, WM_CLOSE, WPARAM(0), LPARAM(0));
+    LRESULT(0)
+}
+
 /// WndProc for the marker window: nothing custom, the class brush paints it red.
 unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     if exit_restore_msg(msg, w.0) {
         // Graceful teardown paths for the no-console (windows-subsystem) build:
-        // Task Manager "End task" sends WM_CLOSE; a logoff/shutdown that goes
-        // ahead ends in WM_ENDSESSION(TRUE). Reveal every managed window and
-        // leave: the restore is one-way (EXITING). (Hard kills skip all of
-        // this; the crash-rescue file covers those on the next launch.)
-        restore_all_windows();
+        // WM_CLOSE from a script, or from `taskkill` without /F via the bars
+        // (`close_to_marker`: it posts only to visible windows, so every bar
+        // forwards one); a logoff/shutdown that goes ahead ends in
+        // WM_ENDSESSION(TRUE). Reveal every managed window and leave: the
+        // restore is one-way (EXITING, set only by the restore, so a repeat
+        // close skips it). (Hard kills skip all of this; the crash-rescue file
+        // covers those on the next launch.)
+        if !EXITING.load(Ordering::SeqCst) {
+            restore_all_windows();
+        }
         PostQuitMessage(0);
         return LRESULT(0);
     }
@@ -1712,6 +1748,22 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
         // Let our own synthetic events through — this is how Alt+Tab reaches the
         // system despite the physical Alt being blocked.
         let injected = (kb.flags.0 & LLKHF_INJECTED.0) != 0;
+        // A mouse chord's mask (MASK_ON_UP): sent before this Win / Alt up,
+        // which then passes. Injected ups count too: a remapped Win
+        // (PowerToys, AutoHotkey, On-Screen Keyboard) is injected, and Astur
+        // injects no Win / Alt while the flag can be set (send_chord's Win
+        // down is a fresh press). A fresh press (the hook runs before the
+        // async state updates, so a repeat reads down) drops a flag whose up
+        // the hook never saw (an elevated foreground took it). Idle cost: one
+        // load per key event.
+        if MASK_ON_UP.load(Ordering::Relaxed) && matches!(kb.vkCode, 0x5B | 0x5C | 0xA4 | 0xA5) {
+            if matches!(wparam.0 as u32, WM_KEYUP | WM_SYSKEYUP) {
+                MASK_ON_UP.store(false, Ordering::Relaxed);
+                inject_mask();
+            } else if !vk_down(VIRTUAL_KEY(kb.vkCode as u16)) {
+                MASK_ON_UP.store(false, Ordering::Relaxed);
+            }
+        }
         if !injected {
             let msg = wparam.0 as u32;
             let down = matches!(msg, WM_KEYDOWN | WM_SYSKEYDOWN);
@@ -1729,7 +1781,6 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             if up && (kb.vkCode as usize) < 256 {
                 PRESSED[kb.vkCode as usize].store(false, Ordering::Relaxed);
             }
-
             // System-menu capture mode: route nav keys to the power menu while open.
             if SYSMENU_OPEN.load(Ordering::Relaxed) {
                 let vk = kb.vkCode;
@@ -1755,6 +1806,18 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                             } else if vk == VK_LEFT.0 as u32 || vk == VK_BACK.0 as u32 {
                                 post(SM_BACK);
                             }
+                        }
+                    } else if up {
+                        // This return skips the hook tail's UNBOUND_KEY swap.
+                        if let Some(s) = UNBOUND_KEY.get(vk as usize) {
+                            s.store(0, Ordering::Relaxed);
+                        }
+                        if vk_down(VIRTUAL_KEY(vk as u16)) {
+                            // Held from before the popup opened: its down
+                            // reached the OS, so the up must pass or the key
+                            // sticks down. (The hook runs before the async
+                            // state updates.)
+                            return CallNextHookEx(None, code, wparam, lparam);
                         }
                     }
                     return LRESULT(1); // swallow all non-modifier keys while open
@@ -1813,6 +1876,14 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
                                     | ((caps as isize) << 33);
                                 post(LA_KEY, packed);
                             }
+                        }
+                    } else if up {
+                        // As in the power menu above.
+                        if let Some(s) = UNBOUND_KEY.get(vk as usize) {
+                            s.store(0, Ordering::Relaxed);
+                        }
+                        if vk_down(VIRTUAL_KEY(vk as u16)) {
+                            return CallNextHookEx(None, code, wparam, lparam);
                         }
                     }
                     return LRESULT(1); // swallow all non-modifier keys while open
@@ -2168,7 +2239,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
                 let step: isize = if delta > 0 { 1 } else { -1 };
                 let _ = PostMessageW(hwnd_from(hl), WM_LAUNCHER, WPARAM(LA_SCROLL), LPARAM(step));
-                mask_eaten_wheel();
+                mask_wheel();
                 return suppress;
             }
         }
@@ -2188,7 +2259,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                 let delta = ((info.mouseData >> 16) as u16 as i16) as isize;
                 let act = if delta > 0 { SM_UP } else { SM_DOWN };
                 let _ = PostMessageW(hwnd_from(hs), WM_SYSMENU, WPARAM(act), LPARAM(0));
-                mask_eaten_wheel();
+                mask_wheel();
                 return suppress;
             }
         }
@@ -2217,7 +2288,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
                     WPARAM(delta as usize),
                     LPARAM(pt.x as isize),
                 );
-                mask_eaten_wheel();
+                mask_wheel();
                 return suppress;
             }
         }
@@ -2260,6 +2331,9 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         return suppress;
     }
 
+    if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
+        mask_wheel();
+    }
     match msg {
         WM_LBUTTONDOWN if main_held() && !drag_active() => {
             // Sample the scale once per drag; the overlay sizes below read it.
@@ -4600,17 +4674,23 @@ impl Monitor {
     }
 }
 
-/// Give every monitor its layout: a monitor whose HMONITOR is in `keep` keeps
-/// the layout it has there (a runtime switch survives a display change); any
-/// other resolves from config by position (index 0 = monitor 1 = leftmost,
-/// the window-rule numbering). True when any monitor's layout changed.
+/// Give every monitor its layout from config by position (index 0 = monitor 1
+/// = leftmost, the window-rule numbering). The one exception: a monitor whose
+/// HMONITOR is in `keep` (the old set, on a display change) keeps a runtime
+/// switch, i.e. a layout that differs from config at its OLD index. A
+/// config-derived layout follows position, so a screen that shifts index
+/// (one plugged in to its left, screens back one by one after wake) picks up
+/// its new index's entry, as a restart would (#33). True when any monitor's
+/// layout changed.
+// ponytail: a switch to the layout config gives the new index reads as
+// config-derived on the next change; add a per-monitor flag if that matters.
 fn resolve_layouts(monitors: &mut [Monitor], cfg: &Config, keep: &[Monitor]) -> bool {
     let mut changed = false;
     for (i, m) in monitors.iter_mut().enumerate() {
-        let layout = keep
-            .iter()
-            .find(|k| k.hmon == m.hmon)
-            .map_or_else(|| cfg.layout_for_monitor(i), |k| k.layout.as_str());
+        let layout = match keep.iter().position(|k| k.hmon == m.hmon) {
+            Some(j) if keep[j].layout != cfg.layout_for_monitor(j) => keep[j].layout.as_str(),
+            _ => cfg.layout_for_monitor(i),
+        };
         if m.layout != layout {
             m.layout = layout.to_string();
             changed = true;
@@ -5175,6 +5255,59 @@ fn rect_covers_monitor(window: RECT, monitor: RECT) -> bool {
         && window.bottom >= monitor.bottom - FULLSCREEN_EDGE_TOLERANCE
 }
 
+/// #32: did the app itself put this tile into borderless fullscreen (F11, a
+/// video, a game) on `monitor`, its slot's monitor, or did the user or app
+/// maximise it after Astur placed it (`zoomed` with a `sent`)? Placement
+/// leaves such a tile alone: SetWindowPos into the tile is what dropped it
+/// out of fullscreen (and SW_RESTORE out of maximised) on every workspace
+/// reveal. A maximised window with no LAST_SENT entry (just adopted, after a
+/// restart) is tiled as before. Not a captioned one (Chrome/Edge F11 drop
+/// WS_CAPTION, players and games are WS_POPUP), not one Astur itself sized
+/// to the monitor (`sent`, LAST_SENT: a full-monitor tile with no gaps/bar,
+/// even if the app trimmed a pixel off it). No entry (just adopted, after a
+/// restart, after unpark_tracked) is not fullscreen: placing writes one, but
+/// a declined tile never would, so a full-monitor tile would stay full-monitor
+/// for good. Cost: an app already fullscreen when adopted is tiled once.
+fn is_app_fullscreen(
+    zoomed: bool,
+    style: u32,
+    live: RECT,
+    monitor: Option<RECT>,
+    sent: Option<RECT>,
+) -> bool {
+    if zoomed {
+        return sent.is_some();
+    }
+    style & WS_CAPTION.0 != WS_CAPTION.0
+        && monitor.is_some_and(|m| {
+            rect_covers_monitor(live, m) && sent.is_some_and(|s| !rect_covers_monitor(s, m))
+        })
+}
+
+/// Does placement leave tile `h` (slot `raw`) as the app has it
+/// (app_fullscreen)? Never on a slot that parks (scrolled off, an inactive
+/// tab): left full-monitor it would cover every other column.
+unsafe fn app_keeps(h: isize, raw: RECT, map: &PlaceMap) -> bool {
+    !map.parks(h, raw) && app_fullscreen(h, raw)
+}
+
+/// is_app_fullscreen for tile `h` whose layout slot is `slot`.
+unsafe fn app_fullscreen(h: isize, slot: RECT) -> bool {
+    let hwnd = hwnd_from(h);
+    let sent = LAST_SENT
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&h).copied());
+    is_app_fullscreen(
+        IsZoomed(hwnd).as_bool(),
+        GetWindowLongW(hwnd, GWL_STYLE) as u32,
+        window_rect_of(h),
+        nearest_monitor_info(&slot).map(|mi| mi.rcMonitor),
+        sent,
+    )
+}
+
 /// Monitor occupied by this visible maximized/fullscreen app, if any.
 unsafe fn fullscreen_monitor(hwnd: HWND) -> Option<isize> {
     if !is_app_surface(hwnd) || IsIconic(hwnd).as_bool() {
@@ -5614,11 +5747,15 @@ fn launch(cmd: &str) {
 /// cmd.exe used to open a console window of its own for the moment `start`
 /// ran, which could flash and be adopted then retiled away. `start` still
 /// gives a console target (cmd, pwsh) its own new console window.
+/// Elevated (`uac_elevated`): both routes go through Explorer instead
+/// (`shell_execute_unelevated`), so a command from a user-writable file
+/// never runs as admin; no fall-through, Explorer shows its own error.
 fn launch_now(cmd: &str) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let text = expand_env(cmd, |n| std::env::var(n).ok());
     let is_path = std::path::Path::new(&text).exists();
+    let elevated = unsafe { uac_elevated() };
     if let Some((file, args)) = split_command(&text, is_path) {
         // ShellExecuteEx searches the cwd first; `start` swaps a bare `cmd`
         // for COMSPEC so a cmd.exe there cannot run instead.
@@ -5628,6 +5765,10 @@ fn launch_now(cmd: &str) {
         } else {
             file
         };
+        if elevated {
+            unsafe { shell_execute_unelevated(file, args, SW_SHOWNORMAL.0) };
+            return;
+        }
         let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
         let (file, args) = (wide(file), wide(args));
         let mut info = SHELLEXECUTEINFOW {
@@ -5657,6 +5798,12 @@ fn launch_now(cmd: &str) {
             }
             Err(e) => log_debug!("launch via ShellExecuteEx failed ({cmd}): {e}; trying cmd"),
         }
+    }
+    if elevated {
+        // SW_HIDE: cmd's console stays hidden, as CREATE_NO_WINDOW keeps it.
+        let line = format!("/C {}", start_line(cmd, is_path));
+        unsafe { shell_execute_unelevated(&cmd_exe().to_string_lossy(), &line, SW_HIDE.0) };
+        return;
     }
     if let Err(e) = std::process::Command::new(cmd_exe())
         .arg("/C")
@@ -5986,6 +6133,80 @@ unsafe fn process_elevated() -> bool {
     token_elevated(GetCurrentProcess()).unwrap_or(false)
 }
 
+/// Elevated across UAC: Astur holds the full admin token while the user's
+/// ordinary programs run with its unelevated twin, and those can write
+/// astur.conf / navbar.conf and open a pipe that has no label. False with
+/// UAC off or for the built-in Administrator (TokenElevationTypeDefault:
+/// nothing on the desktop runs below Astur), and for a standard user.
+unsafe fn uac_elevated() -> bool {
+    use windows::Win32::Security::{
+        TokenElevationType, TokenElevationTypeFull, TOKEN_ELEVATION_TYPE,
+    };
+    static FULL: OnceLock<bool> = OnceLock::new();
+    *FULL.get_or_init(|| {
+        let mut token = HANDLE::default();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token).is_err() {
+            return false;
+        }
+        let mut kind = TOKEN_ELEVATION_TYPE(0);
+        let mut len = 0u32;
+        let ok = GetTokenInformation(
+            token,
+            TokenElevationType,
+            Some(&mut kind as *mut TOKEN_ELEVATION_TYPE as *mut c_void),
+            core::mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut len,
+        )
+        .is_ok();
+        let _ = CloseHandle(token);
+        ok && kind == TokenElevationTypeFull
+    })
+}
+
+/// Elevated Astur only (`uac_elevated`): start `file args` as the desktop
+/// user, unelevated, through Explorer's own IShellDispatch2::ShellExecute
+/// (Raymond Chen, The Old New Thing 2013-11-18). Launch commands come from
+/// files any unelevated program can write. Explorer not reachable: logged
+/// and not started; never falls back to starting it elevated. Needs COM
+/// (STA) on the calling thread.
+unsafe fn shell_execute_unelevated(file: &str, args: &str, show: i32) {
+    use windows::core::{Interface, BSTR, VARIANT};
+    use windows::Win32::System::Com::{IDispatch, IServiceProvider, CLSCTX_LOCAL_SERVER};
+    use windows::Win32::UI::Shell::{
+        IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows, SID_STopLevelBrowser,
+        ShellWindows, CSIDL_DESKTOP, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH,
+    };
+    let run = || -> windows::core::Result<()> {
+        let shells: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
+        let mut hwnd = 0i32;
+        let desktop = shells.FindWindowSW(
+            &VARIANT::from(CSIDL_DESKTOP as i32),
+            &VARIANT::default(),
+            SWC_DESKTOP,
+            &mut hwnd,
+            SWFO_NEEDDISPATCH,
+        )?;
+        let browser: IShellBrowser = desktop
+            .cast::<IServiceProvider>()?
+            .QueryService(&SID_STopLevelBrowser)?;
+        let view: IShellFolderViewDual = browser
+            .QueryActiveShellView()?
+            .GetItemObject::<IDispatch>(SVGIO_BACKGROUND)?
+            .cast()?;
+        let shell: IShellDispatch2 = view.Application()?.cast()?;
+        shell.ShellExecute(
+            &BSTR::from(file),
+            &VARIANT::from(args),
+            &VARIANT::from(""),
+            &VARIANT::from(""),
+            &VARIANT::from(show),
+        )
+    };
+    if let Err(e) = run() {
+        log_error!("elevated Astur: not started, Explorer unreachable ({file}): {e}");
+    }
+}
+
 /// Whether `process`'s token is elevated. None if the token can't be read.
 unsafe fn token_elevated(process: HANDLE) -> Option<bool> {
     let mut token = HANDLE::default();
@@ -6085,6 +6306,18 @@ unsafe fn integrity_above_own(hwnd: HWND) -> bool {
     integrity_out_of_reach(theirs, own)
 }
 
+/// The IPC pipe's SDDL. D: = DACL, A = allow, GA = generic all, for `sid`
+/// only. Elevated (`uac_elevated`), S:(ML;;NWNR;;;HI) labels it high: no
+/// label counts as medium, and the user's unelevated programs carry the
+/// same SID, so they could send any verb (`launch`). NW blocks their writes,
+/// NR their read-only connect (which would hold the one IPC thread in
+/// ReadFile). A HI label is only legal from a creator at high or above,
+/// hence the gate.
+fn pipe_sddl(sid: &str, elevated: bool) -> String {
+    let label = if elevated { "S:(ML;;NWNR;;;HI)" } else { "" };
+    format!("D:(A;;GA;;;{sid}){label}")
+}
+
 /// A security descriptor granting full access to the current user's SID and
 /// nobody else, for the IPC pipe. Leaked deliberately: it lives for the process
 /// lifetime and is handed to CreateNamedPipeW on every accept loop iteration.
@@ -6127,8 +6360,7 @@ unsafe fn owner_only_security_descriptor() -> Option<*mut c_void> {
         let Some(sid) = sid_string.filter(|s| !s.is_empty()) else {
             return 0;
         };
-        // D: = DACL, A = allow, GA = generic all, for that SID only.
-        let sddl: Vec<u16> = format!("D:(A;;GA;;;{sid})")
+        let sddl: Vec<u16> = pipe_sddl(&sid, uac_elevated())
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -6268,9 +6500,14 @@ fn ipc_worker() {
                 lpSecurityDescriptor: sd,
                 bInheritHandle: BOOL(0),
             });
+            // FIRST_PIPE_INSTANCE: pipe names are machine-wide. If another
+            // process made this name first, a plain create joins its pipe
+            // under its descriptor; this fails instead and retries in 1 s.
+            // Each loop closes its instance before the next create, so every
+            // create here is a first instance.
             let pipe = CreateNamedPipeW(
                 PCWSTR(wide.as_ptr()),
-                PIPE_ACCESS_DUPLEX,
+                PIPE_ACCESS_DUPLEX | FILE_FLAG_FIRST_PIPE_INSTANCE,
                 PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
                 4096,
@@ -6667,7 +6904,9 @@ unsafe extern "system" fn console_handler(_ctrl_type: u32) -> BOOL {
 /// (border correction, peek/park) so the visible edges sit flush.
 /// (Named `animate_to` for historical reasons; placement is now always instant.)
 unsafe fn animate_to(hwnd: HWND, target: RECT, map: &PlaceMap) {
-    if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+    if IsIconic(hwnd).as_bool()
+        || IsZoomed(hwnd).as_bool() && !app_keeps(hwnd.0 as isize, target, map)
+    {
         let _ = ShowWindow(hwnd, SW_RESTORE);
     }
     place_slot(hwnd.0 as isize, target, map);
@@ -6739,9 +6978,22 @@ fn is_warm(h: isize) -> bool {
 /// Send tile `h` to its layout slot `raw` through `map` (call it after any
 /// SW_RESTORE, see PlaceMap::target) and remember the slot (LAST_SLOT). The
 /// one placement step of every path that places tiles. Returns the rect sent.
-/// A visible tile it puts on screen becomes warm (WARM).
+/// A visible tile it puts on screen becomes warm (WARM). Declines a tile the
+/// app made fullscreen or the user maximised (#32, app_keeps): that one
+/// keeps its rect, which it returns.
 unsafe fn place_slot(h: isize, raw: RECT, map: &PlaceMap) -> RECT {
+    if app_keeps(h, raw, map) {
+        return window_rect_of(h);
+    }
     let to = map.target(h, raw);
+    // Debug (#31): a column that would peek on a lone monitor but parks,
+    // because its off-screen part lands on another monitor. The `monitor`
+    // lines (log_monitors) say which.
+    if let Some(own) = map.own.filter(|_| log_on(LOG_DEBUG)) {
+        if map.parks(h, raw) && !map.hidden.contains(&h) && classify(raw, own, &[]) == Vis::Peek {
+            log_debug!("strip bleed-park {h:#x} raw={raw:?} -> {to:?}");
+        }
+    }
     LAST_SLOT
         .lock()
         .unwrap()
@@ -7235,9 +7487,12 @@ unsafe fn motion_tiles(
             cold.push(h);
         }
         let slot_same = slot.is_some_and(|s| glide_still(&s, &raw));
-        // A maximized tile is restored into its slot (animate_to), whatever
-        // its frame now.
-        let to = if IsZoomed(hwnd).as_bool() {
+        // An app-fullscreen or user-maximised tile stays put unless it parks
+        // (place_slot declines it, #32). A maximized one Astur never placed
+        // is restored into its slot (animate_to), whatever its frame now.
+        let to = if app_keeps(h, raw, map) {
+            frame
+        } else if IsZoomed(hwnd).as_bool() {
             raw
         } else {
             motion_end(raw, slot, frame)
@@ -7424,7 +7679,7 @@ unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
     SUPPRESS.store(true, Ordering::Relaxed);
     for (h, target) in rects {
         let hwnd = hwnd_from(h);
-        if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() {
+        if IsIconic(hwnd).as_bool() || IsZoomed(hwnd).as_bool() && !app_keeps(h, target, &map) {
             let _ = ShowWindow(hwnd, SW_RESTORE);
         }
         let to = place_slot(h, target, &map);
@@ -7459,8 +7714,8 @@ fn move_needs_source_retile(to_mi: usize, from_mi: usize) -> bool {
 /// SUPPRESS: a SetWindowPos without SWP_SHOWWINDOW on a hidden window raises
 /// no show or hide event. The border correction reads DWM frame bounds, which
 /// stay valid while hidden (measured: 12/12 windows, WINQUERY-18). Maximised
-/// windows are skipped, since SW_RESTORE would show them; the reveal fixes
-/// those. Minimised ones are not in the layout at all.
+/// windows are skipped, since SW_RESTORE would show them; the reveal tiles
+/// those Astur never placed and leaves a user-maximised one maximised. Minimised ones are not in the layout at all.
 unsafe fn place_hidden_workspace(mgr: &Manager, mi: usize, wi: usize) {
     if !mgr.tiling || mgr.monitors.get(mi).is_none_or(|m| m.active == wi) {
         return;
@@ -7554,6 +7809,14 @@ unsafe fn style_window(hwnd: HWND, focused: bool, cfg: &Config) {
         let was_layered = ex & WS_EX_LAYERED.0 != 0;
         if !was_layered {
             SetWindowLongW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED.0) as i32);
+            // Debug (#31): which windows Astur layers, and whether one
+            // presents without a redirection bitmap (DirectComposition).
+            log_debug!(
+                "layered {:#x} class='{}' ex={ex:#x} noredir={}",
+                hwnd.0 as isize,
+                window_class(hwnd),
+                ex & windows::Win32::UI::WindowsAndMessaging::WS_EX_NOREDIRECTIONBITMAP.0 != 0
+            );
         }
         // Skip a SetLayeredWindowAttributes that would re-send the alpha the
         // window already has (SWITCH-18): every switch restyles each incoming
@@ -7922,8 +8185,9 @@ unsafe fn active_window_rects(mgr: &Manager, mi: usize) -> Vec<(isize, RECT)> {
             items.push((h, r));
         }
     }
-    // A hidden window still has a rect: Alt+arrow picked the scratchpad.
-    items.retain(|&(h, _)| !scratch_hidden(h));
+    // A hidden window still has a rect: Alt+arrow picked the scratchpad. A
+    // minimised one sits at about (-32000,-32000), a Left/Up winner at an edge.
+    items.retain(|&(h, _)| !unfocusable(h));
     items
 }
 
@@ -11330,6 +11594,9 @@ unsafe extern "system" fn slide_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM)
     if msg == WM_ERASEBKGND {
         return LRESULT(1);
     }
+    if msg == WM_CLOSE {
+        return close_to_marker(); // visible mid-slide; see close_to_marker
+    }
     DefWindowProcW(h, msg, w, l)
 }
 
@@ -11819,6 +12086,7 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         }
     }
     normalize_visibility(mgr);
+    log_monitors(mgr);
     // New view widths, and new full rects: the retile re-parks against the
     // new monitor set (hidden workspaces re-park when next shown).
     ensure_visible_all(mgr);
@@ -11901,8 +12169,35 @@ unsafe fn refresh_work_areas(mgr: &mut Manager) {
     cold_clear();
     reserve_bar(&mut mgr.monitors, &mgr.cfg);
     wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
+    log_monitors(mgr);
     ensure_visible_all(mgr);
     retile_all(mgr);
+}
+
+/// Debug (#31): the monitor set placement runs against, one line each, so a
+/// log can be read against `strip bleed-park` / `add` lines. Startup and
+/// after every display or work-area change.
+unsafe fn log_monitors(mgr: &Manager) {
+    if !log_on(LOG_DEBUG) {
+        return;
+    }
+    let mode = if mgr.cfg.per_monitor {
+        "per_monitor"
+    } else {
+        "shared"
+    };
+    for (i, m) in mgr.monitors.iter().enumerate() {
+        log_debug!(
+            "monitor {i}: hmon={:#x} full={:?} work={:?} dpi={} layout={} active={} primary={} workspace_mode={mode}",
+            m.hmon,
+            m.full,
+            m.work_area,
+            monitor_dpi(m.hmon),
+            m.layout,
+            m.active,
+            i == mgr.primary
+        );
+    }
 }
 
 fn focused_index(ws: &Workspace) -> Option<usize> {
@@ -11923,28 +12218,45 @@ fn scratch_hidden(h: isize) -> bool {
         && !unsafe { IsWindowVisible(hwnd_from(h)) }.as_bool()
 }
 
+/// `windows` minus the toggled-away scratchpad: what the bar's workspace
+/// pills and YASB count as occupied (#22). Exit restore and rescue still
+/// walk `windows`.
+fn shown_windows(ws: &Workspace) -> impl Iterator<Item = isize> + '_ {
+    ws.windows.iter().copied().filter(|&h| !scratch_hidden(h))
+}
+
+/// Never a focus pick: the toggled-away scratchpad, or a minimised window. A
+/// minimised one stays in `windows` (out of the layout only), and
+/// focus_window would make it active still minimised, so keys go nowhere.
+/// Not folded into scratch_hidden: Cmd::Focused would then toggle the
+/// scratchpad for any minimised window.
+fn unfocusable(h: isize) -> bool {
+    scratch_hidden(h) || unsafe { IsIconic(hwnd_from(h)) }.as_bool()
+}
+
 /// Where focus lands on `ws`: `focused`, else its first window, never the
-/// toggled-away scratchpad. 0 when nothing is left.
+/// toggled-away scratchpad or a minimised window. 0 when nothing is left.
 fn focus_target(ws: &Workspace) -> isize {
-    if ws.focused != 0 && !scratch_hidden(ws.focused) {
+    if ws.focused != 0 && !unfocusable(ws.focused) {
         return ws.focused;
     }
     ws.windows
         .iter()
         .copied()
-        .find(|&w| !scratch_hidden(w))
+        .find(|&w| !unfocusable(w))
         .unwrap_or(0)
 }
 
 /// Alt+J / Alt+K: the window `d` (+1 / -1) steps from the focused one in
-/// `windows` order, wrapping, past the toggled-away scratchpad. Can come back
-/// to the focused window itself; None only when nothing else is left.
+/// `windows` order, wrapping, past the toggled-away scratchpad and minimised
+/// windows. Can come back to the focused window itself; None only when
+/// nothing else is left.
 fn focus_step(ws: &Workspace, d: i32) -> Option<isize> {
     let idx = focused_index(ws)? as i32;
     let len = ws.windows.len() as i32;
     (1..=len)
         .map(|k| ws.windows[(idx + d * k).rem_euclid(len) as usize])
-        .find(|&w| !scratch_hidden(w))
+        .find(|&w| !unfocusable(w))
 }
 
 unsafe fn toggle_scratchpad(mgr: &mut Manager) {
@@ -11971,9 +12283,12 @@ unsafe fn toggle_scratchpad(mgr: &mut Manager) {
         if let Some((mi, wi)) = mgr.locate(h) {
             let ws = &mut mgr.monitors[mi].workspaces[wi];
             // A scratchpad tiled by hand left its tile empty while away; the
-            // show path floats it again anyway.
+            // show path floats it again anyway. Floats are never placed, so a
+            // parked one comes back on screen now (hidden: the move shows
+            // nothing), or an app showing it itself shows it off every monitor.
             if !ws.floating.contains(&h) {
                 ws.floating.push(h);
+                unpark_tracked(h);
             }
             if ws.focused == h {
                 ws.focused = ws.windows.iter().copied().find(|x| *x != h).unwrap_or(0);
@@ -12013,6 +12328,35 @@ unsafe fn toggle_scratchpad(mgr: &mut Manager) {
     target.focused = h;
     SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
     unmark_hidden_by_us(h);
+    // It is a float now and floats are never placed: a hand-tiled scratchpad
+    // hidden while its scrolling column was parked (or left parked on a
+    // workspace switched away from) would show at the park spot, off every
+    // monitor. Moved while still hidden; a no-op when already on screen.
+    unpark_tracked(h);
+    // Then onto the focused monitor, where the model now tracks it: one
+    // hidden on (or unparked onto) another monitor would show there. Posted
+    // like unpark's move, so it lands after it.
+    let hwnd = hwnd_from(h);
+    let r = window_rect_of(h);
+    if MonitorFromRect(&r, MONITOR_DEFAULTTONULL).0 as isize != mgr.monitors[to_mi].hmon
+        && !IsIconic(hwnd).as_bool()
+        && !IsZoomed(hwnd).as_bool()
+    {
+        let to = clamp_into(r, mgr.monitors[to_mi].work_area);
+        let _ = SetWindowPos(
+            hwnd,
+            None,
+            to.left,
+            to.top,
+            to.right - to.left,
+            to.bottom - to.top,
+            foreign_swp_flags(
+                SWP_NOACTIVATE | SWP_NOZORDER,
+                ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+            ),
+        );
+        last_sent_forget(h);
+    }
     SUPPRESS.store(true, Ordering::Relaxed);
     let _ = ShowWindow(hwnd_from(h), SW_SHOWNA);
     SUPPRESS.store(false, Ordering::Relaxed);
@@ -12298,7 +12642,10 @@ unsafe fn show_workspace(mgr: &mut Manager, mi: usize, ws: usize) {
         // Shows the workspace, retiles, focuses + warps the cursor.
         switch_monitor_workspace(mgr, mi, ws);
     } else {
-        let f = mgr.monitors[mi].workspaces[ws].focused;
+        // Resolved as a real switch does: never a minimised window.
+        let w = &mut mgr.monitors[mi].workspaces[ws];
+        let f = focus_target(w);
+        w.focused = f;
         if f != 0 {
             focus_window(f);
             if mgr.cfg.cursor_follows_focus {
@@ -12388,9 +12735,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 None if is_manageable(hwnd_from(h)) => {
                     let hwnd = hwnd_from(h);
                     let rule = match_window_rule(hwnd);
-                    let pending = std::mem::replace(&mut mgr.pending_launch_mon, 0);
+                    let launch_hmon = std::mem::replace(&mut mgr.pending_launch_mon, 0);
                     let mut mi = mgr
-                        .mon_by_hmon(pending)
+                        .mon_by_hmon(launch_hmon)
                         .unwrap_or_else(|| monitor_index_for_window(mgr, hwnd));
                     let mut wi = mgr.monitors[mi].active;
                     if let Some(rule) = rule {
@@ -12444,6 +12791,13 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         && GetForegroundWindow() != hwnd;
                     let prev_focus = mgr.monitors[mi].workspaces[wi].focused;
                     mgr.insert_window(h, mi, wi, None, floating);
+                    // Debug (#31): where a new window went, and why.
+                    log_debug!(
+                        "add {h:#x} class='{}' rect={:?} -> mon {mi} ws {wi} launch_mon={launch_hmon:#x} rule={} scratch={scratch} floating={floating}",
+                        window_class(hwnd),
+                        window_rect_of(h),
+                        rule.is_some()
+                    );
                     if quiet && prev_focus != 0 {
                         mgr.monitors[mi].workspaces[wi].focused = prev_focus;
                         if !floating && mgr.monitors[mi].layout == "scrolling" {
@@ -12662,7 +13016,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     if local != mgr.monitors[mi].active {
                         switch_monitor_workspace(mgr, mi, local);
                     } else {
-                        let f = mgr.monitors[mi].workspaces[local].focused;
+                        let w = &mut mgr.monitors[mi].workspaces[local];
+                        let f = focus_target(w);
+                        w.focused = f;
                         if f != 0 {
                             focus_window(f);
                         }
@@ -12712,6 +13068,25 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             } else {
                 config::reload_groups(&mgr.cfg, &cfg)
             };
+            // Scratchpad turned off, or switched to another app, while toggled
+            // away: show it now, while the old cfg still allows the toggle.
+            // Off, nothing could show it again until Quit (#22). From here it
+            // is a plain floating window.
+            let new_app = cfg.scratchpad_command != mgr.cfg.scratchpad_command
+                || cfg.scratchpad_class != mgr.cfg.scratchpad_class;
+            if mgr.cfg.scratchpad_enabled
+                && (!cfg.scratchpad_enabled || new_app)
+                && scratch_hidden(SCRATCHPAD_HWND.load(Ordering::Relaxed))
+            {
+                toggle_scratchpad(mgr);
+            }
+            // Another app: let the old window go, so the next toggle starts
+            // the new one instead of toggling the old.
+            if new_app {
+                SCRATCHPAD_HWND.store(0, Ordering::Relaxed);
+                SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
+                SCRATCHPAD_PENDING_AT.store(0, Ordering::Relaxed);
+            }
             mgr.cfg = *cfg;
             // The file wins over runtime layout switches on EVERY reload, as
             // it did while the layout was global (the diff above saw the
@@ -12935,7 +13310,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 retile_all(mgr);
                 let mi = mgr.focused_mon;
                 let a = mgr.monitors[mi].active;
-                let f = mgr.monitors[mi].workspaces[a].focused;
+                let w = &mut mgr.monitors[mi].workspaces[a];
+                let f = focus_target(w);
+                w.focused = f;
                 if f != 0 {
                     focus_window(f);
                 }
@@ -13357,8 +13734,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // another monitor, a move, or a focus step stopped at the strip
             // end, would leave the real focus behind while focused_mon (what
             // the next key, close included, acts on) points here: focus here.
+            // Never a minimised `focused` (a carry there moved nothing).
             let h = mgr.focused().2;
-            if other && h != 0 && (carry || h == before) {
+            if other && h != 0 && !unfocusable(h) && (carry || h == before) {
                 focus_window(h);
             }
         }
@@ -14983,7 +15361,7 @@ unsafe fn update_bar(mgr: &Manager) {
             let occ = m
                 .workspaces
                 .get(local)
-                .is_some_and(|ws| !ws.windows.is_empty());
+                .is_some_and(|ws| shown_windows(ws).next().is_some());
             if !hide_empty || occ || local == m.active {
                 slots.push(local);
             }
@@ -15026,7 +15404,7 @@ unsafe fn update_bar(mgr: &Manager) {
                             if icons.len() == 3 {
                                 break;
                             }
-                            if IsWindow(hwnd_from(h)).as_bool() {
+                            if IsWindow(hwnd_from(h)).as_bool() && !scratch_hidden(h) {
                                 let icon = bar_app_icon(hwnd_from(h), px);
                                 if !icons.contains(&icon) {
                                     icons.push(icon);
@@ -15043,7 +15421,7 @@ unsafe fn update_bar(mgr: &Manager) {
         for (pill, &local) in slots.iter().enumerate().take(64) {
             if m.workspaces
                 .get(local)
-                .is_some_and(|ws| !ws.windows.is_empty())
+                .is_some_and(|ws| shown_windows(ws).next().is_some())
             {
                 occupied |= 1 << pill;
             }
@@ -17131,6 +17509,7 @@ unsafe extern "system" fn bar_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             paint_bar(h);
             LRESULT(0)
         }
+        WM_CLOSE => close_to_marker(),
         WM_PILL_ANIM => {
             let hmon = GetWindowLongPtrW(h, GWLP_USERDATA);
             pill_anim_set(hmon, w.0 as i32, l.0 as i32);
@@ -17930,6 +18309,7 @@ unsafe extern "system" fn tab_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM) -
             paint_tab_bar(h);
             LRESULT(0)
         }
+        WM_CLOSE => close_to_marker(),
         // Paint is double-buffered; a background erase would only flicker.
         WM_ERASEBKGND => LRESULT(1),
         WM_LBUTTONDOWN => {
@@ -18068,10 +18448,15 @@ fn apply_bar_statics(cfg: &Config) {
     DISK_ON.store(listed("disk"), Ordering::Relaxed);
     KBD_ON.store(listed("keyboard"), Ordering::Relaxed);
     *DISK_ROOT.lock().unwrap() = cfg.bar_disk_drive.clone();
-    CUSTOM_ON.store(
-        listed("custom") && !cfg.bar_custom_command.trim().is_empty(),
-        Ordering::Relaxed,
-    );
+    let custom = listed("custom") && !cfg.bar_custom_command.trim().is_empty();
+    // custom_command runs on a timer with no click: run as admin, writing
+    // navbar.conf would be admin code execution for any unelevated program.
+    // It needs stdout, which the unelevated route (Explorer) cannot return.
+    let refused = custom && unsafe { uac_elevated() };
+    if refused {
+        log_info!("custom widget off: Astur runs as administrator and custom_command comes from a file any unelevated program can write");
+    }
+    CUSTOM_ON.store(custom && !refused, Ordering::Relaxed);
     *CUSTOM_CMD.lock().unwrap() = cfg.bar_custom_command.clone();
     CUSTOM_EVERY.store(cfg.bar_custom_interval, Ordering::Relaxed);
     BAR_MON_MASK.store(cfg.bar_monitor_mask(), Ordering::Relaxed);
@@ -18431,6 +18816,7 @@ fn manager_loop(cfg: Config) {
             cfg,
             pending_launch_mon: 0,
         };
+        log_monitors(&m);
         assign_existing_windows(&mut m);
         // Into MANAGED before the startup placement, not after it: an app
         // hiding one of these windows meanwhile queues RemoveHidden only once
@@ -21623,6 +22009,12 @@ unsafe fn launcher_launch(path: &str) {
         return;
     }
     let path = path.strip_prefix("url:").unwrap_or(path);
+    // Elevated: apps, files, web search and power-menu commands start
+    // unelevated through Explorer (config text, see launch_now).
+    if uac_elevated() {
+        shell_execute_unelevated(path, "", SW_SHOW.0);
+        return;
+    }
     let mut wpath: Vec<u16> = path.encode_utf16().collect();
     wpath.push(0);
     let mut op: Vec<u16> = "open".encode_utf16().collect();
@@ -22931,6 +23323,8 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        // Destroyed, it would leave LAUNCHER_OPEN capturing every key.
+        WM_CLOSE => close_to_marker(),
         _ => DefWindowProcW(h, msg, w, l),
     }
 }
@@ -23807,6 +24201,8 @@ unsafe extern "system" fn sysmenu_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARA
             LRESULT(0)
         }
         WM_ERASEBKGND => LRESULT(1),
+        // Destroyed, it would leave SYSMENU_OPEN capturing every key.
+        WM_CLOSE => close_to_marker(),
         _ => DefWindowProcW(h, msg, w, l),
     }
 }
@@ -24810,7 +25206,7 @@ fn main() {
 
         // System tray icon — the control surface for Astur Full (no console in
         // release): left/double-click opens Settings, right-click menu = Settings/Quit.
-        let _tray = setup_tray(hinst);
+        let tray = setup_tray(hinst);
 
         // Focus-follows-mouse poll loop (no-op unless enabled in config).
         spawn_named("focus-follow", focus_follow_worker);
@@ -24917,6 +25313,12 @@ fn main() {
         // Every quit that ends this loop already did this in its exit restore
         // (unhook_input); a no-op then.
         unhook_input();
+        // A marker exit (taskkill, a script's WM_CLOSE) left the icon until
+        // hovered; tray Quit already removed it, a repeat is a no-op. The exit
+        // watchdog bounds it like everything else here.
+        if let Some(t) = tray {
+            tray_remove(t);
+        }
         let _ = windows::Win32::Media::timeEndPeriod(1);
     }
 }
@@ -24961,14 +25363,56 @@ mod tests {
         ws.focused = a;
         assert_eq!(focus_step(&ws, 1), Some(b));
         assert_eq!(focus_step(&ws, -1), Some(b));
+        // Bar pills and YASB do not count it as occupying its workspace.
+        assert_eq!(shown_windows(&ws).collect::<Vec<_>>(), vec![a, b]);
         ws.focused = s; // stale
         assert_eq!(focus_target(&ws), a);
         ws.windows = vec![s];
         assert_eq!(focus_step(&ws, 1), None);
         assert_eq!(focus_target(&ws), 0);
+        assert_eq!(shown_windows(&ws).next(), None); // pill reads empty
         SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
         assert_eq!(focus_target(&ws), s); // toggled back: an ordinary window
+        assert_eq!(shown_windows(&ws).next(), Some(s));
         SCRATCHPAD_HWND.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn focus_never_lands_on_a_minimised_window() {
+        // Never shown, so nothing appears on screen; WS_MINIMIZE makes it iconic.
+        let m = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP | windows::Win32::UI::WindowsAndMessaging::WS_MINIMIZE,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+        }
+        .unwrap();
+        assert!(unsafe { IsIconic(m) }.as_bool());
+        let (a, m, b) = (0x5C_0B01, m.0 as isize, 0x5C_0B05);
+        let mut ws = Workspace::new();
+        ws.windows = vec![a, m, b];
+        ws.focused = a;
+        assert_eq!(focus_step(&ws, 1), Some(b));
+        assert_eq!(focus_step(&ws, -1), Some(b));
+        ws.focused = m; // minimised while focused
+        assert_eq!(focus_target(&ws), a);
+        assert_eq!(focus_step(&ws, 1), Some(b));
+        ws.windows = vec![m];
+        assert_eq!(focus_step(&ws, 1), None);
+        assert_eq!(focus_target(&ws), 0);
+        unsafe {
+            let _ = DestroyWindow(hwnd_from(m));
+        }
     }
 
     #[test]
@@ -25118,6 +25562,29 @@ mod tests {
         // Our own level unreadable: the check is off, as before it existed.
         assert!(!integrity_out_of_reach(Some(system), u32::MAX));
         assert!(!integrity_out_of_reach(None, u32::MAX));
+    }
+
+    /// Both IPC pipe SDDLs parse: a typo would make owner_only_security_descriptor
+    /// fall back to the default DACL silently. Only the elevated one is labelled.
+    #[test]
+    fn ipc_pipe_sddl_parses_with_and_without_the_high_label() {
+        let sid = "S-1-5-21-1004336348-1177238915-682003330-1001";
+        for elevated in [false, true] {
+            let sddl = pipe_sddl(sid, elevated);
+            assert_eq!(sddl.contains("S:(ML;;NWNR;;;HI)"), elevated, "{sddl}");
+            let wide: Vec<u16> = sddl.encode_utf16().chain([0]).collect();
+            let mut psd = PSECURITY_DESCRIPTOR::default();
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    PCWSTR(wide.as_ptr()),
+                    SDDL_REVISION_1,
+                    &mut psd,
+                    None,
+                )
+                .unwrap_or_else(|e| panic!("{sddl}: {e}"));
+                let _ = LocalFree(HLOCAL(psd.0));
+            }
+        }
     }
 
     #[test]
@@ -26756,6 +27223,62 @@ mod tests {
         assert!(!rect_covers_monitor(taskbar_reserved, monitor));
     }
 
+    #[test]
+    fn placement_leaves_only_an_app_fullscreen_tile_alone() {
+        // #32: F11 browser on its slot's monitor, Astur last sent it the tile.
+        let mon = Some(rc(0, 0, 1920, 1080));
+        let full = rc(0, 0, 1920, 1080);
+        let tile = Some(rc(8, 40, 960, 1072));
+        let popup = 0x8000_0000; // WS_POPUP, no caption
+        let caption = WS_CAPTION.0 | 0x0004_0000; // + WS_THICKFRAME
+        assert!(is_app_fullscreen(false, popup, full, mon, tile));
+        // No LAST_SENT entry: placed, or a declined tile never gets one.
+        assert!(!is_app_fullscreen(false, popup, full, mon, None));
+        // Maximised after Astur placed it: left maximised, whatever its rect.
+        assert!(is_app_fullscreen(
+            true,
+            caption,
+            rc(0, 0, 1920, 1040),
+            mon,
+            tile
+        ));
+        // Maximised and never placed (adopted, after a restart): tiled.
+        assert!(!is_app_fullscreen(
+            true,
+            caption,
+            rc(0, 0, 1920, 1040),
+            mon,
+            None
+        ));
+        // Captioned, or not covering its slot's monitor: placed.
+        assert!(!is_app_fullscreen(false, caption, full, mon, tile));
+        assert!(!is_app_fullscreen(
+            false,
+            popup,
+            rc(8, 40, 960, 1072),
+            mon,
+            tile
+        ));
+        assert!(!is_app_fullscreen(
+            false,
+            popup,
+            full,
+            Some(rc(1920, 0, 3840, 1080)),
+            tile
+        ));
+        assert!(!is_app_fullscreen(false, popup, full, None, tile));
+        // Astur itself sized it to the monitor (no gaps, no bar): still a tile.
+        assert!(!is_app_fullscreen(false, popup, full, mon, Some(full)));
+        // ... and the app trimmed a pixel off it.
+        assert!(!is_app_fullscreen(
+            false,
+            popup,
+            rc(0, 0, 1919, 1080),
+            mon,
+            Some(full)
+        ));
+    }
+
     // ---- launcher file search (batch 9, LAUNCH-10 / LAUNCH-11) ------------------
 
     #[test]
@@ -27975,9 +28498,9 @@ mod tests {
         mgr.monitors[1].layout = "grid".into();
         assert!(resolve_layouts(&mut mgr.monitors, &cfg, &[]));
         assert_eq!(mgr.monitors[1].layout, "master");
-        // A display change: a new monitor appears leftmost. Survivors keep
-        // their current layout (runtime switch included) by HMONITOR; the new
-        // one resolves from config by its position.
+        // A display change: a new monitor appears leftmost. A runtime switch
+        // stays on its screen (by HMONITOR); config-derived layouts follow
+        // position, so the old monitor 1 picks up monitor 2's entry (#33).
         mgr.monitors[1].layout = "grid".into();
         let mut fresh = vec![
             Monitor::new(0x9000, RECT::default(), 1),
@@ -27986,10 +28509,18 @@ mod tests {
             Monitor::new(0x1002, RECT::default(), 1),
         ];
         resolve_layouts(&mut fresh, &cfg, &mgr.monitors);
-        assert_eq!(
-            layouts(&fresh),
-            ["scrolling", "scrolling", "grid", "master"]
-        );
+        assert_eq!(layouts(&fresh), ["scrolling", "master", "grid", "master"]);
+        // Late detection: Astur started with one screen, a second shows up to
+        // its left. Both resolve to what a restart would give.
+        cfg.monitor_layouts = vec!["scrolling".into(), "grid".into()];
+        let mut one = vec![Monitor::new(0x1000, RECT::default(), 1)];
+        resolve_layouts(&mut one, &cfg, &[]);
+        let mut two = vec![
+            Monitor::new(0x9000, RECT::default(), 1),
+            Monitor::new(0x1000, RECT::default(), 1),
+        ];
+        resolve_layouts(&mut two, &cfg, &one);
+        assert_eq!(layouts(&two), ["scrolling", "grid"]);
     }
 
     #[test]
