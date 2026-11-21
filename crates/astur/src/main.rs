@@ -6169,8 +6169,9 @@ unsafe fn uac_elevated() -> bool {
 /// user, unelevated, through Explorer's own IShellDispatch2::ShellExecute
 /// (Raymond Chen, The Old New Thing 2013-11-18). Launch commands come from
 /// files any unelevated program can write. Explorer not reachable: logged
-/// and not started; never falls back to starting it elevated. Needs COM
-/// (STA) on the calling thread.
+/// and not started; never falls back to starting it elevated. It runs in
+/// Astur's working folder, as the unelevated route's child does (a relative
+/// tools path), not Explorer's. Needs COM (STA) on the calling thread.
 unsafe fn shell_execute_unelevated(file: &str, args: &str, show: i32) {
     use windows::core::{Interface, BSTR, VARIANT};
     use windows::Win32::System::Com::{IDispatch, IServiceProvider, CLSCTX_LOCAL_SERVER};
@@ -6178,6 +6179,7 @@ unsafe fn shell_execute_unelevated(file: &str, args: &str, show: i32) {
         IShellBrowser, IShellDispatch2, IShellFolderViewDual, IShellWindows, SID_STopLevelBrowser,
         ShellWindows, CSIDL_DESKTOP, SVGIO_BACKGROUND, SWC_DESKTOP, SWFO_NEEDDISPATCH,
     };
+    let dir = std::env::current_dir().map_or_else(|_| String::new(), |d| d.display().to_string());
     let run = || -> windows::core::Result<()> {
         let shells: IShellWindows = CoCreateInstance(&ShellWindows, None, CLSCTX_LOCAL_SERVER)?;
         let mut hwnd = 0i32;
@@ -6199,7 +6201,7 @@ unsafe fn shell_execute_unelevated(file: &str, args: &str, show: i32) {
         shell.ShellExecute(
             &BSTR::from(file),
             &VARIANT::from(args),
-            &VARIANT::from(""),
+            &VARIANT::from(dir.as_str()),
             &VARIANT::from(""),
             &VARIANT::from(show),
         )

@@ -3420,7 +3420,8 @@ fn layout_row(ui: &mut Ui, f: &mut Find, v: &mut String, d: &str) {
 /// page's More options (`salt`), where the value can be typed. A value
 /// matching no option shows as itself and is never rewritten, so nothing set
 /// by hand is lost. Returns true when the value changed (picked or reset), or
-/// an option was clicked even if already set (the scratchpad resets its class).
+/// an option or an app was chosen even if already set (the scratchpad resets
+/// its class).
 fn choice_row(
     ui: &mut Ui,
     f: &mut Find,
@@ -3435,6 +3436,7 @@ fn choice_row(
     let id = egui::Id::new(("choice", meta.2, meta.0));
     if let Some(p) = take_pick(id) {
         *v = p;
+        chose = true;
     }
     if row_core(ui, f, meta, v != d, false, |ui| {
         egui::ComboBox::from_id_salt(id)
