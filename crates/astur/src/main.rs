@@ -75,8 +75,8 @@ use windows::Win32::Storage::FileSystem::{
     PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Console::{
     AttachConsole, GetStdHandle, SetConsoleCtrlHandler, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
@@ -121,9 +121,9 @@ use windows::Win32::UI::Shell::{
     BHID_EnumItems, IEnumShellItems, IShellItem, IShellItemImageFactory,
     SHCreateItemFromParsingName, SHGetFileInfoW, SHGetImageList, ShellExecuteExW, ShellExecuteW,
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
-    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOZONECHECKS, SEE_MASK_NO_CONSOLE,
-    SHELLEXECUTEINFOW, SHFILEINFOW, SHGFI_FLAGS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
-    SHIL_LARGE, SIGDN_NORMALDISPLAY, SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOZONECHECKS, SHELLEXECUTEINFOW, SHFILEINFOW,
+    SHGFI_FLAGS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHIL_LARGE, SIGDN_NORMALDISPLAY,
+    SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     AppendMenuW, CopyIcon, CreateIconFromResourceEx, CreateIconIndirect, CreatePopupMenu,
@@ -5593,8 +5593,11 @@ fn launch(cmd: &str) {
         .name("launch".to_string())
         .spawn(move || {
             // ShellExecuteEx can hand off to shell extensions, which want STA.
-            let _ = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
-            launch_now(&owned)
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            launch_now(&owned);
+            if com.is_ok() {
+                unsafe { CoUninitialize() };
+            }
         });
     if spawned.is_err() {
         launch_now(cmd);
@@ -5629,17 +5632,15 @@ fn launch_now(cmd: &str) {
         let (file, args) = (wide(file), wide(args));
         let mut info = SHELLEXECUTEINFOW {
             cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
-            // NO_CONSOLE: a console target gets a new console, as from
-            // `start`, never the one Astur attached to (AttachConsole).
+            // No SEE_MASK_NO_CONSOLE: that flag inherits Astur's console;
+            // without it a console target (cmd, pwsh) gets its own, as from
+            // `start`.
             // NOZONECHECKS: `start` CreateProcess'es an exe with no
             // downloaded-file prompt; keep it that way (and NO_UI must not
             // turn that prompt into a silent refusal). Only exes and bare
             // names get here (`split_command`); a document keeps `start`'s
             // zone prompt.
-            fMask: SEE_MASK_NOASYNC
-                | SEE_MASK_FLAG_NO_UI
-                | SEE_MASK_NO_CONSOLE
-                | SEE_MASK_NOZONECHECKS,
+            fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOZONECHECKS,
             lpFile: PCWSTR(file.as_ptr()),
             lpParameters: PCWSTR(args.as_ptr()),
             nShow: SW_SHOWNORMAL.0,
