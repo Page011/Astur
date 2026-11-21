@@ -1698,7 +1698,7 @@ window_rules =
 # Launcher and system menu
 # ---------------------------------------------------------------------------
 
-# Program launched by Alt+Enter: a cmd.exe command line run through `start`,
+# Program launched by Alt+Enter: a cmd.exe command line, opened like `start`,
 # so PATH and App Execution Aliases (e.g. wt.exe) resolve and arguments work
 # (wt -p Ubuntu). Quote a path with spaces (or whose %VARIABLES% expand to
 # spaces) when arguments follow it:
@@ -2160,7 +2160,7 @@ disk_drive = C:
 disk_format = {free}
 # Uptime token: {value} (42m, 5h 12m, 3d 4h).
 uptime_format = {value}
-# custom: a command run hidden (as cmd /C) every custom_interval seconds
+# custom: a command run through cmd every custom_interval seconds
 # (1 - 3600); its first output line is {output}. Stopped after 5 s. Empty =
 # custom_format alone, as plain text.
 custom_command =

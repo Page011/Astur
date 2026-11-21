@@ -1,1 +1,37 @@
 1 ICON "../astur/assets/astur.ico"
+
+// Version info, so the exe says what it is (Explorer Properties > Details,
+// AV reputation, #30). VMAJ/VMIN/VPAT/VER come from Cargo.toml via build.rs.
+// The manifest (RT_MANIFEST 24, id 1, assets/astur.manifest): asInvoker + the
+// Windows 10/11 supportedOS GUID. No dpiAware (the exe sets per-monitor v2 at
+// runtime; a manifest setting it first makes that call fail), no comctl32 v6.
+1 24 "../astur/assets/astur.manifest"
+
+1 VERSIONINFO
+FILEVERSION VMAJ,VMIN,VPAT,0
+PRODUCTVERSION VMAJ,VMIN,VPAT,0
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Astur"
+            VALUE "FileDescription", "Astur Settings"
+            VALUE "FileVersion", VER
+            VALUE "InternalName", "astur-settings"
+            VALUE "LegalCopyright", "Licensed under the Apache License 2.0"
+            VALUE "OriginalFilename", "astur-settings.exe"
+            VALUE "ProductName", "Astur"
+            VALUE "ProductVersion", VER
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

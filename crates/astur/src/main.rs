@@ -39,8 +39,9 @@ use layout::{
 use windows::core::{w, PCWSTR};
 use windows::core::{IUnknown, Interface, GUID};
 use windows::Win32::Foundation::{
-    CloseHandle, LocalFree, BOOL, BOOLEAN, COLORREF, HANDLE, HINSTANCE, HLOCAL, HWND,
-    INVALID_HANDLE_VALUE, LPARAM, LRESULT, LUID, POINT, RECT, SIZE, SYSTEMTIME, WPARAM,
+    CloseHandle, LocalFree, BOOL, BOOLEAN, COLORREF, ERROR_CANCELLED, ERROR_DDE_FAIL, HANDLE,
+    HINSTANCE, HLOCAL, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, LUID, POINT, RECT, SIZE,
+    SYSTEMTIME, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
     AlphaBlend, BeginPaint, BitBlt, CombineRgn, CreateBitmap, CreateCompatibleBitmap,
@@ -74,15 +75,16 @@ use windows::Win32::Storage::FileSystem::{
     PIPE_ACCESS_DUPLEX,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CLSCTX_ALL, CLSCTX_INPROC_SERVER,
-    COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, CoUninitialize, CLSCTX_ALL,
+    CLSCTX_INPROC_SERVER, COINIT_APARTMENTTHREADED,
 };
 use windows::Win32::System::Console::{
     AttachConsole, GetStdHandle, SetConsoleCtrlHandler, ATTACH_PARENT_PROCESS, STD_OUTPUT_HANDLE,
 };
 use windows::Win32::System::DataExchange::{
     AddClipboardFormatListener, CloseClipboard, EmptyClipboard, GetClipboardData,
-    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    IsClipboardFormatAvailable, OpenClipboard, RegisterClipboardFormatW,
+    RemoveClipboardFormatListener, SetClipboardData,
 };
 use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
 use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
@@ -104,7 +106,9 @@ use windows::Win32::System::Shutdown::{
     ExitWindowsEx, LockWorkStation, EWX_FORCEIFHUNG, EWX_LOGOFF, EWX_REBOOT, EWX_SHUTDOWN,
     SHUTDOWN_REASON,
 };
-use windows::Win32::System::SystemInformation::{GetLocalTime, GetTickCount, GetTickCount64};
+use windows::Win32::System::SystemInformation::{
+    GetLocalTime, GetSystemDirectoryW, GetTickCount, GetTickCount64,
+};
 use windows::Win32::UI::Controls::{IImageList, ILD_TRANSPARENT, WM_MOUSELEAVE};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, GetKeyState, GetLastInputInfo, SendInput, ToUnicode, TrackMouseEvent, INPUT,
@@ -115,9 +119,10 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{
     BHID_EnumItems, IEnumShellItems, IShellItem, IShellItemImageFactory,
-    SHCreateItemFromParsingName, SHGetFileInfoW, SHGetImageList, ShellExecuteW, Shell_NotifyIconW,
-    NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW, SHFILEINFOW, SHGFI_FLAGS,
-    SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHIL_LARGE, SIGDN_NORMALDISPLAY,
+    SHCreateItemFromParsingName, SHGetFileInfoW, SHGetImageList, ShellExecuteExW, ShellExecuteW,
+    Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+    SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SEE_MASK_NOZONECHECKS, SHELLEXECUTEINFOW, SHFILEINFOW,
+    SHGFI_FLAGS, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES, SHIL_LARGE, SIGDN_NORMALDISPLAY,
     SIGDN_PARENTRELATIVEPARSING, SIIGBF_ICONONLY,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -2826,6 +2831,10 @@ static MEDIA_ON: AtomicBool = AtomicBool::new(false);
 // for seconds, neither of which may stall the stats worker's volume
 // changes). u64::MAX = unknown: the disk widget hides.
 static DISK_ON: AtomicBool = AtomicBool::new(false);
+// The keyboard widget is listed: only then does the 1 s tick read the
+// foreground thread's layout (#30: off by default, and a per-second
+// GetKeyboardLayout of the foreground app is a keylogger tell to AV).
+static KBD_ON: AtomicBool = AtomicBool::new(false);
 static DISK_ROOT: Mutex<String> = Mutex::new(String::new());
 static STAT_DISK_FREE: AtomicU64 = AtomicU64::new(u64::MAX);
 static STAT_DISK_TOTAL: AtomicU64 = AtomicU64::new(u64::MAX);
@@ -5567,8 +5576,10 @@ unsafe fn cursor_hmon() -> isize {
     MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST).0 as isize
 }
 
-/// Launch an external program detached. Routed through `cmd /C start` so PATH
-/// and App Execution Aliases (e.g. wt.exe) resolve like they do from the shell.
+/// Launch an external program detached. ShellExecuteEx (what `start` and
+/// Win+R use) so PATH, App Paths and App Execution Aliases (e.g. wt.exe)
+/// resolve like they do from the shell; text only cmd can run goes through
+/// `cmd /C start` (`launch_now`).
 /// Spawned from a short-lived thread: CreateProcess used to block the manager
 /// (an estimated 2-10 ms per launch, not measured) on the thread every command
 /// waits for. The caller still sets `pending_launch_mon` first.
@@ -5580,21 +5591,74 @@ fn launch(cmd: &str) {
     let owned = cmd.to_string();
     let spawned = std::thread::Builder::new()
         .name("launch".to_string())
-        .spawn(move || launch_now(&owned));
+        .spawn(move || {
+            // ShellExecuteEx can hand off to shell extensions, which want STA.
+            let com = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+            launch_now(&owned);
+            if com.is_ok() {
+                unsafe { CoUninitialize() };
+            }
+        });
     if spawned.is_err() {
         launch_now(cmd);
     }
 }
 
-/// `launch`'s body. CREATE_NO_WINDOW: Astur has no console in release, so
+/// `launch`'s body. A plain command (`split_command`) goes straight to
+/// ShellExecuteEx: no hidden cmd.exe child per launch, which AV heuristics
+/// weigh (#30). NO_UI so a miss shows no dialog of its own: it falls through
+/// to cmd, whose `start` shows the one dialog it always did. A declined UAC
+/// prompt (taskmgr) does not fall through (it would ask twice), nor does a
+/// DDE failure (the app may already be up).
+/// cmd path, CREATE_NO_WINDOW: Astur has no console in release, so
 /// cmd.exe used to open a console window of its own for the moment `start`
 /// ran, which could flash and be adopted then retiled away. `start` still
 /// gives a console target (cmd, pwsh) its own new console window.
 fn launch_now(cmd: &str) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let is_path = std::path::Path::new(&expand_env(cmd, |n| std::env::var(n).ok())).exists();
-    if let Err(e) = std::process::Command::new("cmd")
+    let text = expand_env(cmd, |n| std::env::var(n).ok());
+    let is_path = std::path::Path::new(&text).exists();
+    if let Some((file, args)) = split_command(&text, is_path) {
+        // ShellExecuteEx searches the cwd first; `start` swaps a bare `cmd`
+        // for COMSPEC so a cmd.exe there cannot run instead.
+        let system_cmd = cmd_exe();
+        let file = if file.eq_ignore_ascii_case("cmd") || file.eq_ignore_ascii_case("cmd.exe") {
+            system_cmd.to_str().unwrap_or(file)
+        } else {
+            file
+        };
+        let wide = |s: &str| s.encode_utf16().chain(Some(0)).collect::<Vec<u16>>();
+        let (file, args) = (wide(file), wide(args));
+        let mut info = SHELLEXECUTEINFOW {
+            cbSize: std::mem::size_of::<SHELLEXECUTEINFOW>() as u32,
+            // No SEE_MASK_NO_CONSOLE: that flag inherits Astur's console;
+            // without it a console target (cmd, pwsh) gets its own, as from
+            // `start`.
+            // NOZONECHECKS: `start` CreateProcess'es an exe with no
+            // downloaded-file prompt; keep it that way (and NO_UI must not
+            // turn that prompt into a silent refusal). Only exes and bare
+            // names get here (`split_command`); a document keeps `start`'s
+            // zone prompt.
+            fMask: SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI | SEE_MASK_NOZONECHECKS,
+            lpFile: PCWSTR(file.as_ptr()),
+            lpParameters: PCWSTR(args.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        match unsafe { ShellExecuteExW(&mut info) } {
+            Ok(()) => return,
+            Err(e)
+                if e.code() == ERROR_CANCELLED.to_hresult()
+                    || e.code() == ERROR_DDE_FAIL.to_hresult() =>
+            {
+                log_debug!("launch not retried through cmd ({cmd}): {e}");
+                return;
+            }
+            Err(e) => log_debug!("launch via ShellExecuteEx failed ({cmd}): {e}; trying cmd"),
+        }
+    }
+    if let Err(e) = std::process::Command::new(cmd_exe())
         .arg("/C")
         .raw_arg(start_line(cmd, is_path))
         .creation_flags(CREATE_NO_WINDOW)
@@ -5624,6 +5688,53 @@ fn start_line(cmd: &str, is_path: bool) -> String {
     } else {
         format!("start \"\" {cmd}")
     }
+}
+
+/// `launch_now`'s (program, arguments) for ShellExecuteEx, split as cmd
+/// reads a command line: a quoted program up to its closing quote, else up
+/// to the first space; a bare existing path (`is_path`) is the program whole.
+/// None = cmd's `start` keeps it, as before #30: a cmd operator (& | < > ^),
+/// an unbalanced quote, a leading `/` (a `start` switch such as `/min`), two
+/// `%` left after `expand_env` (cmd's own %CD% %DATE% %RANDOM% %X:~0,4%), a
+/// bare name only the cwd has (`start` tries a PATH exe before a cwd folder),
+/// or a program with an extension other than .exe/.com: `start` gives a .bat
+/// its kept-open `cmd /K` and a downloaded document its zone prompt, which
+/// ShellExecuteEx with NOZONECHECKS would skip.
+/// ponytail: a bare name is taken for an exe; one PATHEXT resolves to a
+/// .bat/.cmd/.js runs as ShellExecuteEx does it (a .bat closes when done, no
+/// zone prompt). Write the extension to keep `start`'s handling.
+fn split_command(text: &str, is_path: bool) -> Option<(&str, &str)> {
+    let (file, args) = if is_path {
+        (text, "")
+    } else if text.contains(['&', '|', '<', '>', '^'])
+        || text.matches('"').count() % 2 == 1
+        || text.matches('%').count() > 1
+        || text.starts_with('/')
+    {
+        return None;
+    } else {
+        match text.strip_prefix('"') {
+            Some(quoted) => quoted.split_once('"')?,
+            None => text.split_once(char::is_whitespace).unwrap_or((text, "")),
+        }
+    };
+    let exe = std::path::Path::new(file)
+        .extension()
+        .is_none_or(|e| e.eq_ignore_ascii_case("exe") || e.eq_ignore_ascii_case("com"));
+    let named = !is_path || file.contains(['\\', '/', ':']);
+    (!file.is_empty() && exe && named).then(|| (file, args.trim_start()))
+}
+
+/// System32\cmd.exe by full path. `Command::new("cmd")` searches the folder
+/// astur.exe runs from before System32, so a cmd.exe dropped beside a
+/// portable astur.exe (Downloads) would run instead.
+fn cmd_exe() -> std::path::PathBuf {
+    let mut buf = [0u16; 260];
+    let n = unsafe { GetSystemDirectoryW(Some(&mut buf)) } as usize;
+    if n == 0 || n > buf.len() {
+        return "cmd".into();
+    }
+    std::path::PathBuf::from(String::from_utf16_lossy(&buf[..n])).join("cmd.exe")
 }
 
 /// `text` with each `%NAME%` replaced by `var(NAME)`, as cmd expands a
@@ -14699,7 +14810,7 @@ fn run_custom(cmd: &str, limit: std::time::Duration) -> Option<String> {
     use std::process::Stdio;
     use std::time::Duration;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut child = std::process::Command::new("cmd")
+    let mut child = std::process::Command::new(cmd_exe())
         .args(["/S", "/C"])
         .raw_arg(format!("\"{cmd}\""))
         .creation_flags(CREATE_NO_WINDOW)
@@ -16217,7 +16328,9 @@ unsafe fn bar_tick_changed(h: HWND) -> bool {
     MEDIA_TEXT.lock().unwrap().hash(&mut hasher);
     // The newer widgets: a Win+Space switch shows within a second, the
     // uptime by the minute.
-    kbd_langid().hash(&mut hasher);
+    if KBD_ON.load(Ordering::Relaxed) {
+        kbd_langid().hash(&mut hasher);
+    }
     (GetTickCount64() / 60_000).hash(&mut hasher);
     STAT_DISK_FREE.load(Ordering::Relaxed).hash(&mut hasher);
     CUSTOM_TEXT.lock().unwrap().hash(&mut hasher);
@@ -17953,6 +18066,7 @@ fn apply_bar_statics(cfg: &Config) {
     );
     let listed = |w: &str| bar_shows(cfg, w);
     DISK_ON.store(listed("disk"), Ordering::Relaxed);
+    KBD_ON.store(listed("keyboard"), Ordering::Relaxed);
     *DISK_ROOT.lock().unwrap() = cfg.bar_disk_drive.clone();
     CUSTOM_ON.store(
         listed("custom") && !cfg.bar_custom_command.trim().is_empty(),
@@ -19201,6 +19315,7 @@ const LA_SCROLL: usize = 9; // mouse wheel: lParam = +1 (up) / -1 (down)
 const LA_KEY: usize = 10; // raw key: lParam = vk | scan<<16 | shift<<32 | caps<<33
 const LA_REFRESH: usize = 11; // F5: rebuild installed/custom app list
 const LA_OPEN_SWITCHER: usize = 12; // Alt+Tab replacement: window-only mode
+const LA_CLIP_WATCH: usize = 13; // config applied: clip_watch_sync
 
 // Theme (COLORREF is 0x00BBGGRR). Forte blue #366382 accent on a dark surface;
 // minimal chrome (thin frame, subtle divider) for a clean omarchy/rofi look.
@@ -19441,6 +19556,13 @@ fn apply_theme(cfg: &Config) {
             || old.popup_font_weight != cfg.popup_font_weight
     });
     *UI_CFG.lock().unwrap() = Some(cfg.clone());
+    // clipboard_history may have flipped; the launcher thread owns the
+    // listener. 0 at startup: launcher_thread syncs once its window exists.
+    let la = LAUNCHER_HWND.load(Ordering::Relaxed);
+    if la != 0 {
+        let _ =
+            unsafe { PostMessageW(hwnd_from(la), WM_LAUNCHER, WPARAM(LA_CLIP_WATCH), LPARAM(0)) };
+    }
     if font_changed {
         POPUP_FONT_DIRTY.store(true, Ordering::Release);
     }
@@ -19651,6 +19773,31 @@ unsafe fn clipboard_is_sensitive(h: HWND) -> bool {
         }
     }
     false
+}
+
+/// Listen for clipboard changes only while `clipboard_history` is on (#30:
+/// an always-on system-wide clipboard listener reads as a stealer to AV,
+/// and nothing else uses it). Launcher thread only (it owns `h`); runs at
+/// its start and on LA_CLIP_WATCH after every config apply. Turning it off
+/// keeps CLIPBOARD_ITEMS (memory only, hidden while off), as before.
+unsafe fn clip_watch_sync(h: HWND) {
+    static LISTENING: AtomicBool = AtomicBool::new(false);
+    let want = UI_CFG
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|c| c.clipboard_history);
+    if want != LISTENING.load(Ordering::Relaxed) {
+        let done = if want {
+            AddClipboardFormatListener(h)
+        } else {
+            RemoveClipboardFormatListener(h)
+        };
+        match done {
+            Ok(()) => LISTENING.store(want, Ordering::Relaxed),
+            Err(e) => log_error!("clipboard listener (on = {want}): {e}"),
+        }
+    }
 }
 
 unsafe fn clipboard_capture(h: HWND) {
@@ -22450,6 +22597,7 @@ unsafe extern "system" fn launcher_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPAR
                     }
                     launcher_show(h);
                 }
+                LA_CLIP_WATCH => clip_watch_sync(h),
                 LA_REFRESH => {
                     let apps = launcher_enumerate();
                     let n = apps.len();
@@ -22820,7 +22968,7 @@ fn launcher_thread() {
         };
         make_launcher_font();
         LAUNCHER_HWND.store(hwnd.0 as isize, Ordering::Relaxed);
-        let _ = AddClipboardFormatListener(hwnd);
+        clip_watch_sync(hwnd);
         // Modern rounded corners on the picker card (Win11; no-op pre-22000).
         let pref = DWMWCP_ROUND;
         let _ = DwmSetWindowAttribute(
@@ -29112,6 +29260,55 @@ mod tests {
         // survives it.
         let q = url_encode(r#"a & b | c < d > e ^ f "g" (h)"#);
         assert!(!q.contains(|c: char| "&|<>^\"() ".contains(c)), "{q}");
+    }
+
+    #[test]
+    fn plain_commands_skip_cmd_and_shell_syntax_keeps_it() {
+        // #30: a plain command goes to ShellExecuteEx as (program, args).
+        assert_eq!(
+            split_command("wt -p Ubuntu", false),
+            Some(("wt", "-p Ubuntu"))
+        );
+        assert_eq!(
+            split_command(r#""C:\Program Files\Rio\rio.exe"  --flag"#, false),
+            Some((r"C:\Program Files\Rio\rio.exe", "--flag"))
+        );
+        assert_eq!(
+            split_command(r"C:\Program Files\Rio\rio.exe", true),
+            Some((r"C:\Program Files\Rio\rio.exe", ""))
+        );
+        assert_eq!(split_command("http://", false), Some(("http://", "")));
+        assert_eq!(
+            split_command("ms-settings:sound", false),
+            Some(("ms-settings:sound", ""))
+        );
+        assert_eq!(
+            split_command("NOTEPAD.EXE a.txt", false),
+            Some(("NOTEPAD.EXE", "a.txt"))
+        );
+        // Only cmd can run these: the old `cmd /C start` path, unchanged.
+        for shell in [
+            "a & b",
+            "dir | more",
+            "x > out.txt",
+            "a ^& b",
+            r#""C:\Program Files\x.exe --flag"#,
+            "/min notepad",
+            r#""" notepad"#,
+            // cmd's own variables, which expand_env leaves alone.
+            "wt -d %CD%",
+            r"notepad C:\n\%DATE:~-4%.txt",
+            // `start` keeps a .bat open (cmd /K) and zone-prompts a document.
+            r#""C:\VS\VsDevCmd.bat" -arch=x64"#,
+            "devshell.CMD",
+            r"C:\Users\me\Downloads\x.hta",
+        ] {
+            assert_eq!(split_command(shell, false), None, "{shell}");
+        }
+        assert_eq!(split_command(r"C:\VS\VsDevCmd.bat", true), None);
+        // A bare name that exists only in the cwd (a `wezterm` folder):
+        // `start` runs a PATH wezterm.exe first.
+        assert_eq!(split_command("wezterm", true), None);
     }
 
     #[test]

@@ -16,13 +16,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+      # Pinned (ci.yml pins the same, so CI tests this compiler) and through the
+      # runner's own rustup: no third-party action in a job holding a write
+      # token, and the compiler only changes when this line does.
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal
+          rustup default 1.98.1
 
       # Builds the whole workspace: astur.exe (window manager) + astur-settings.exe
       # (settings GUI). The installer bundles both; the portable exe is astur.exe.
+      # --locked: the release builds exactly the Cargo.lock that CI tested.
       - name: Build release binaries
-        run: cargo build --release
+        run: cargo build --release --locked
 
       - name: Stage portable artifact
         run: Copy-Item target\release\astur.exe astur-windows-x64.exe
