@@ -1780,7 +1780,8 @@ ipc_pipe = astur
 # Allow `launch <command>` over IPC to run arbitrary commands. Window-management
 # verbs (switch/move/focus/layout/...) work regardless. Leave this off unless you
 # actually script launching through Astur: on, any process running as you can use
-# Astur as the parent process for a command of its choosing.
+# Astur as the parent process for a command of its choosing. Astur run as
+# administrator takes only elevated clients and launches unelevated.
 ipc_allow_launch = false
 
 # YASB workspace integration. Uses YASB's existing GlazeWM workspace widget.
@@ -2162,7 +2163,7 @@ disk_format = {free}
 uptime_format = {value}
 # custom: a command run through cmd every custom_interval seconds
 # (1 - 3600); its first output line is {output}. Stopped after 5 s. Empty =
-# custom_format alone, as plain text.
+# custom_format alone, as plain text. Off while Astur runs as administrator.
 custom_command =
 custom_format = {output}
 custom_interval = 10

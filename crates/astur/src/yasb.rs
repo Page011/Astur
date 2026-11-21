@@ -59,7 +59,9 @@ impl Snapshot {
                     && a.active == b.active
                     && a.workspaces.len() == b.workspaces.len()
                     && a.workspaces.iter().zip(&b.workspaces).all(|(a, b)| {
-                        a.windows == b.windows && a.floating == b.floating && a.focused == b.focused
+                        a.windows.iter().copied().eq(super::shown_windows(b))
+                            && a.floating == b.floating
+                            && a.focused == b.focused
                     })
             })
     }
@@ -80,7 +82,8 @@ impl Snapshot {
                         .workspaces
                         .iter()
                         .map(|w| WorkspaceState {
-                            windows: w.windows.clone(),
+                            // The toggled-away scratchpad is not shown (#22).
+                            windows: super::shown_windows(w).collect(),
                             floating: w.floating.clone(),
                             focused: w.focused,
                         })
