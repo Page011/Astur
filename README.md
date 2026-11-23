@@ -1,8 +1,8 @@
 # Astur — Tiling Window Manager for Windows
 
 **Astur** is a fast, free, open-source **tiling window manager for Windows** —
-**Alt-drag** window movement, nearest-corner resize, six tiling layouts
-(including a Niri-style scrolling layout, chosen per monitor), a
+**Alt-drag** window movement, nearest-corner resize, seven tiling layouts
+(including a Niri-style scrolling layout, chosen per monitor or per workspace), a
 per-monitor status bar, up to 20 virtual workspaces, and silky composited
 animations. Full edition adds a configurable **app launcher + file search**
 (Alt+Space), **system menu** (Alt+Shift+Space), desktop tools, settings GUI, and
@@ -38,7 +38,7 @@ Astur comes in two editions from the same project:
 | Configuration | hand-edit `.conf` files | **settings GUI** + `.conf` |
 | RAM | ~1 MB, minimal | higher (launcher, search) |
 | Tiling · Alt-drag · bar · workspaces · animations | ✓ | ✓ |
-| **Scrolling layout** · tabbed columns · per-monitor layouts | — | ✓ |
+| **Scrolling layout** · tabbed columns · per-monitor and per-workspace layouts | — | ✓ |
 | **App launcher + file search + calculator** (Alt+Space) | — | ✓ |
 | **Power menu** (Alt+Shift+Space) | — | ✓ |
 | **Bar widgets** (volume · network · app buttons) + light/dark theme | — | ✓ |
@@ -75,9 +75,9 @@ applies.
 - **Alt + left-drag** — move any window by clicking anywhere on it, no title bar needed
 - **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
 - **Tiling mode** — `dwindle` (spiral), `master`, equal `columns`, balanced `grid`,
-  stacked `monocle`, or Niri-style `scrolling` (see [Scrolling layout](#scrolling-layout))
-  across up to 20 named/icon-labelled virtual workspaces. Each monitor can run its
-  own layout (`monitor_layouts`)
+  stacked `monocle`, or Niri-style `scrolling` and `scrolling_vertical` (see [Scrolling layout](#scrolling-layout))
+  across up to 20 named/icon-labelled virtual workspaces. Each monitor and each
+  workspace can run its own layout (`monitor_layouts`, `workspace_layouts`)
 - **Status bar** — a per-monitor bar (or only on the screens you pick,
   `monitors`) with three fully configurable widget zones
   (left / center / right): workspace pills, focused title, app buttons (click to
@@ -112,15 +112,17 @@ applies.
   weight, widget gaps, app labels/tooltips, stat labels, formats and media text
   are configurable.
 - **Animations** — workspace switches animate with a composited overlay:
-  `slide`, `spring` (overshoot-and-settle, Hyprland-style), `fade`, or `off`. Windows
+  `slide`, `fade`, or `off` (`spring` is retired and reads as `slide`). Windows
   also **glide** to new slots (re-tile, open/close reflow, scrolling, resizes,
   drag drops): every window is placed instantly, and an overlay of live **DWM
   thumbnails** draws the motion over the wallpaper. A window that changes size
   morphs: position and size animate together, its image scaled in between and
   1:1 at both ends. Dimmed (unfocused) windows stay dimmed during the motion,
   and a window gaining or losing focus in it fades between the two levels.
-  Another Astur hotkey pressed mid-glide re-aims it from where it is; other keys
-  and clicks reveal the result at once. At `animation_ms` up to 250 (default
+  Another Astur hotkey pressed mid-glide re-aims it from where it is, at the
+  speed it was moving; other keys and clicks reveal the result at once.
+  Workspace slides and glides on a scrolling strip last at least 200 ms. At
+  `animation_ms` up to 250 (default
   140) clicks pass straight through a running animation to those windows. A
   switch made while one is still sliding happens at once underneath it, and the
   overlay then reveals the result.
@@ -237,13 +239,13 @@ keys work on columns instead — see [Scrolling layout](#scrolling-layout).
 
 Letter binds (`J K H L M T F W`, and `R C [ ]` for scrolling) plus extra
 chords (`MOD` = the main key, with `CTRL`, `SHIFT`, `ALT`, `WIN`) are configurable
-in `%USERPROFILE%\.astur\astur.conf`, along with workspace keys, gaps, layout,
+in `astur.conf` (see [Configuration](#configuration) for where), along with workspace keys, gaps, layout,
 borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
 in same folder. Both files **hot-reload** on save.
 
 ## Scrolling layout
 
-`layout = scrolling` (or a monitor's entry in `monitor_layouts`) lays windows out
+`layout = scrolling` (or an entry in `monitor_layouts` or `workspace_layouts`) lays windows out
 like [Niri](https://github.com/YaLTeR/niri): **columns** on an endless horizontal
 strip, with the view scrolling along it. Each workspace on each monitor keeps its
 own strip and scroll position.
@@ -259,16 +261,26 @@ own strip and scroll position.
 - **Tabbed columns** — `Alt+Shift+T` shows a column's windows as tabs, one at a
   time under a tab bar (`tab_bar_height`): app icon and title per tab, click to
   switch, Alt-drag the bar to move the column.
+- **Peek slivers** — while more columns lie past a screen edge, a sliver of the
+  next one shows there (`scroll_peek`, 32 px by default, scaled with the display;
+  about twice that at an end of the strip; 0 = columns edge to edge), dimmed like
+  any unfocused window: click it to bring that column in (Astur takes that click,
+  so it never lands on the app's own buttons under the sliver). Hovering never
+  scrolls. At an end of the strip the last column sits at the normal outer gap,
+  no extra band, and columns that fit on screen fill it edge to edge (2.5.0).
 - **Peek and park** — a column partly past the screen edge **peeks** in only where
-  no other monitor is on that side. Otherwise, and when fully off screen, it is
+  no other monitor is on that side (beside another monitor it parks and that
+  edge shows wallpaper, about twice the peek wide at an end of the strip). Otherwise, and when fully off screen, it is
   **parked** outside the whole virtual screen, so it never bleeds onto a
   neighbouring monitor and multi-monitor setups work. Parked windows on the current
   workspace keep their taskbar button and Alt+Tab entry: activating one scrolls it
   into view. Quit, a relaunch after a crash, turning tiling off, or switching the
-  monitor to another layout bring every parked window back on screen.
+  workspace to another layout bring every parked window back on screen (Quit
+  brings peeking slivers fully on screen too).
 - **View** — `scroll_center = never` (default) scrolls only as far as needed to
   show the focused column, `always` keeps it centred, `on-overflow` centres it only
-  when it does not fit. `Alt+C` centres once.
+  when it does not fit. `Alt+C` centres once. Columns that fit on screen together
+  sit centred (2.5.0; before, they hugged the left edge).
 - **Motion** — scrolls, column moves and reflows glide through the DWM-thumbnail
   overlay (see Animations). A parked window that was hidden or minimised has no
   DWM image to show, so it glides in from a background snapshot when one is ready,
@@ -278,10 +290,10 @@ own strip and scroll position.
 |---|---|
 | `Alt` + `Left` / `Right` | Focus column left / right (at the strip end: next monitor) |
 | `Alt` + `Up` / `Down` | Focus window up / down in the column (tabbed: previous / next tab) |
-| `Alt` + `Shift` + `Left` / `Right` | Move column (at the strip end: window to next monitor) |
+| `Alt` + `Shift` + `Left` / `Right` | Move column (at the strip end: window to next monitor); `scroll_move = stack` moves only the window, see below |
 | `Alt` + `Shift` + `Up` / `Down` | Move window up / down in its column (tabbed: reorder tab) |
 | `Alt` + `J` / `K` | Focus next / previous window |
-| `Alt` + `Shift+J` / `Shift+K` | Move column right / left |
+| `Alt` + `Shift+J` / `Shift+K` | Move column right / left (`scroll_move` too) |
 | `Alt` + `H` / `L` | Column width − / + 0.1 |
 | `Alt` + `Shift+H` / `Shift+L` | Window height − / + 0.1 within its column |
 | `Alt` + `R` / `Shift+R` | Cycle column width / window height presets |
@@ -290,10 +302,20 @@ own strip and scroll position.
 | `Alt` + `[` / `]` | Pull window into the left / right column, or push it out |
 | `Alt` + `Shift+T` | Toggle column between stacked and tabbed |
 | `Alt` + `Home` / `End` | Focus first / last column (`Shift`: move column there) |
-| `Alt` + wheel | Focus column, wheel down = right (`Shift`: move column), on the monitor under the cursor |
-| `Alt` + horizontal wheel / touchpad swipe | Focus column left / right, one column per swipe |
-| `Alt` + left-drag drop | Left / right quarter of a window = new column beside it; middle = stack into its column |
+| `Alt` + wheel | Focus column, wheel down = right (`Shift`: move column), on the monitor under the cursor; the pointer stays put (unless focus-follows-mouse is on) |
+| `Alt` + horizontal wheel / touchpad swipe | Focus column left / right: a short swipe one column, a longer one several |
+| `Alt` + left-drag drop | Left / right quarter of a window = new column beside it; middle = stack into its column; in the gap between two columns = between them |
 | `Alt` + right-drag | Side edge = column width; top / bottom edge = window height |
+
+`scroll_move = stack` (Settings > Layout > Scrolling layout) makes the move-column
+keys (`Shift` + `Left` / `Right`, `Up` / `Down` on vertical scrolling,
+`Shift+J` / `Shift+K`, `Shift` + wheel,
+`move_column_left` / `move_column_right`) move just the focused window, one
+step a press: it stacks into the next column, the next press takes it into a
+column of its own past that one, and so on (the `[` / `]` move, repeated). At
+the strip end it goes to the next monitor as before. `Home` / `End` still move
+the whole column. Default `column` swaps whole columns. A column width does
+not travel with the window: once it leaves a column it gets the default width.
 
 On other layouts `R`, `C`, `[`, `]`, `Home` and `End` do nothing, and
 `Alt+Shift+T` no longer toggles tiling. The same actions are available to
@@ -302,29 +324,85 @@ On other layouts `R`, `C`, `[`, `]`, `Home` and `End` do nothing, and
 `center_column`, `consume_left`, `consume_right`, `toggle_tabbed`,
 `maximize_column`, `first_column`, `last_column`.
 
-### Per-monitor layouts
+### Vertical scrolling
+
+`layout = scrolling_vertical` (2.5.0) is the same strip turned on its side:
+full-width **rows** from top to bottom, the view scrolling up and down. A row's
+windows sit side by side (or as tabs, with the tab bar on top). A strip of rows
+that fits on screen sits at the top; the peek slivers are at the top and
+bottom edges. The size keys mean "size along the strip": `scroll_default_width` and
+`scroll_width_presets` are row heights, `scroll_height_presets` a window's share
+of its row's width. With `scroll_center = always` the focused row stays in the
+middle of the screen, like a slot machine. On a landscape screen, half-height
+rows (the default 0.5) suit most apps; an app with a minimum height taller than
+its row overlaps the next row.
+
+| Shortcut (vertical scrolling) | Action |
+|---|---|
+| `Alt` + `Up` / `Down` | Focus row above / below (scrolls) |
+| `Alt` + `Left` / `Right` | Focus window left / right in the row (tabbed: previous / next tab) |
+| `Alt` + `Shift` + `Up` / `Down` | Move row up / down (`scroll_move = stack`: moves only the window, see above) |
+| `Alt` + `Shift` + `Left` / `Right` | Move window left / right in its row (tabbed: reorder tab) |
+| `Alt` + `H` / `L`, `R`, `M` | Row height − / +, cycle, full height |
+| `Alt` + `Shift+H` / `Shift+L`, `Shift+R` | Window's share of the row's width |
+| `Alt` + `[` / `]` | Pull window into the row above / below, or push it out |
+| `Alt` + wheel | Focus row, wheel down = next row (`Shift`: move row) |
+| `Alt` + left-drag drop | Top / bottom quarter of a window = new row above / below; middle = join its row |
+| `Alt` + right-drag | Bottom edge = row height; side edge = window's share of the row |
+
+At the end of a row, `Alt+Left` / `Right` (with `Shift`: the window) go on to
+the next monitor; `Alt+Up` / `Down` stop at the strip's ends. `Alt+C`, `Alt+Shift+T`, `Home` / `End` and the
+`extra_hotkeys` / IPC actions work as on `scrolling`, with rows for columns.
+The bar shows `vertical 2/5`.
+
+### Per-monitor and per-workspace layouts
 
 `layout` is the default; `monitor_layouts` overrides it by monitor number (1 =
 leftmost, the same numbering as window rules). An empty entry or `default`
 inherits `layout`, so `monitor_layouts = scrolling, , master` runs scrolling on
-monitor 1 and master on monitor 3. A runtime layout switch (`extra_hotkeys` action
-`layout`, e.g. `ALT+CTRL+S|layout|scrolling`, or IPC `layout`) changes the
-**focused monitor only**, until a config reload resets it to the file. The bar's layout
-widget shows each monitor's own layout, plus the focused column on scrolling
-monitors (`scrolling 2/5`).
+monitor 1 and master on monitor 3. `workspace_layouts` overrides that by workspace
+number, so `workspace_layouts = , scrolling, grid` runs scrolling on workspace 2 and
+grid on workspace 3; an empty entry or `default` keeps its monitor's layout.
+
+A runtime layout switch (`extra_hotkeys` action `layout` with a layout name,
+`next` or `previous`, e.g. `ALT+CTRL+S|layout|scrolling` or
+`ALT+CTRL+L|layout|next`; IPC `layout <name|next|previous>`; a bar click set to
+`next_layout`, e.g. `layout_click = next_layout` in navbar.conf or Settings > Status bar)
+changes the **workspace you are on only**, until a config reload
+resets it to the file. `next` / `previous` step through the layouts in the order
+Settings lists them, wrapping around. (Before 2.5.0 a switch changed the whole
+monitor.) The bar's layout widget shows the layout of the workspace each monitor
+shows, plus the focused column on scrolling ones (`scrolling 2/5`, or
+`vertical 2/5` for rows).
+
+Gaps work the same way. `outer_gap` takes one value or four (top, right,
+bottom, left), e.g. `outer_gap = 8, 8, 60, 8` for an auto-hide taskbar at the
+bottom, and `monitor_outer_gaps` overrides it by monitor number. Commas split
+the monitors, so one monitor's four values go with spaces:
+`monitor_outer_gaps = 16 16 48 16, default`.
 
 ## Configuration
 
-Two files are created in `%USERPROFILE%\.astur\` on first run, both fully
-commented and **hot-reloaded on save** (about 0.1 s after the save). A reload
+Two files are created in `%APPDATA%\Astur\` on first run, both fully
+commented and **hot-reloaded on save** (about 0.1 s after the save). The
+folder also holds the log, state and the default `wallpapers` folder.
+`config_folder = home` in `astur.conf` (Settings > Troubleshooting > Config
+folder) keeps it in `%USERPROFILE%\.astur\` instead. Astur moves the whole
+folder to the chosen place when it starts, so an install from before 2.5.0
+moves from `.astur` to `%APPDATA%\Astur` on its first start. It never merges:
+if a folder is already at the target, nothing moves until you rename or
+delete that one. Wallpaper paths inside the old folder follow the move;
+paths you typed into commands or launcher entries do not. Astur Lite and
+builds before 2.5.0 read only `%USERPROFILE%\.astur\`: set
+`config_folder = home` and restart Astur before switching to one. A reload
 redoes only what the save changed: a colour edit does not re-tile or restyle
 windows. The system menu's **Reload** (or IPC `reload`) always re-applies
 everything, which also repairs any window left mis-styled:
 
-- **`astur.conf`** — workspaces/names/icons/wallpapers, six layouts and per-monitor
-  overrides (`monitor_layouts`), scrolling (`scroll_default_width`,
-  `scroll_width_presets`, `scroll_height_presets`, `scroll_center`,
-  `tab_bar_height`), gaps, borders, focus, animations/easing, popup theme/geometry,
+- **`astur.conf`** — workspaces/names/icons/wallpapers, seven layouts and per-monitor
+  and per-workspace overrides (`monitor_layouts`, `workspace_layouts`), scrolling (`scroll_default_width`,
+  `scroll_width_presets`, `scroll_height_presets`, `scroll_center`, `scroll_peek`,
+  `tab_bar_height`), gaps, borders, focus, animations, popup theme/geometry,
   launcher providers/custom entries, system actions, desktop tools, rich rules,
   persistence, IPC, and hotkeys (scrolling keys: `key_cycle_width`,
   `key_center_column`, `key_consume_left`, `key_consume_right`).
@@ -432,7 +510,7 @@ index off the input path, so typing stays responsive.
 |---|---|---|---|---|
 | Master-stack tiling | Yes | Yes | Yes | No (zones only) |
 | Alt-drag move/resize anywhere | Yes | No | No | No |
-| Animation scope | Window glide + workspace slide/spring/fade | Movement (experimental) | Window movement | No tiling animation |
+| Animation scope | Window glide + workspace slide/fade | Movement (experimental) | Window movement | No tiling animation |
 | App launcher + file search built in | Yes | No | No | No |
 | Settings GUI | Yes | `komorebi-gui` companion | Tray controls + config file | Yes |
 | Single portable exe option | Yes (Lite; Full WM-only option) | No (multiple binaries) | No (installer) | Part of PowerToys |
@@ -468,7 +546,7 @@ versions tiled into the top-left corner of a scaled screen — that was
 terminal. It prints and saves a short report (version, Windows build, DPI
 awareness, every monitor and its scale, config paths). For more, set
 `log_level = info` in `astur.conf` and attach
-`%USERPROFILE%\.asturstur.log`.
+`astur.log` from the same folder (the report shows its path).
 
 **What's the difference between Astur and Astur Lite?** See [Editions](#editions) —
 Lite is minimal ~1 MB console exe; Astur adds configurable launcher/search, system
@@ -479,8 +557,9 @@ menu, tray, desktop tools, rich widgets/themes/rules, IPC, persistence, and sett
 - Workspace wallpaper changes Windows global wallpaper through
   `SystemParametersInfoW`; not independent per-monitor wallpaper.
 - Window glide and the slide's still-wallpaper backdrop draw from a cached copy of
-  the wallpaper, re-rendered about 1.5 s after it, the display or the config changes
-  (and once at startup). In
+  the wallpaper, re-rendered about 1.5 s after it or the display changes, or a
+  config change moves the work area or turns an animation on, or after an explicit
+  Reload (system menu, tray, IPC `reload`), and once at startup. In
   that gap — e.g. right after a per-workspace wallpaper switch — windows place
   instantly instead of gliding and slides move the whole frame. Without Explorer (a
   replacement shell) that is always the case.

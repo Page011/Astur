@@ -12,8 +12,11 @@ single Rust `.exe` with no installer and no required config. Core hooks:
 - **Alt + right-drag** — resize from the nearest corner (red bracket marker).
 - **Tiling** — `dwindle` (spiral, default), `master`, `columns`, `grid`,
   `monocle`, or Niri-style `scrolling` (column strip, off-screen columns
-  parked outside the virtual screen, tabbed columns; `plan/scrolling.md`).
-  Layout is per monitor (`monitor_layouts`).
+  parked outside the virtual screen, tabbed columns; `plan/scrolling.md`)
+  and `scrolling_vertical` (the same strip of rows, transposed;
+  `config::is_strip` / `strip_vertical` are the checks).
+  Layout is per workspace (`Manager::layout`: runtime switch, else
+  `workspace_layouts`, else the monitor's `monitor_layouts` / `layout`).
 - **Up to 20 virtual workspaces** (`MAX_WORKSPACES`), shared or per-monitor.
 - **Per-monitor status bar** (workspace pills, title, clock, CPU/RAM/battery,
   keyboard language, disk, uptime, custom command text, music buttons, logo;
@@ -24,7 +27,7 @@ single Rust `.exe` with no installer and no required config. Core hooks:
   (`Cmd::BarAction` -> `run_bar_action`, sharing `run_action` with extra
   hotkeys); `monitors` picks the screens; 9 presets as data in astur-config
   `BAR_PRESETS`, stamped by Settings).
-- **Workspace-switch animation** — overlay compositor: off/slide/spring/fade.
+- **Workspace-switch animation** — overlay compositor: off/slide/fade.
 - **Window glide** — windows animate to their tile slot on open/move/resize/
   re-tile/scroll via an overlay of live DWM thumbnails (off/glide).
 - **App launcher** — Alt+Space opens a fuzzy app picker (Start Menu shortcuts),
@@ -70,9 +73,12 @@ Quit: tray Quit or `Ctrl+C` in the console (runs `restore_all_windows`: shows
 hidden windows and unparks parked ones; an exit watchdog ends the process 2 s
 after the restore starts, so a hung app cannot keep it alive), or kill the
 process (the next launch's crash rescue does the same from
-`~/.astur/rescue.lst`).
+`rescue.lst` in the config folder).
 
-Config lives in `%USERPROFILE%\.astur\astur.conf` + `navbar.conf`, both created
+Config lives in `%APPDATA%\Astur\astur.conf` + `navbar.conf` (or
+`%USERPROFILE%\.astur\` with `config_folder = home`; one resolver,
+`config_path`; the WM moves the folder to the chosen one at startup,
+`move_config_folder`), both created
 on first run, fully commented, **hot-reloaded on save**.
 
 ## File map (workspace)
@@ -80,7 +86,7 @@ on first run, fully commented, **hot-reloaded on save**.
 | File | Lines (approx) | What |
 |---|---|---|
 | `crates/astur/src/main.rs` | ~28700 | Everything Win32: hooks, worker threads, manager, scrolling strip model, bar, tab bars, compositors, launcher, file search, system menu. One big file by preference (see CLAUDE.md; splitting would not change build time). |
-| `crates/astur/src/layout.rs` | ~1300 | Pure tiling geometry (dwindle, master, columns, grid, monocle, scrolling strip: spans, offset clamp, peek/park `classify`, `park_spot`) + tests. `RECT` type only, no Win32 calls. |
+| `crates/astur/src/layout.rs` | ~1300 | Pure tiling geometry (dwindle, master, columns, grid, monocle, scrolling strip: spans, offset clamp, peek/park `classify`, `park_spot`, the vertical strip by `transpose`) + tests. `RECT` type only, no Win32 calls. |
 | `crates/astur/src/yasb.rs` | ~800 | GlazeWM-compatible workspace WebSocket API for YASB (loopback only, off by default). |
 | `crates/astur-config/src/lib.rs` | ~5800 | `Config` struct, `LAYOUTS` (the one list of layout names), bar `PALETTES`, `BAR_PRESETS`, `BAR_ACTIONS` / `BAR_CLICK_DEFAULTS` and the shared bar formatters (`format_clock`, `format_date`, `workspace_label`, `bar_on`), documented-default file templates, key/value parser. **No Win32** — pure data, shared with the settings GUI (aliased `config` in the WM). |
 | `crates/astur-settings/` | ~11200 (~1900 tests) | Settings GUI (egui), shipped. Separate process — a GUI crash can't touch the WM. Instant apply with Undo, Ctrl+F search, card rows (`row_core`), tables for record keys (`table`, `Rows`, `fold_*` / `*_check`), key capture chips, the Astur key picker with its 15 s Keep / revert trial (`key_picker`, `switch_key`, `Trial`) and per-shortcut notes from astur-config's `compile_keys` (`notes`, `row_noted`; the GUI has no conflict model of its own), the Status bar page (preset gallery `presets_ui` / `stamp` / `preset_diff`, egui previews `bar_preview` built from astur-config's own `format_clock` / `format_date` / `workspace_label`, drag-and-drop zones `zone_editor` / `move_widget`, format drop-downs `format_pick`, click actions `click_rows` / `click_ui` / `set_click` (the default is kept as no line), the screens picker `monitors_row`; `status_bar_rows_fit_their_width` guards against a row pushing the page past the window), Home's Quick setup (`bar_style_row`, `gaps_row`, `tips`), and pickers for non-technical users (`choice_row` drop-downs of detected apps / web searches with Custom… into More options, `font_row` with a GDI-drawn sample, `path_row` / `browse_button`, `window_picker`). Its only Win32 is `mod sys` (windows 0.58, the WM's version): font families, a font sample, installed browsers and App Paths, the open windows, the screen count, the file / folder dialog on its own thread. Never launch it to check a visual change: `cargo test -p astur-settings -- --ignored render_pages` renders every page to PNGs in %TEMP%\astur-settings-render. |
@@ -160,7 +166,7 @@ queues. Keep it that way — do not move work onto the hooks (main thread).
 - `plan/architecture.md` — deeper component + data-flow notes.
 - `plan/scrolling.md` — scrolling layout spec + contract: keys, config,
   geometry, peek/park, safety, manual test checklist.
-- `plan/animations.md` — animation design: desktop-switch modes (off/slide/spring/
+- `plan/animations.md` — animation design: desktop-switch modes (off/slide/
   fade) and the honest analysis of window open/close/move/resize animation.
 - `plan/win32-reference.md` — APIs used, doc links, gotchas (slow/buggy calls).
 - `plan/competitors.md` — komorebi, GlazeWM, Seelen UI: what they do, links.

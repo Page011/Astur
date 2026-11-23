@@ -16,13 +16,13 @@
 use astur_config::{
     apply_updates, chord_label, color_to_hex, compile_keys, config_path, default_config_text,
     default_navbar_text, disk_root, format_chord, format_clock, format_date, format_hotkeys,
-    format_launcher_entries, format_system_actions, format_window_rules, key_to_vk, parse_chord,
-    parse_hotkeys, parse_into, parse_launcher_entries, parse_pair, parse_system_actions,
-    parse_window_rules, pin_theme_color, set_conf_key, text_on, vk_to_key, workspace_label, Action,
-    BarPreset, BarRoles, BindIssue, Config, HotkeyDef, LauncherEntry, Level, MainKey, SystemAction,
-    WindowRule, BAR_ACTIONS, BAR_CLICK_DEFAULTS, BAR_CLICK_WIDGETS, BAR_DARK, BAR_LIGHT,
-    BAR_PRESETS, BAR_WIDGETS, LAYOUTS, MAX_WORKSPACES, MOD_ALT, MOD_CTRL, MOD_HYPER, MOD_SHIFT,
-    MOD_WIN, PALETTES, SWATCH_NAMES,
+    format_launcher_entries, format_system_actions, format_window_rules, gap_entry, gaps_text,
+    key_to_vk, layout_step, parse_chord, parse_hotkeys, parse_into, parse_launcher_entries,
+    parse_pair, parse_system_actions, parse_window_rules, pin_theme_color, set_conf_key, text_on,
+    vk_to_key, workspace_label, Action, BarPreset, BarRoles, BindIssue, Config, HotkeyDef,
+    LauncherEntry, Level, MainKey, SystemAction, WindowRule, BAR_ACTIONS, BAR_CLICK_DEFAULTS,
+    BAR_CLICK_WIDGETS, BAR_DARK, BAR_LIGHT, BAR_PRESETS, BAR_WIDGETS, LAYOUTS, MAX_WORKSPACES,
+    MOD_ALT, MOD_CTRL, MOD_HYPER, MOD_SHIFT, MOD_WIN, PALETTES, SWATCH_NAMES,
 };
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
@@ -642,6 +642,17 @@ impl App {
     /// untouched.
     fn write(&mut self) {
         if self.read_error.is_some() {
+            return;
+        }
+        // Astur moved its folder (#26) under a Settings that held no lock
+        // in it (ours is gone, the resolver points elsewhere): writing the
+        // old paths would recreate a near-default folder that wins over the
+        // moved one on the next start.
+        if !self.paths[0].parent().is_some_and(Path::is_dir)
+            && config_path("ASTUR_CONFIG", "astur.conf") != self.paths[0]
+        {
+            self.error =
+                Some("Not saved: Astur moved its folder. Close and reopen Settings.".into());
             return;
         }
         let external = mtimes(&self.paths) != self.mtimes;
@@ -1479,6 +1490,13 @@ impl App {
             keys(MOD_SHIFT, self.cfg.key_cycle_width),
             keys(MOD_SHIFT, self.cfg.key_toggle_tiling),
         );
+        let arrows = format!("{}Shift+arrows move", mk(&self.cfg));
+        let move_help = format!(
+            "Along the strip (up and down on vertical scrolling). Also {} / {}, {}Shift+wheel and the move column and swap commands.",
+            keys(MOD_SHIFT, self.cfg.key_focus_next),
+            keys(MOD_SHIFT, self.cfg.key_focus_prev),
+            mk(&self.cfg)
+        );
         let (c, d, f) = (&mut self.cfg, &self.def, &mut self.find);
         section(ui, f, "Tiling");
         layout_row(ui, f, &mut c.layout, &d.layout);
@@ -1496,7 +1514,7 @@ impl App {
             f,
             (
                 "Outer gap",
-                "Space between windows and the screen edges.",
+                "Space between windows and the screen edges. One edge can get more under More options, e.g. for a taskbar that auto-hides.",
                 "outer_gap",
             ),
             &mut c.outer_gap,
@@ -1523,36 +1541,60 @@ impl App {
             .collect();
         // Always offer three rows so a second or third monitor can be set up
         // before it is plugged in; more appear once the config names them.
-        for i in 0..c.monitor_layouts.len().max(3) {
-            let before = c.monitor_layouts.get(i).cloned().unwrap_or_default();
-            let mut cur = before.clone();
+        // Each row: the layout, then the outer gap (blank = the one above,
+        // shown as the hint).
+        let inherit = gaps_text(c.outer_gaps(), " ");
+        let rows = c.monitor_layouts.len().max(c.monitor_outer_gaps.len());
+        for i in 0..rows.max(3) {
+            let mut cur = c.monitor_layouts.get(i).cloned().unwrap_or_default();
+            let mut gap = c.monitor_outer_gaps.get(i).cloned().unwrap_or_default();
             let label = match i {
                 0 => "Monitor 1 (leftmost)".to_string(),
                 i => format!("Monitor {}", i + 1),
             };
             let desc = if i == 0 {
-                "Monitors are counted from left to right, here and in window rules. A layout shortcut changes only the monitor you are on."
+                "Monitors are counted from left to right, here and in window rules. Gap is that monitor's outer gap: one number, or four (top right bottom left); blank uses the outer gap above."
             } else {
                 ""
             };
-            pick(
-                ui,
-                f,
-                (label.as_str(), desc, "monitor_layouts"),
-                &mut cur,
-                "",
-                &opts,
-            );
-            if cur != before {
-                // Positional list: pad with defaults so the entry lands on
-                // monitor i + 1, not the next free slot.
-                let ml = &mut c.monitor_layouts;
-                if ml.len() <= i {
-                    ml.resize(i + 1, String::new());
-                }
-                ml[i] = cur;
-                trim_defaults(ml);
+            let meta = (label.as_str(), desc, "monitor_layouts, monitor_outer_gaps");
+            let modified = !cur.is_empty() || !gap.is_empty();
+            if row_core(ui, f, meta, modified, false, |ui| {
+                cell(ui, &mut gap, &inherit, 96.0);
+                ui.label("Gap");
+                let w = ui.available_width().min(300.0);
+                combo(ui, ("monitor_layouts", i), &mut cur, &opts, w);
+            }) {
+                (cur, gap) = Default::default();
             }
+            set_slot(&mut c.monitor_layouts, i, cur);
+            set_slot(&mut c.monitor_outer_gaps, i, gap);
+        }
+        section(ui, f, "Per workspace");
+        let opts: Vec<(&str, &str)> = std::iter::once(("", "Same as its monitor"))
+            .chain(LAYOUTS.iter().map(|&l| (l, layout_label(l))))
+            .collect();
+        // One row per workspace, plus any entry past the count so it can be
+        // cleared.
+        for i in 0..c.workspaces.max(c.workspace_layouts.len()) {
+            let mut cur = c.workspace_layouts.get(i).cloned().unwrap_or_default();
+            let label = match c.workspace_names.get(i).filter(|n| !n.is_empty()) {
+                Some(n) => format!("Workspace {} ({n})", i + 1),
+                None => format!("Workspace {}", i + 1),
+            };
+            let desc = if i == 0 {
+                "Overrides the monitor's layout on that workspace. A layout shortcut changes only the workspace you are on, until you save here or the config reloads."
+            } else {
+                ""
+            };
+            let meta = (label.as_str(), desc, "workspace_layouts");
+            if row_core(ui, f, meta, !cur.is_empty(), false, |ui| {
+                let w = ui.available_width().min(300.0);
+                combo(ui, ("workspace_layouts", i), &mut cur, &opts, w);
+            }) {
+                cur.clear();
+            }
+            set_slot(&mut c.workspace_layouts, i, cur);
         }
         section(ui, f, "Scrolling layout");
         pct(
@@ -1560,7 +1602,7 @@ impl App {
             f,
             (
                 "New column width",
-                "Width of a new column, as a share of the screen.",
+                "Width of a new column, as a share of the screen. On vertical scrolling this and the widths below are row heights, and the window heights are shares of the row's width.",
                 "scroll_default_width",
             ),
             &mut c.scroll_default_width,
@@ -1577,6 +1619,33 @@ impl App {
                 ("never", "Never: scroll only as far as needed"),
                 ("always", "Always"),
                 ("on-overflow", "Only when it doesn't fit"),
+            ],
+        );
+        num(
+            ui,
+            f,
+            (
+                "Peek at the edges",
+                "How much of the next column shows at a screen edge while there is one that way. Click it to bring that column in. 0 = columns edge to edge.",
+                "scroll_peek",
+            ),
+            &mut c.scroll_peek,
+            d.scroll_peek,
+            0..=200,
+            " px",
+        );
+        pick(
+            ui,
+            f,
+            (arrows.as_str(), move_help.as_str(), "scroll_move"),
+            &mut c.scroll_move,
+            &d.scroll_move,
+            &[
+                ("column", "The whole column (swap places)"),
+                (
+                    "stack",
+                    "The window: stack into the next column, then past it",
+                ),
             ],
         );
         let label = format!("Column widths ({width})");
@@ -1598,6 +1667,23 @@ impl App {
             10..=90,
         );
         more(ui, f, "layout", |ui, f| {
+            for (k, side) in ["top", "right", "bottom", "left"].into_iter().enumerate() {
+                let label = format!("Extra outer gap at the {side}");
+                let desc = if k == 0 {
+                    "Added to the outer gap on that edge only. Written as four values: outer_gap = top, right, bottom, left."
+                } else {
+                    ""
+                };
+                num(
+                    ui,
+                    f,
+                    (label.as_str(), desc, "outer_gap"),
+                    &mut c.outer_gap_extra[k],
+                    0,
+                    0..=200,
+                    " px",
+                );
+            }
             let desc = format!("The tab strip of a tabbed column ({tab}).");
             num(
                 ui,
@@ -1919,7 +2005,7 @@ impl App {
         row(
             ui,
             f,
-            ("Animation style", "Off, or how workspace switches and window moves animate. The switch underneath is always instant; the animation is drawn on top.", "animations, animation_ms, workspace_anim, window_anim, animation_easing"),
+            ("Animation style", "Off, or how workspace switches and window moves animate. The switch underneath is always instant; the animation is drawn on top.", "animations, animation_ms, workspace_anim, window_anim"),
             &mut sel,
             &"smooth".to_string(),
             |ui, v| {
@@ -1933,7 +2019,7 @@ impl App {
             set_motion(c, &sel);
         }
         // The legacy key silently forces workspace_anim off (astur main.rs):
-        // without this, choosing Springy could do nothing on a workspace switch.
+        // without this, choosing a style could do nothing on a workspace switch.
         let mut fix = false;
         if !f.on() && !c.workspace_slide && c.workspace_anim != "off" {
             card(ui, |ui| {
@@ -1960,7 +2046,7 @@ impl App {
             num(
                 ui,
                 f,
-                ("Duration", "How long each animation takes (1000 ms is a second). Up to 250 ms your clicks still go through while it plays; longer ones hold the mouse until it ends. 0 turns animation off.", "animation_ms"),
+                ("Duration", "How long each animation takes (1000 ms is a second). Workspace slides and scrolling glides take at least 200 ms. Up to 250 ms your clicks still go through while it plays; longer ones hold the mouse until it ends. 0 turns animation off.", "animation_ms"),
                 &mut c.animation_ms,
                 d.animation_ms,
                 0..=500,
@@ -1972,12 +2058,7 @@ impl App {
                 ("Workspace switch", "", "workspace_anim"),
                 &mut c.workspace_anim,
                 &d.workspace_anim,
-                &[
-                    ("off", "Off"),
-                    ("slide", "Slide"),
-                    ("spring", "Spring (overshoots, then settles)"),
-                    ("fade", "Fade"),
-                ],
+                &[("off", "Off"), ("slide", "Slide"), ("fade", "Fade")],
             );
             pick(
                 ui,
@@ -1989,23 +2070,7 @@ impl App {
                 ),
                 &mut c.window_anim,
                 &d.window_anim,
-                &[("off", "Off"), ("glide", "Glide"), ("spring", "Spring")],
-            );
-            pick(
-                ui,
-                f,
-                (
-                    "Motion curve",
-                    "How the movement speeds up and slows down.",
-                    "animation_easing",
-                ),
-                &mut c.animation_easing,
-                &d.animation_easing,
-                &[
-                    ("cubic", "Quick, then gentle"),
-                    ("smooth", "Smooth"),
-                    ("spring", "Springy (a little bounce)"),
-                ],
+                &[("off", "Off"), ("glide", "Glide")],
             );
         });
     }
@@ -2837,6 +2902,8 @@ impl App {
             .and_then(|h| parse_chord(&h.chord, c.main_key))
             .map_or_else(|| "its shortcut".into(), |(m, vk)| chord_label(m, vk));
         let desc = format!("An app (a terminal by default) that drops down over everything with {key} and hides again with the same key. Change the key under Shortcuts > Extra hotkeys.");
+        let walls = config_path("ASTUR_WALLPAPERS", "wallpapers");
+        let walls = format!("Empty: {}", walls.display());
         let (c, d, f) = (&mut self.cfg, &self.def, &mut self.find);
         section(ui, f, "Scratchpad");
         toggle(
@@ -2873,7 +2940,7 @@ impl App {
             ),
             (&mut c.wallpaper_dir, &d.wallpaper_dir),
             Pick::Folder,
-            r"Empty: .astur\wallpapers in your user folder",
+            &walls,
         );
         section(ui, f, "Memory");
         toggle(
@@ -3072,7 +3139,56 @@ impl App {
                     });
                 });
             }
-            section_title(ui, "Files");
+        }
+        let writable = self.read_error.is_none();
+        let mut restart = false;
+        let (c, d, f) = (&mut self.cfg, &self.def, &mut self.find);
+        let mut folder = |ui: &mut Ui| {
+            section(ui, f, "Files");
+            let (in_use, chosen) = astur_config::config_folders(&c.config_folder);
+            let desc = format!(
+                "Where both files, the log and the default wallpaper folder live. In use: {}",
+                in_use.display()
+            );
+            let (v, opts) = (
+                &mut c.config_folder,
+                [
+                    ("appdata", r"AppData (%APPDATA%\Astur)"),
+                    ("home", r"User folder (%USERPROFILE%\.astur)"),
+                ],
+            );
+            // Wide: the two folder labels do not fit beside the text.
+            let meta = ("Config folder", desc.as_str(), "config_folder");
+            if row_core(ui, f, meta, *v != d.config_folder, true, |ui| {
+                ui.horizontal(|ui| seg(ui, v, &opts));
+            }) {
+                *v = d.config_folder.clone();
+            }
+            if f.on() || !writable || in_use == chosen {
+                return;
+            }
+            let to = chosen.display();
+            if chosen.is_dir() {
+                warn_note(
+                    ui,
+                    &format!("{to} already exists: rename or delete it first."),
+                );
+            } else {
+                note(
+                    ui,
+                    &format!("Astur moves it to {to} the next time it starts."),
+                );
+                // Settings' own settings.lock in the folder would block the
+                // move, so the restart closes Settings too.
+                restart = sys::astur_running() && ui.button("Restart Astur now").clicked();
+            }
+        };
+        if writable {
+            folder(ui);
+        } else {
+            ui.add_enabled_ui(false, folder);
+        }
+        if !f.on() {
             for path in &self.paths {
                 card(ui, |ui| {
                     ui.horizontal(|ui| {
@@ -3098,8 +3214,6 @@ impl App {
                     .clicked();
             });
         }
-        let writable = self.read_error.is_none();
-        let (c, d, f) = (&mut self.cfg, &self.def, &mut self.find);
         let mut diagnostics = |ui: &mut Ui| {
             section(ui, f, "Diagnostics");
             seg_row(
@@ -3127,6 +3241,18 @@ impl App {
         }
         if reload {
             self.reload();
+        }
+        if restart {
+            // The choice is on disk before the new Astur reads it. Not
+            // gated on self.error: an unrelated banner would block it.
+            self.flush();
+            if self.disk.config_folder == self.cfg.config_folder {
+                if sys::restart_astur() {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                } else {
+                    self.error = Some("Couldn't ask Astur to restart: close Settings, quit Astur from the tray and start it again.".into());
+                }
+            }
         }
     }
 
@@ -4094,7 +4220,9 @@ fn hotkey_ui(
             missing = missing_workspace(n, ws);
         }
         Some(Arg::Layout) => {
-            let opts: Vec<(&str, &str)> = LAYOUTS.iter().map(|&l| (l, layout_label(l))).collect();
+            let opts: Vec<(&str, &str)> = (LAYOUTS.iter().chain(&["next", "previous"]))
+                .map(|&l| (l, layout_label(l)))
+                .collect();
             combo(ui, "layout", &mut h.argument, &opts, 190.0);
         }
         Some(Arg::Command) => {
@@ -4865,7 +4993,7 @@ fn mouse(c: &Config) -> Vec<(String, &'static str)> {
         (format!("{m}right-drag"), "Resize from the nearest corner"),
         (
             format!("{m}wheel"),
-            "Scrolling layout: scroll the columns (with Shift: take the window along)",
+            "Scrolling layouts: scroll the columns or rows (with Shift: take the window along)",
         ),
         (
             "Wheel over the bar".into(),
@@ -4888,7 +5016,8 @@ fn colorref(c: u32) -> Color32 {
 }
 
 /// Tile rectangles per layout as fractions of the screen (x0, y0, x1, y1), for
-/// the picker thumbnails. Scrolling's last column runs off the edge on purpose.
+/// the picker thumbnails. Scrolling's last column (vertical: row) runs off
+/// the edge on purpose.
 fn layout_tiles(name: &str) -> &'static [[f32; 4]] {
     match name {
         "master" => &[
@@ -4914,6 +5043,11 @@ fn layout_tiles(name: &str) -> &'static [[f32; 4]] {
             [0.45, 0.0, 0.9, 1.0],
             [0.9, 0.0, 1.0, 1.0],
         ],
+        "scrolling_vertical" => &[
+            [0.0, 0.0, 1.0, 0.45],
+            [0.0, 0.45, 1.0, 0.9],
+            [0.0, 0.9, 1.0, 1.0],
+        ],
         _ => &[
             [0.0, 0.0, 0.5, 1.0],
             [0.5, 0.0, 1.0, 0.5],
@@ -4923,7 +5057,7 @@ fn layout_tiles(name: &str) -> &'static [[f32; 4]] {
     }
 }
 
-/// Six clickable drawn thumbnails, one per layout.
+/// Clickable drawn thumbnails, one per layout.
 fn layout_picker(ui: &mut Ui, v: &mut String) {
     ui.horizontal_wrapped(|ui| {
         for &l in LAYOUTS {
@@ -5223,20 +5357,22 @@ fn palette(v: &mut egui::Visuals, dark: bool) {
 
 // ---- pure helpers --------------------------------------------------------------
 
-/// Motion presets: (id, animation_ms, workspace_anim, window_anim,
-/// animation_easing), all with `animations` on. "smooth" is exactly the shipped
-/// defaults, so an untouched config reads as Smooth; values matching no preset
-/// read as Custom and are left alone.
-const MOTION: [(&str, i32, &str, &str, &str); 3] = [
-    ("subtle", 100, "fade", "glide", "smooth"),
-    ("smooth", 140, "slide", "glide", "cubic"),
-    ("springy", 220, "spring", "spring", "spring"),
+/// Motion presets: (id, animation_ms, workspace_anim, window_anim), all with
+/// `animations` on. "smooth" is exactly the shipped defaults, so an untouched
+/// config reads as Smooth; values matching no preset read as Custom and are
+/// left alone. They differ only in duration. The WM floors the workspace
+/// slide and scrolling-strip glides at 200 ms, so Quick and Smooth differ
+/// only in non-strip window glides, and Relaxed is 30 ms longer on a strip.
+const MOTION: [(&str, i32, &str, &str); 3] = [
+    ("quick", 100, "slide", "glide"),
+    ("smooth", 140, "slide", "glide"),
+    ("relaxed", 230, "slide", "glide"),
 ];
 const MOTION_OPTS: [(&str, &str); 4] = [
     ("off", "Off"),
-    ("subtle", "Subtle"),
+    ("quick", "Quick"),
     ("smooth", "Smooth"),
-    ("springy", "Springy"),
+    ("relaxed", "Relaxed"),
 ];
 
 fn motion_preset(c: &Config) -> Option<&'static str> {
@@ -5247,12 +5383,8 @@ fn motion_preset(c: &Config) -> Option<&'static str> {
         c.animation_ms,
         c.workspace_anim.as_str(),
         c.window_anim.as_str(),
-        c.animation_easing.as_str(),
     );
-    MOTION
-        .iter()
-        .find(|p| (p.1, p.2, p.3, p.4) == now)
-        .map(|p| p.0)
+    MOTION.iter().find(|p| (p.1, p.2, p.3) == now).map(|p| p.0)
 }
 
 /// Off only clears `animations`, so the style is kept for a later Custom.
@@ -5262,7 +5394,6 @@ fn set_motion(c: &mut Config, id: &str) {
         c.animation_ms = p.1;
         c.workspace_anim = p.2.to_string();
         c.window_anim = p.3.to_string();
-        c.animation_easing = p.4.to_string();
     }
 }
 
@@ -5295,7 +5426,7 @@ const ACTIONS: &[(&str, &str, Arg)] = &[
         "Move the window to workspace",
         Arg::Workspace,
     ),
-    ("layout", "Set this monitor's layout", Arg::Layout),
+    ("layout", "Set this workspace's layout", Arg::Layout),
     ("focus_next", "Focus next window", Arg::None),
     ("focus_prev", "Focus previous window", Arg::None),
     ("swap_next", "Swap with the next window", Arg::None),
@@ -5715,7 +5846,7 @@ fn hotkey_check(h: &HotkeyDef) -> Result<HotkeyDef, String> {
         Arg::Workspace if !h.argument.parse::<usize>().is_ok_and(|n| n >= 1) => {
             Err("Pick a workspace number".into())
         }
-        Arg::Layout if !LAYOUTS.contains(&h.argument.as_str()) => Err("Pick a layout".into()),
+        Arg::Layout if layout_step("", &h.argument).is_none() => Err("Pick a layout".into()),
         Arg::Command if h.argument.is_empty() => Err("Type the command to run".into()),
         _ => round_trip(h, format_hotkeys, parse_hotkeys),
     }
@@ -6036,6 +6167,16 @@ fn fold_mirrors(c: &mut Config, m: &mut Mirrors) {
         .filter(|t| !t.is_empty())
         .collect();
     trim_defaults(&mut c.monitor_layouts);
+    trim_defaults(&mut c.workspace_layouts);
+    for g in &mut c.monitor_outer_gaps {
+        *g = gap_entry(g);
+    }
+    trim_defaults(&mut c.monitor_outer_gaps);
+    // Keep the parser's invariant (outer_gap = smallest edge, min extra 0),
+    // or four raised extras show one gap here and read back as another.
+    let low = c.outer_gap_extra.into_iter().min().unwrap_or(0);
+    c.outer_gap += low;
+    c.outer_gap_extra = c.outer_gap_extra.map(|e| e - low);
     // Normalise the text mirrors to what survived validation; rows stay.
     *m = Mirrors {
         rows: std::mem::take(&mut m.rows),
@@ -6083,6 +6224,8 @@ fn conf_pairs(c: &Config) -> (Pairs, Pairs) {
         ("start_tiled", b(c.start_tiled)),
         ("layout", c.layout.clone()),
         ("monitor_layouts", c.monitor_layouts.join(", ")),
+        ("workspace_layouts", c.workspace_layouts.join(", ")),
+        ("monitor_outer_gaps", c.monitor_outer_gaps.join(", ")),
         ("master_ratio", format!("{:.2}", c.master_ratio)),
         (
             "scroll_default_width",
@@ -6091,8 +6234,10 @@ fn conf_pairs(c: &Config) -> (Pairs, Pairs) {
         ("scroll_width_presets", fractions(&c.scroll_width_presets)),
         ("scroll_height_presets", fractions(&c.scroll_height_presets)),
         ("scroll_center", c.scroll_center.clone()),
+        ("scroll_peek", c.scroll_peek.to_string()),
+        ("scroll_move", c.scroll_move.clone()),
         ("tab_bar_height", c.tab_bar_height.to_string()),
-        ("outer_gap", c.outer_gap.to_string()),
+        ("outer_gap", gaps_text(c.outer_gaps(), ", ")),
         ("inner_gap", c.inner_gap.to_string()),
         ("cursor_follows_focus", b(c.cursor_follows_focus)),
         ("focus_follows_mouse", b(c.focus_follows_mouse)),
@@ -6101,7 +6246,6 @@ fn conf_pairs(c: &Config) -> (Pairs, Pairs) {
         ("workspace_slide", b(c.workspace_slide)),
         ("workspace_anim", c.workspace_anim.clone()),
         ("window_anim", c.window_anim.clone()),
-        ("animation_easing", c.animation_easing.clone()),
         ("theme", c.theme.clone()),
         ("acrylic", b(c.acrylic)),
         ("popup_font_name", c.popup_font_name.clone()),
@@ -6177,6 +6321,7 @@ fn conf_pairs(c: &Config) -> (Pairs, Pairs) {
         ("foreground_lock_disable", b(c.foreground_lock_disable)),
         ("async_window_pos", b(c.async_window_pos)),
         ("persist_state", b(c.persist_state)),
+        ("config_folder", c.config_folder.clone()),
         ("log_level", c.log_level.clone()),
         ("main_key", c.main_key.name().to_string()),
         ("extra_hotkeys", format_hotkeys(&c.extra_hotkeys)),
@@ -6352,6 +6497,19 @@ fn fractions(v: &[f32]) -> String {
     v.iter().map(f32::to_string).collect::<Vec<_>>().join(", ")
 }
 
+/// Set positional entry `i` (monitor i + 1) of a per-monitor list, padding
+/// with defaults so it lands on that monitor, not the next free slot.
+fn set_slot(v: &mut Vec<String>, i: usize, s: String) {
+    if v.get(i).map_or(s.is_empty(), |cur| *cur == s) {
+        return;
+    }
+    if v.len() <= i {
+        v.resize(i + 1, String::new());
+    }
+    v[i] = s;
+    trim_defaults(v);
+}
+
 /// Drop trailing "(default)" monitor entries: `scrolling, ,` means the same as
 /// `scrolling`, and keeping the canonical form stops a no-op edit reading dirty.
 fn trim_defaults(v: &mut Vec<String>) {
@@ -6370,6 +6528,9 @@ fn layout_label(name: &str) -> &str {
         "grid" => "Grid",
         "monocle" => "One at a time",
         "scrolling" => "Scrolling",
+        "scrolling_vertical" => "Vertical scrolling",
+        "next" => "Next layout",
+        "previous" => "Previous layout",
         _ => name,
     }
 }
@@ -6386,6 +6547,9 @@ fn layout_help(name: &str) -> &str {
         }
         "scrolling" => {
             "Scrolling: windows in columns on a strip wider than the screen, scrolled into view."
+        }
+        "scrolling_vertical" => {
+            "Vertical scrolling: full-width rows on a strip taller than the screen; Alt+Up and Alt+Down scroll it."
         }
         _ => name,
     }
@@ -9156,6 +9320,33 @@ mod sys {
         GetWindowThreadProcessId, IsWindowVisible, GWL_EXSTYLE, GW_OWNER, WS_EX_TOOLWINDOW,
     };
 
+    /// Astur's marker window, while the window manager runs.
+    fn astur_marker() -> Option<HWND> {
+        use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+        // SAFETY: a lookup by class name; nothing is kept.
+        let h = unsafe { FindWindowW(windows::core::w!("astur_marker"), PCWSTR::null()) };
+        h.ok().filter(|h| !h.0.is_null())
+    }
+
+    pub fn astur_running() -> bool {
+        astur_marker().is_some()
+    }
+
+    /// Ask the running Astur to restart, as its power menu's Restart Astur
+    /// does (the WM's RESTART_MSG). True = asked.
+    pub fn restart_astur() -> bool {
+        use windows::Win32::Foundation::WPARAM;
+        use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, RegisterWindowMessageW};
+        let Some(h) = astur_marker() else {
+            return false;
+        };
+        // SAFETY: registers a message name and posts it with no pointers.
+        unsafe {
+            let msg = RegisterWindowMessageW(windows::core::w!("AsturRestart"));
+            msg != 0 && PostMessageW(h, msg, WPARAM(0), LPARAM(0)).is_ok()
+        }
+    }
+
     /// How many screens are connected: how many "Screen N" boxes the bar's
     /// screen picker offers. One call, no message sent, cheap every frame.
     pub fn screens() -> u32 {
@@ -9532,6 +9723,19 @@ mod tests {
     }
 
     #[test]
+    fn folding_normalises_the_outer_gap_edges() {
+        // Four raised extras showed gap 8 here while the file read back 18.
+        let mut c = Config {
+            outer_gap: 8,
+            outer_gap_extra: [10, 12, 10, 10],
+            ..Config::defaults()
+        };
+        let mut m = Mirrors::from(&c);
+        fold_mirrors(&mut c, &mut m);
+        assert_eq!((c.outer_gap, c.outer_gap_extra), (18, [0, 2, 0, 0]));
+    }
+
+    #[test]
     fn drawing_a_slider_keeps_an_out_of_range_value() {
         // egui's default clamping rewrote a value just by drawing its slider:
         // opening Layout & gaps and saving turned outer_gap = 120 into 100.
@@ -9715,6 +9919,17 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_moved_away_is_not_recreated() {
+        let paths = temp_paths("moved", "", "");
+        let mut app = App::load(paths.clone());
+        std::fs::remove_dir_all(paths[0].parent().unwrap()).unwrap();
+        app.cfg.inner_gap = 3;
+        app.commit();
+        assert!(!paths[0].parent().unwrap().exists());
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("moved")));
+    }
+
+    #[test]
     fn undo_adopts_an_outside_edit_instead_of_writing_over_it() {
         let paths = temp_paths("outside", "outer_gap = 10\n", "");
         let mut app = App::load(paths.clone());
@@ -9802,12 +10017,14 @@ mod tests {
             set_motion(&mut c, id);
             assert_eq!(motion_preset(&c), Some(id));
         }
-        set_motion(&mut c, "springy");
+        // The owner's own 230 / slide / glide lights up Relaxed.
+        let mut c = astur_config::parse_text("animation_ms = 230\nworkspace_anim = spring\n");
+        assert_eq!(motion_preset(&c), Some("relaxed"));
         c.animation_ms += 1;
         assert_eq!(motion_preset(&c), None); // Custom, left alone
         set_motion(&mut c, "off");
         assert!(!c.animations);
-        assert_eq!(c.animation_ms, 221, "Off keeps the style");
+        assert_eq!(c.animation_ms, 231, "Off keeps the style");
     }
 
     #[test]
@@ -10532,6 +10749,7 @@ key_close_window = F4
             Page::Layout,
             Page::Windows,
             Page::Appearance,
+            Page::Motion,
             Page::Launcher,
             Page::Extras,
         ] {
@@ -10553,7 +10771,7 @@ key_close_window = F4
                 until: Instant::now() + TRIAL,
             });
             if name.starts_with("Full-") {
-                for salt in ["shortcuts", "launcher", "extras", "windows"] {
+                for salt in ["shortcuts", "launcher", "extras", "windows", "motion"] {
                     open_more(&ctx, salt);
                 }
             }

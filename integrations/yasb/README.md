@@ -16,14 +16,15 @@ The settings exe embeds the examples, so these copy buttons work with a portable
 installation too. For manual configuration:
 
 1. Run an Astur build containing this integration. In
-   `%USERPROFILE%\.astur\astur.conf`, add:
+   `astur.conf` (in `%APPDATA%\Astur`, or `%USERPROFILE%\.astur` with
+   `config_folder = home`), add:
 
    ```ini
    yasb_enabled = true
    yasb_port = 6123
    ```
 
-2. Disable Astur's built-in bar in `%USERPROFILE%\.astur\navbar.conf`:
+2. Disable Astur's built-in bar in `navbar.conf` (same folder):
 
    ```ini
    enabled = false

@@ -31,9 +31,10 @@ mod yasb;
 use astur_config as config;
 use config::{config_path, load_config, Config, HotkeyDef, WindowRule};
 use layout::{
-    clamp_offset, classify, col_width, columns_layout, dwindle_layout, grid_layout, master_stack,
-    monocle_layout, next_preset, park_spot, resize_dwindle, scroll_to_show, split_ratio,
-    strip_layout, strip_spans, Center, StripCol, StripOut, Vis,
+    clamp_offset, classify, columns_layout, drag_width, dwindle_layout, edge_inset, grid_layout,
+    master_stack, monocle_layout, next_preset, park_spot, peek_px, resize_dwindle, scroll_to_show,
+    snap_offset, split_ratio, strip_base, strip_layout, strip_layout_v, strip_spans, transpose,
+    Center, StripCol, StripOut, Vis,
 };
 
 use windows::core::{w, PCWSTR};
@@ -727,6 +728,11 @@ const SLIDE_CLASS: PCWSTR = w!("astur_slide");
 /// through (SWITCH-14).
 const CLICK_THROUGH_MAX_MS: i32 = 250;
 
+/// Shortest glide on a scrolling strip (owner decision D4, the tuning knob).
+/// At most CLICK_THROUGH_MAX_MS, so a floored glide stays click-through.
+const STRIP_GLIDE_MIN_MS: i32 = 200;
+const _: () = assert!(STRIP_GLIDE_MIN_MS <= CLICK_THROUGH_MAX_MS);
+
 /// Extended style for the slide and glide overlays. Up to
 /// CLICK_THROUGH_MAX_MS they are layered + transparent, so clicks, the wheel
 /// and Alt+drag go straight to the real windows, which are already at their
@@ -1068,36 +1074,17 @@ fn ease_in_out_cubic(t: f64) -> f64 {
     }
 }
 
-/// Overshoot ease: passes the target then settles back to it — the "spring"
-/// feel. The back-ease is front-loaded (fast throw) and already lands with zero
-/// velocity at t=1 (its derivative there is 0), so the settle is inherently
-/// soft — no extra smoothing needed. `C1` sets overshoot strength (1.70158 =
-/// classic back-ease; 1.10 was too timid to read as a spring). Lands EXACTLY on
-/// the target at t=1 — required, or the final frame misaligns with the real
-/// windows and the reveal pops. Returns values >1.0 around the tail, so callers
-/// must have headroom past the target (the wallpaper backdrop covers the sliver
-/// exposed past the edge at peak overshoot).
-#[inline]
-fn ease_out_back(t: f64) -> f64 {
-    const C1: f64 = 1.40; // ~13% overshoot — a confident spring, not cartoonish
-    const C3: f64 = C1 + 1.0;
-    let u = t - 1.0;
-    1.0 + C3 * u * u * u + C1 * u * u
-}
-
-/// Fade alpha ramp: 0→1, fast-out so the incoming workspace reads quickly.
-#[inline]
-fn ease_out_cubic(t: f64) -> f64 {
-    let u = 1.0 - t;
-    1.0 - u * u * u
-}
-
 /// The incoming image's opacity at fade progress `t`: exactly 0 (the outgoing
 /// frame, what frame 0 shows) for t <= 0, exactly 255 (the incoming snapshot,
-/// pixel-aligned with the real windows underneath) for t >= 1.
+/// pixel-aligned with the real windows underneath) for t >= 1. The slide's
+/// symmetric ease, not an ease-out: ease-out put up to 43% of a 100 ms fade
+/// on the first composed frame (a hard start), then spent its last 40%
+/// changing by under 7% (a dead tail). Both curves peak at slope 3, so the
+/// largest one-frame step (~42% at 100 ms, ~32% at 140 ms, 60 Hz) is the
+/// same; it only moves to mid-fade, where the two images are already mixed.
 #[inline]
 fn fade_alpha(t: f64) -> u8 {
-    (255.0 * ease_out_cubic(t.clamp(0.0, 1.0))).round() as u8
+    (255.0 * ease_in_out_cubic(t.clamp(0.0, 1.0))).round() as u8
 }
 
 /// Workspace-switch animation style. Parsed once per switch from the config
@@ -1106,7 +1093,6 @@ fn fade_alpha(t: f64) -> u8 {
 enum WsAnim {
     Off,
     Slide,
-    Spring,
     Fade,
 }
 
@@ -1118,7 +1104,6 @@ impl WsAnim {
         }
         match cfg.workspace_anim.as_str() {
             "off" => WsAnim::Off,
-            "spring" => WsAnim::Spring,
             "fade" => WsAnim::Fade,
             _ => WsAnim::Slide,
         }
@@ -1632,6 +1617,12 @@ unsafe extern "system" fn marker_wndproc(h: HWND, msg: u32, w: WPARAM, l: LPARAM
     } else if msg != 0 && msg == TASKBAR_CREATED_MSG.load(Ordering::Relaxed) {
         // Explorer (re)started: the wallpaper window is a new one.
         wp_explorer_restarted();
+    } else if msg != 0 && msg == RESTART_MSG.load(Ordering::Relaxed) {
+        // Settings' "Restart Astur now". Not once an exit restore began.
+        if !EXITING.load(Ordering::SeqCst) {
+            sysmenu_exec(SysAct::RestartAstur);
+        }
+        return LRESULT(0);
     } else if msg == WM_REBUILD_BARS {
         // The deferred rebuild, running on a clean stack.
         BARS_REBUILD_PENDING.store(false, Ordering::Relaxed);
@@ -2294,8 +2285,8 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         }
     }
     // Alt+wheel / Alt+horizontal wheel over a scrolling monitor: scroll the
-    // strip under the cursor one column per whole notch, or per swipe (a
-    // touchpad's partial deltas add up to one, see scroll_wheel_steps).
+    // strip under the cursor one column per whole notch, or per 120 of a
+    // swipe's partial deltas, rate-limited (see scroll_wheel_steps).
     // Gates in cost order, all lock-free: the message, then
     // alt_wheel_scrolls. Only then the push, like a hotkey (and, like one, it
     // re-aims a running motion instead of cancelling it, see the top of this
@@ -2309,15 +2300,18 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         let delta = if msg == WM_MOUSEHWHEEL { raw } else { -raw };
         let mut acc = SCROLL_WHEEL_ACC.load(Ordering::Relaxed);
         let mut latch = SCROLL_WHEEL_LATCH.load(Ordering::Relaxed);
+        let mut stepped = SCROLL_WHEEL_STEP_T.load(Ordering::Relaxed);
         let steps = scroll_wheel_steps(
             &mut acc,
             &mut latch,
+            &mut stepped,
             SCROLL_WHEEL_T.load(Ordering::Relaxed),
             info.time,
             delta,
         );
         SCROLL_WHEEL_ACC.store(acc, Ordering::Relaxed);
         SCROLL_WHEEL_LATCH.store(latch, Ordering::Relaxed);
+        SCROLL_WHEEL_STEP_T.store(stepped, Ordering::Relaxed);
         SCROLL_WHEEL_T.store(info.time, Ordering::Relaxed);
         mask_main();
         if steps != 0 {
@@ -2333,6 +2327,22 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
 
     if matches!(msg, WM_MOUSEWHEEL | WM_MOUSEHWHEEL) {
         mask_wheel();
+    }
+    // A plain click on a peek sliver reveals its column and never reaches the
+    // app (see PEEK_N). Gates in cost order: message, the idle count, the
+    // published slivers, no main key (Alt-drag below keeps it), and the
+    // window really under the cursor (not a menu, toast or floating window
+    // over the sliver).
+    if msg == WM_LBUTTONDOWN && PEEK_N.load(Ordering::Relaxed) != 0 {
+        let h = peek_at(pt);
+        if h != 0 && !main_held() && root_window_at(pt).is_some_and(|r| r.0 as isize == h) {
+            PEEK_UP.store(true, Ordering::Relaxed);
+            push_cmd(Cmd::ActivateWindow(h));
+            return suppress;
+        }
+    }
+    if msg == WM_LBUTTONUP && PEEK_UP.swap(false, Ordering::Relaxed) {
+        return suppress;
     }
     match msg {
         WM_LBUTTONDOWN if main_held() && !drag_active() => {
@@ -3050,11 +3060,16 @@ static SCROLLMON_B: [AtomicI32; MAX_SCROLLMONS] = [const { AtomicI32::new(0) }; 
 // hook timestamp of the last Alt+wheel event. Mouse-hook thread only.
 static SCROLL_WHEEL_ACC: AtomicI32 = AtomicI32::new(0);
 static SCROLL_WHEEL_T: AtomicU32 = AtomicU32::new(0);
-// Direction of the swipe that already stepped (scroll_wheel_steps), 0 = none.
+// Direction of the swipe that already stepped (scroll_wheel_steps), 0 = none,
+// and the hook timestamp of that step.
 static SCROLL_WHEEL_LATCH: AtomicI32 = AtomicI32::new(0);
+static SCROLL_WHEEL_STEP_T: AtomicU32 = AtomicU32::new(0);
 /// A pause this long between Alt+wheel events starts a fresh count, so the
 /// leftover of one touchpad swipe never counts towards the next.
 const SCROLL_WHEEL_GAP_MS: u32 = 300;
+/// A swipe steps at most once per this long (D6), so a touchpad's fast
+/// stream and its momentum tail do not run the strip away. The feel knob.
+const SCROLL_SWIPE_STEP_MS: u32 = 150;
 
 /// Publish the scrolling monitors' full rects for the mouse hook. A no-op
 /// when they did not change, which is nearly always. While they change the
@@ -3097,31 +3112,139 @@ fn scrollmon_at(pt: POINT) -> bool {
     })
 }
 
+// Hook-visible peek slivers: each part of a Peek tile within `2 * peek +
+// outer` of a strip's strip-axis edges (peek_slivers), with its window.
+// A plain left click there is Astur's: the hook eats it (and its button-up)
+// and pushes ActivateWindow, because the left
+// sliver is the window's caption-button corner and a quick click would
+// otherwise close the app before the reveal moves it. Written by the manager
+// after every command (strip_after_command); PEEK_N = 0 is the idle
+// short-circuit, and 0 while the slots are rewritten (a click in that
+// instant reaches the app, the 2.4 behaviour).
+const MAX_PEEKS: usize = 16;
+static PEEK_N: AtomicU32 = AtomicU32::new(0);
+static PEEK_L: [AtomicI32; MAX_PEEKS] = [const { AtomicI32::new(0) }; MAX_PEEKS];
+static PEEK_T: [AtomicI32; MAX_PEEKS] = [const { AtomicI32::new(0) }; MAX_PEEKS];
+static PEEK_R: [AtomicI32; MAX_PEEKS] = [const { AtomicI32::new(0) }; MAX_PEEKS];
+static PEEK_B: [AtomicI32; MAX_PEEKS] = [const { AtomicI32::new(0) }; MAX_PEEKS];
+static PEEK_HWND: [AtomicIsize; MAX_PEEKS] = [const { AtomicIsize::new(0) }; MAX_PEEKS];
+// The hook ate a left button-down on a sliver: eat the matching up too.
+static PEEK_UP: AtomicBool = AtomicBool::new(false);
+
+/// The hook's click region of a Peek tile's slot `raw`: its parts inside
+/// the tile `area` within `2 * peek + outer` of the strip-axis edges (left
+/// and right, or top and bottom on a `vertical` strip). That holds a whole
+/// end sliver (up to 2 * peek wide, layout::strip_base) but never more of a
+/// half-visible column (`scroll_center = always`). `peek` is the px in
+/// effect (layout::peek_px); 0 gives no region.
+fn peek_slivers(
+    area: RECT,
+    outer: i32,
+    peek: i32,
+    vertical: bool,
+    raw: RECT,
+) -> impl Iterator<Item = RECT> {
+    let band = 2 * peek + outer;
+    let bands = if vertical {
+        [
+            RECT {
+                bottom: area.top + band,
+                ..area
+            },
+            RECT {
+                top: area.bottom - band,
+                ..area
+            },
+        ]
+    } else {
+        [
+            RECT {
+                right: area.left + band,
+                ..area
+            },
+            RECT {
+                left: area.right - band,
+                ..area
+            },
+        ]
+    };
+    bands
+        .into_iter()
+        .filter(move |b| peek > 0 && rects_overlap(b, &raw))
+        .map(move |b| RECT {
+            left: b.left.max(raw.left),
+            top: b.top.max(raw.top),
+            right: b.right.min(raw.right),
+            bottom: b.bottom.min(raw.bottom),
+        })
+}
+
+/// Publish the peek slivers for the mouse hook (extra ones past MAX_PEEKS
+/// are not routed: their clicks reach the app).
+fn peek_publish(slivers: &[(RECT, isize)]) {
+    let n = slivers.len().min(MAX_PEEKS);
+    PEEK_N.store(0, Ordering::Release);
+    for (i, (r, h)) in slivers.iter().take(n).enumerate() {
+        PEEK_L[i].store(r.left, Ordering::Relaxed);
+        PEEK_T[i].store(r.top, Ordering::Relaxed);
+        PEEK_R[i].store(r.right, Ordering::Relaxed);
+        PEEK_B[i].store(r.bottom, Ordering::Relaxed);
+        PEEK_HWND[i].store(*h, Ordering::Relaxed);
+    }
+    PEEK_N.store(n as u32, Ordering::Release);
+}
+
+/// The window whose peek sliver is under `pt`, or 0. Hook-legal: atomic
+/// loads only.
+fn peek_at(pt: POINT) -> isize {
+    let n = (PEEK_N.load(Ordering::Acquire) as usize).min(MAX_PEEKS);
+    (0..n)
+        .find(|&i| {
+            pt.x >= PEEK_L[i].load(Ordering::Relaxed)
+                && pt.x < PEEK_R[i].load(Ordering::Relaxed)
+                && pt.y >= PEEK_T[i].load(Ordering::Relaxed)
+                && pt.y < PEEK_B[i].load(Ordering::Relaxed)
+        })
+        .map_or(0, |i| PEEK_HWND[i].load(Ordering::Relaxed))
+}
+
 /// Whole columns in one Alt+wheel event (`delta` > 0 = right), carrying
 /// partial deltas in `acc` like the bar's wheel_steps. `last` and `now` are
 /// hook timestamps (ms, wrapping): a pause over SCROLL_WHEEL_GAP_MS drops the
-/// carried remainder first. A notched wheel steps per notch; a swipe (partial
-/// deltas: a touchpad, a smooth wheel) steps one column, then `latch` (the
-/// direction it stepped, 0 = none) swallows the rest of it until a pause or a
-/// reversal. Pure, so the hook's arithmetic is testable.
-fn scroll_wheel_steps(acc: &mut i32, latch: &mut i32, last: u32, now: u32, delta: i32) -> i32 {
+/// carried remainder first. A notched wheel steps per notch (a whole 120
+/// inside a running swipe waits like the rest). A swipe (partial
+/// deltas: a touchpad, a smooth wheel) steps one column per 120 of delta, at
+/// most once per SCROLL_SWIPE_STEP_MS: `latch` is the direction it last
+/// stepped (0 = none) at `stepped`, and while that cools down at most one
+/// more step waits in `acc`. A pause or a reversal clears it. Pure, so the
+/// hook's arithmetic is testable.
+fn scroll_wheel_steps(
+    acc: &mut i32,
+    latch: &mut i32,
+    stepped: &mut u32,
+    last: u32,
+    now: u32,
+    delta: i32,
+) -> i32 {
     if now.wrapping_sub(last) > SCROLL_WHEEL_GAP_MS {
         *acc = 0;
         *latch = 0;
     }
-    if *latch != 0 {
-        if delta.signum() == *latch {
-            return 0;
-        }
+    if delta.signum() != *latch {
         *latch = 0; // a reversal; wheel_steps drops the remainder
     }
     let steps = wheel_steps(acc, delta);
-    if steps != 0 && delta % 120 != 0 {
-        *acc = 0;
-        *latch = steps.signum();
-        return steps.signum();
+    if steps == 0 || (delta % 120 == 0 && *latch == 0) {
+        return steps;
     }
-    steps
+    if *latch != 0 && now.wrapping_sub(*stepped) < SCROLL_SWIPE_STEP_MS {
+        *acc = steps.signum() * 120;
+        return 0;
+    }
+    *acc = 0;
+    *latch = steps.signum();
+    *stepped = now;
+    steps.signum()
 }
 
 /// Fold the Alt+wheel scrolls queued right behind `c` into it: a flick
@@ -3258,7 +3381,7 @@ struct MonBar {
     occupied: u64,
     title: String,
     apps: Vec<BarApp>,
-    layout: String, // this monitor's own layout (layouts are per monitor)
+    layout: String, // the layout of this monitor's shown workspace (#28)
     /// `workspace_apps`: per mark, up to 3 cached app icons (WS_ICON_PX;
     /// 0 / -1 = placeholder) of that workspace's windows. Empty when off.
     ws_icons: Vec<Vec<isize>>,
@@ -3957,6 +4080,9 @@ struct Workspace {
     // Scrolling-layout columns, widths and scroll position. Only the
     // scrolling layout reads it; `windows` stays the membership and order.
     strip: Strip,
+    // A runtime layout switch (Cmd::SetLayout, #28); None = what the config
+    // gives (Manager::layout). A reload clears it, a display change keeps it.
+    layout: Option<&'static str>,
 }
 
 impl Workspace {
@@ -3967,6 +4093,7 @@ impl Workspace {
             focused: 0,
             splits: Vec::new(),
             strip: Strip::default(),
+            layout: None,
         }
     }
 
@@ -4094,14 +4221,36 @@ impl Workspace {
         let Some(ni) = step(ci, dir, cols.len()) else {
             return false;
         };
-        // Already adjacent in `windows`: sharing the neighbour's id is the
-        // whole move.
+        // Move `h` right next to the target column in `windows` too, so an
+        // untiled (minimised, floating) window between them cannot split the
+        // stack when it comes back; then share the neighbour's id.
+        self.windows.retain(|&w| w != h);
+        let edge = if dir < 0 {
+            *cols[ni].last().unwrap()
+        } else {
+            cols[ni][0]
+        };
+        let p = self.windows.iter().position(|&w| w == edge).unwrap_or(0);
+        self.windows.insert(if dir < 0 { p + 1 } else { p }, h);
         let id = self.strip.col_id(cols[ni][0]);
         self.strip.col_of.insert(h, id);
         for w in cols[ni].iter().chain([&h]) {
             self.strip.weights.remove(w);
         }
         true
+    }
+
+    /// One "move column" step (Alt+Shift+arrow along the strip, J/K, the
+    /// wheel, IPC): `h`'s column swaps with its neighbour, or with
+    /// `scroll_move = stack` (`stack`) `h` alone walks, consume_or_expel: into
+    /// the next column, then into its own column past it. False at the strip
+    /// end with nothing to join, as move_column.
+    fn move_step(&mut self, tiled: &[isize], h: isize, dir: i32, stack: bool) -> bool {
+        if stack {
+            self.consume_or_expel(tiled, h, dir)
+        } else {
+            self.move_column(tiled, h, dir)
+        }
     }
 
     /// Swap `h`'s column with its neighbour on the `dir` side.
@@ -4161,9 +4310,9 @@ impl Workspace {
 /// its own with it (`forget`, from detach_window).
 #[derive(Default)]
 struct Strip {
-    offset: i32,                  // viewport left edge in strip px; clamped at layout time
-    col_of: HashMap<isize, u32>,  // window -> column id (missing = own column)
-    cols: HashMap<u32, ColMeta>,  // column id -> metadata (missing = defaults)
+    offset: i32, // view start in strip px (y if vertical); clamped at layout time
+    col_of: HashMap<isize, u32>, // window -> column id (missing = own column)
+    cols: HashMap<u32, ColMeta>, // column id -> metadata (missing = defaults)
     weights: HashMap<isize, f32>, // window -> height weight in its column (missing = 1.0)
     next_id: u32,
 }
@@ -4482,57 +4631,94 @@ fn strip_rects(
     strip: &Strip,
     tiled: &[isize],
     focused: isize,
-    area: RECT,
+    tile: (RECT, i32, i32),
     cfg: &Config,
     tab_h: i32,
+    vertical: bool,
 ) -> Vec<RECT> {
-    strip_out(strip, tiled, focused, area, cfg, tab_h).tiles
+    strip_out(strip, tiled, focused, tile, cfg, tab_h, vertical).tiles
+}
+
+/// The tile area's length along the strip: its width, or its height on a
+/// vertical strip. Every 1-D strip function (base, clamp, scroll) gets it.
+fn strip_len(view: RECT, vertical: bool) -> i32 {
+    if vertical {
+        view.bottom - view.top
+    } else {
+        view.right - view.left
+    }
 }
 
 /// strip_rects with the tab-bar rects too (layout::StripOut), so the tab
-/// bars sit exactly where the placement left room for them.
+/// bars sit exactly where the placement left room for them. `tile` is the
+/// strip's (tile area, outer gap, peek px) and `vertical` its axis:
+/// Manager::strip_tile.
 fn strip_out(
     strip: &Strip,
     tiled: &[isize],
     focused: isize,
-    area: RECT,
+    (area, outer, peek): (RECT, i32, i32),
     cfg: &Config,
     tab_h: i32,
+    vertical: bool,
 ) -> StripOut {
     let scs = strip.strip_cols(&strip.columns(tiled), focused, cfg.scroll_default_width);
-    let view_w = area.right - area.left;
+    let len = strip_len(area, vertical);
     let widths: Vec<f32> = scs.iter().map(|c| c.width).collect();
-    let spans = strip_spans(view_w, &widths, cfg.outer_gap, cfg.inner_gap);
-    let offset = clamp_offset(view_w, &spans, cfg.outer_gap, strip.offset);
-    strip_layout(area, &scs, offset, cfg.outer_gap, cfg.inner_gap, tab_h)
+    let spans = strip_spans(
+        strip_base(len, &widths, peek, outer, cfg.inner_gap).0,
+        &widths,
+        outer,
+        cfg.inner_gap,
+    );
+    // A strip that fits sits centred (#27); a vertical one at the top (D2).
+    let offset = clamp_offset(len, &spans, outer, strip.offset, !vertical);
+    if vertical {
+        strip_layout_v(area, &scs, offset, outer, cfg.inner_gap, tab_h, peek)
+    } else {
+        strip_layout(area, &scs, offset, outer, cfg.inner_gap, tab_h, peek)
+    }
 }
 
 /// The offset that shows the column holding `focused`, per `mode`
-/// (ensure_visible passes `scroll_center`, Alt+C Center::Always; pure). None
-/// when `focused` is not in the strip.
+/// (ensure_visible passes `scroll_center`, Alt+C Center::Always; pure),
+/// starting from the stored offset, or from it realigned when `snap`
+/// (layout::snap_offset). None when `focused` is not in the strip and
+/// there is nothing to snap.
+#[allow(clippy::too_many_arguments)]
 fn strip_show_offset(
     strip: &Strip,
     tiled: &[isize],
     focused: isize,
-    view_w: i32,
+    (area, outer, peek): (RECT, i32, i32),
     cfg: &Config,
     mode: Center,
+    vertical: bool,
+    snap: bool,
 ) -> Option<i32> {
     let cols = strip.columns(tiled);
-    let (ci, _) = locate_tile(&cols, focused)?;
+    // A focus off the strip (floating, e.g. Settings) has no column to show,
+    // but a snap still applies: scroll_to_show then only clamps.
+    let ci = match locate_tile(&cols, focused) {
+        Some((ci, _)) => ci,
+        None if snap => usize::MAX,
+        None => return None,
+    };
     let widths: Vec<f32> = strip
         .strip_cols(&cols, focused, cfg.scroll_default_width)
         .iter()
         .map(|c| c.width)
         .collect();
-    let spans = strip_spans(view_w, &widths, cfg.outer_gap, cfg.inner_gap);
+    let len = strip_len(area, vertical);
+    let (base, p) = strip_base(len, &widths, peek, outer, cfg.inner_gap);
+    let spans = strip_spans(base, &widths, outer, cfg.inner_gap);
+    let offset = if snap {
+        snap_offset(len, &spans, outer, p, strip.offset, !vertical)
+    } else {
+        strip.offset
+    };
     Some(scroll_to_show(
-        view_w,
-        &spans,
-        cfg.outer_gap,
-        ci,
-        strip.offset,
-        mode,
+        len, &spans, outer, p, ci, offset, mode, !vertical,
     ))
 }
 
@@ -4558,16 +4744,42 @@ fn column_target(from: Option<usize>, n: i32, len: usize) -> Option<usize> {
 /// a new column before it, the right quarter one after it, the middle its own
 /// column right under it. On no window: None (stay put) inside the dragged
 /// window's own slot `own`, since a drag that went nowhere must not reorder;
-/// elsewhere a new column at the strip end on that side of `view`, the work
-/// area. ponytail: a drop in the gap between two columns also goes to an end;
-/// make it "between" if that ever bites.
+/// between the outermost of the strip's `tiles` on `view` (the work area), a
+/// gap, the nearest of them by x (then y) under the same quarter rule (the slot
+/// between two columns either way); elsewhere a new column at the strip end
+/// on that side of `view`.
 fn drop_zone(
     pt: POINT,
     target: Option<(isize, RECT)>,
     own: Option<RECT>,
     view: RECT,
+    tiles: &[(isize, RECT)],
 ) -> Option<DropAt> {
-    if let Some((t, r)) = target {
+    let inside = |o: RECT| pt.x >= o.left && pt.x < o.right && pt.y >= o.top && pt.y < o.bottom;
+    if target.is_none() && own.is_some_and(inside) {
+        return None;
+    }
+    let shown = tiles
+        .iter()
+        .filter(|(_, r)| r.left < view.right && r.right > view.left);
+    let lo = shown.clone().map(|(_, r)| r.left).min().unwrap_or(i32::MAX);
+    let hi = shown
+        .clone()
+        .map(|(_, r)| r.right)
+        .max()
+        .unwrap_or(i32::MIN);
+    let dist = |r: &RECT| (r.left - pt.x).max(pt.x - r.right + 1).max(0);
+    let gap = (lo <= pt.x && pt.x < hi)
+        .then(|| {
+            // Ties by x (a stacked column): the nearest tile starting above
+            // the point, so Below fills the gap it is in; else the top one.
+            let dy = |r: &RECT| (r.top - pt.y).max(pt.y - r.bottom + 1).max(0);
+            shown
+                .min_by_key(|(_, r)| (dist(r), r.top > pt.y, dy(r)))
+                .copied()
+        })
+        .flatten();
+    if let Some((t, r)) = target.or(gap) {
         let q = (r.right - r.left) / 4;
         return Some(if pt.x < r.left + q {
             DropAt::Before(t)
@@ -4576,10 +4788,6 @@ fn drop_zone(
         } else {
             DropAt::Below(t)
         });
-    }
-    let inside = |o: RECT| pt.x >= o.left && pt.x < o.right && pt.y >= o.top && pt.y < o.bottom;
-    if own.is_some_and(inside) {
-        return None;
     }
     Some(if pt.x < (view.left + view.right) / 2 {
         DropAt::First
@@ -4606,13 +4814,16 @@ fn strip_resize(released: RECT, placed: RECT, slot: RECT) -> (Option<i32>, Optio
     )
 }
 
-/// The bar's layout text on a scrolling monitor: the focused column's
-/// position, `scrolling 2/5`; `-` when the focus is not in the strip.
-fn scroll_label(focus_col: Option<usize>, cols: usize) -> String {
+/// The bar's layout text on a strip `layout`: its short name and the
+/// focused column's position, `scrolling 2/5` (`vertical 2/5` on
+/// scrolling_vertical); `-` when the focus is not in the strip; the layout
+/// alone on an empty strip.
+fn scroll_label(layout: &str, focus_col: Option<usize>, cols: usize) -> String {
+    let short = layout.strip_prefix("scrolling_").unwrap_or(layout);
     match focus_col {
-        Some(ci) => format!("scrolling {}/{cols}", ci + 1),
-        None if cols > 0 => format!("scrolling -/{cols}"),
-        None => "scrolling".to_string(),
+        Some(ci) => format!("{short} {}/{cols}", ci + 1),
+        None if cols > 0 => format!("{short} -/{cols}"),
+        None => layout.to_string(),
     }
 }
 
@@ -4649,11 +4860,9 @@ struct Monitor {
     full: RECT,      // whole monitor (rcMonitor): off-screen tests need it, not the work area
     base_work: RECT, // taskbar-excluded area, before the bar is subtracted
     work_area: RECT, // tiling area (base_work minus the status bar)
+    gaps: [i32; 4],  // outer gap per edge (top, right, bottom, left), set by reserve_bar
     workspaces: Vec<Workspace>,
     active: usize, // index of the currently-shown workspace
-    // This monitor's layout (one of config::LAYOUTS), set by resolve_layouts
-    // and changed at runtime by Cmd::SetLayout.
-    layout: String,
 }
 
 impl Monitor {
@@ -4667,36 +4876,18 @@ impl Monitor {
             full: work_area,
             base_work: work_area,
             work_area,
+            gaps: [0; 4],
             workspaces,
             active: 0,
-            layout: String::new(),
         }
     }
-}
 
-/// Give every monitor its layout from config by position (index 0 = monitor 1
-/// = leftmost, the window-rule numbering). The one exception: a monitor whose
-/// HMONITOR is in `keep` (the old set, on a display change) keeps a runtime
-/// switch, i.e. a layout that differs from config at its OLD index. A
-/// config-derived layout follows position, so a screen that shifts index
-/// (one plugged in to its left, screens back one by one after wake) picks up
-/// its new index's entry, as a restart would (#33). True when any monitor's
-/// layout changed.
-// ponytail: a switch to the layout config gives the new index reads as
-// config-derived on the next change; add a per-monitor flag if that matters.
-fn resolve_layouts(monitors: &mut [Monitor], cfg: &Config, keep: &[Monitor]) -> bool {
-    let mut changed = false;
-    for (i, m) in monitors.iter_mut().enumerate() {
-        let layout = match keep.iter().position(|k| k.hmon == m.hmon) {
-            Some(j) if keep[j].layout != cfg.layout_for_monitor(j) => keep[j].layout.as_str(),
-            _ => cfg.layout_for_monitor(i),
-        };
-        if m.layout != layout {
-            m.layout = layout.to_string();
-            changed = true;
-        }
+    /// Where tiles go and the outer gap every layout keeps there: the work
+    /// area with this monitor's per-edge gaps folded in (layout::edge_inset).
+    /// Every tile-geometry path reads this, never work_area + cfg.outer_gap.
+    fn tile_area(&self) -> (RECT, i32) {
+        edge_inset(self.work_area, self.gaps)
     }
-    changed
 }
 
 /// One queued switch command, resolved against a burst's virtual state.
@@ -4724,6 +4915,39 @@ struct Manager {
 impl Manager {
     fn mon_by_hmon(&self, raw: isize) -> Option<usize> {
         self.monitors.iter().position(|m| m.hmon == raw)
+    }
+
+    /// Workspace (mi, wi)'s layout, one of config::LAYOUTS (#28): its runtime
+    /// switch, else its `workspace_layouts` entry, else its monitor's layout
+    /// by position (monitor 1 = leftmost), so after a display change a screen
+    /// gets what a restart would give it (#33). "" for no such workspace.
+    fn layout(&self, mi: usize, wi: usize) -> &str {
+        match self.monitors.get(mi).and_then(|m| m.workspaces.get(wi)) {
+            Some(ws) => match ws.layout {
+                Some(l) => l,
+                None => self.cfg.layout_for_workspace(self.ml_to_global(mi, wi), mi),
+            },
+            None => "",
+        }
+    }
+
+    /// The layout monitor `mi` shows: its active workspace's.
+    fn active_layout(&self, mi: usize) -> &str {
+        self.layout(mi, self.monitors.get(mi).map_or(0, |m| m.active))
+    }
+
+    /// Monitor `mi`'s (tile_area, outer gap, `scroll_peek` in px at its
+    /// DPI) and whether workspace `wi`'s strip axis is vertical
+    /// (`scrolling_vertical`): what every strip-geometry path reads
+    /// (placement, scroll, Alt+C, tab bars, Alt+right-drag size, peek
+    /// slivers), each sizing columns through layout::strip_base. `mi` must
+    /// exist.
+    unsafe fn strip_tile(&self, mi: usize, wi: usize) -> ((RECT, i32, i32), bool) {
+        let vertical = config::strip_vertical(self.layout(mi, wi));
+        let m = &self.monitors[mi];
+        let (area, outer) = m.tile_area();
+        let peek = dpi_px(self.cfg.scroll_peek, monitor_dpi(m.hmon));
+        ((area, outer, peek), vertical)
     }
 
     /// Map a global (shared-mode) workspace index to (monitor, local workspace).
@@ -4879,7 +5103,7 @@ impl Manager {
     /// view; the caller retiles.
     fn detach_window(&mut self, h: isize) -> Option<(usize, usize, bool)> {
         let (mi, wi) = self.locate(h)?;
-        let scrolling = self.monitors.get(mi)?.layout == "scrolling";
+        let scrolling = config::is_strip(self.layout(mi, wi));
         let ws = self.monitors.get_mut(mi)?.workspaces.get_mut(wi)?;
         let was_floating = ws.floating.contains(&h);
         // Read before h leaves. h counts as tiled even when it is already
@@ -4948,7 +5172,7 @@ impl Manager {
         at: Option<DropAt>,
         floating: bool,
     ) {
-        let scrolling = !floating && self.monitors[mi].layout == "scrolling";
+        let scrolling = !floating && config::is_strip(self.layout(mi, wi));
         let ws = &mut self.monitors[mi].workspaces[wi];
         if scrolling {
             let tiled = unsafe { tiled_windows(ws) };
@@ -4986,8 +5210,8 @@ impl Manager {
     /// The scrolling monitor whose full rect holds (x, y): the strip an
     /// Alt+wheel there scrolls (Cmd::ScrollWheel).
     fn scroll_mon_at(&self, x: i32, y: i32) -> Option<usize> {
-        self.monitors.iter().position(|m| {
-            m.layout == "scrolling"
+        self.monitors.iter().enumerate().position(|(mi, m)| {
+            config::is_strip(self.active_layout(mi))
                 && x >= m.full.left
                 && x < m.full.right
                 && y >= m.full.top
@@ -5543,8 +5767,7 @@ unsafe extern "system" fn monitor_enum_proc(
 }
 
 /// Every monitor sorted left-to-right, each with one placeholder workspace
-/// (distribute_workspaces sets the real counts) and no layout yet
-/// (resolve_layouts).
+/// (distribute_workspaces sets the real counts).
 unsafe fn enumerate_monitors() -> Vec<Monitor> {
     let mut raw: Vec<(isize, RECT, RECT)> = Vec::new();
     let _ = EnumDisplayMonitors(
@@ -5628,6 +5851,8 @@ unsafe fn reserve_bar(monitors: &mut [Monitor], cfg: &Config) {
     let mask = cfg.bar_monitor_mask();
     for (index, m) in monitors.iter_mut().enumerate() {
         m.work_area = m.base_work;
+        // Physical px, as outer_gap always was (never DPI-scaled).
+        m.gaps = cfg.outer_gaps_for_monitor(index);
         // Auto-hide bars reserve nothing (they overlay on reveal). A floating
         // bar reserves its height plus the margin on both sides so tiles clear
         // the detached pill. A screen `monitors` leaves out has no bar: the
@@ -6409,7 +6634,8 @@ unsafe fn ipc_dispatch(line: &str) -> String {
         "toggle_tiling" => push_cmd(Cmd::ToggleTiling),
         "toggle_float" => push_cmd(Cmd::ToggleFloat),
         "close" => push_cmd(Cmd::CloseFocused),
-        "layout" if config::LAYOUTS.contains(&argument.as_str()) => {
+        // A name, `next` or `previous`: the active workspace's (#28).
+        "layout" if config::layout_step("", &argument).is_some() => {
             push_cmd(Cmd::SetLayout(argument));
         }
         "scratchpad" => push_cmd(Cmd::ToggleScratchpad),
@@ -6675,9 +6901,9 @@ unsafe fn restore_windows(list: &[isize]) {
             }
         }
     }
-    // Positions stay, except a parked scrolling tile's: it sits outside
-    // every monitor and comes back onto the nearest one (posted, see
-    // `reveal`: the shows above may not have landed yet).
+    // Positions stay, except a parked or peeking scrolling tile's: it sits
+    // (mostly) outside every monitor and comes back onto the nearest one
+    // (posted, see `reveal`: the shows above may not have landed yet).
     for &h in list {
         unpark_window(h, sent.get(&h).copied(), true);
     }
@@ -6717,6 +6943,13 @@ fn clamp_into(r: RECT, area: RECT) -> RECT {
         right: left + w,
         bottom: top + h,
     }
+}
+
+/// Less than half of `r`'s area lies on `m`.
+fn mostly_outside(r: &RECT, m: &RECT) -> bool {
+    let w = (r.right.min(m.right) - r.left.max(m.left)).max(0) as i64;
+    let h = (r.bottom.min(m.bottom) - r.top.max(m.top)).max(0) as i64;
+    2 * w * h < (r.right - r.left) as i64 * (r.bottom - r.top) as i64
 }
 
 /// GetMonitorInfoW of the monitor nearest `r`.
@@ -6807,8 +7040,15 @@ unsafe fn unpark_window(h: isize, sent: Option<RECT>, reveal: bool) -> bool {
     if GetWindowRect(hwnd, &mut live).is_err() {
         return false;
     }
+    // A reveal also brings in a strip sliver (scroll_peek) Astur left mostly
+    // off its monitor: after the quit nothing scrolls it back, and a top or
+    // left sliver shows no title bar to drag. Only a rect Astur sent, so a
+    // window the user put half off screen stays put.
+    let sliver = |r: &RECT| {
+        reveal && nearest_monitor_info(r).is_some_and(|mi| mostly_outside(r, &mi.rcMonitor))
+    };
     let from = match sent {
-        Some(s) if off(&s) => s,
+        Some(s) if off(&s) || sliver(&s) => s,
         _ if off(&live) => live,
         _ => return false,
     };
@@ -7048,7 +7288,11 @@ struct PlaceMap {
 
 impl PlaceMap {
     unsafe fn new(mgr: &Manager, mi: usize, wi: usize) -> Self {
-        let Some(mon) = mgr.monitors.get(mi).filter(|m| m.layout == "scrolling") else {
+        let Some(mon) = mgr
+            .monitors
+            .get(mi)
+            .filter(|_| config::is_strip(mgr.layout(mi, wi)))
+        else {
             return PlaceMap::default();
         };
         let all: Vec<RECT> = mgr.monitors.iter().map(|m| m.full).collect();
@@ -7117,11 +7361,18 @@ fn park_rect(r: RECT, own: RECT, all: &[RECT]) -> RECT {
 /// Model only: the caller retiles. A no-op off scrolling monitors and when
 /// the focus is not in the strip (floating, minimised, none).
 unsafe fn ensure_visible(mgr: &mut Manager, mi: usize, wi: usize) {
-    let Some(mon) = mgr.monitors.get_mut(mi).filter(|m| m.layout == "scrolling") else {
+    show_focus(mgr, mi, wi, false);
+}
+
+/// ensure_visible, realigning the stored offset first when `snap`
+/// (strip_show_offset).
+unsafe fn show_focus(mgr: &mut Manager, mi: usize, wi: usize, snap: bool) {
+    // "" (no such workspace) is no strip, so strip_tile's mi exists.
+    if !config::is_strip(mgr.layout(mi, wi)) {
         return;
-    };
-    let view_w = mon.work_area.right - mon.work_area.left;
-    let Some(ws) = mon.workspaces.get_mut(wi) else {
+    }
+    let (tile, vertical) = mgr.strip_tile(mi, wi);
+    let Some(ws) = mgr.monitors[mi].workspaces.get_mut(wi) else {
         return;
     };
     let mode = center_mode(&mgr.cfg.scroll_center);
@@ -7129,21 +7380,26 @@ unsafe fn ensure_visible(mgr: &mut Manager, mi: usize, wi: usize) {
         &ws.strip,
         &tiled_windows(ws),
         ws.focused,
-        view_w,
+        tile,
         &mgr.cfg,
         mode,
+        vertical,
+        snap,
     ) {
         ws.strip.offset = off;
     }
 }
 
-/// ensure_visible on every monitor's active workspace: after anything that
-/// changes the view width or the column widths under a strip (startup,
-/// reload, display and work-area changes).
+/// ensure_visible on every workspace of every monitor, the stored offset
+/// snapped to the new geometry first (a px value for the old view would
+/// leave the columns off their edges, a hidden strip's too once shown):
+/// after anything that changes the view width or the column widths under a
+/// strip (startup, reload, display and work-area changes, tiling back on).
 unsafe fn ensure_visible_all(mgr: &mut Manager) {
     for mi in 0..mgr.monitors.len() {
-        let a = mgr.monitors[mi].active;
-        ensure_visible(mgr, mi, a);
+        for wi in 0..mgr.monitors[mi].workspaces.len() {
+            show_focus(mgr, mi, wi, true);
+        }
     }
 }
 
@@ -7164,32 +7420,26 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
     if n == 0 {
         return Vec::new();
     }
-    let rects = match mon.layout.as_str() {
-        "master" => master_stack(
-            mon.work_area,
-            n,
-            mgr.cfg.master_ratio,
-            mgr.cfg.outer_gap,
-            mgr.cfg.inner_gap,
-        ),
-        "columns" => columns_layout(mon.work_area, n, mgr.cfg.outer_gap, mgr.cfg.inner_gap),
-        "grid" => grid_layout(mon.work_area, n, mgr.cfg.outer_gap, mgr.cfg.inner_gap),
-        "monocle" => monocle_layout(mon.work_area, n, mgr.cfg.outer_gap),
-        "scrolling" => strip_rects(
-            &ws.strip,
-            &tiled,
-            ws.focused,
-            mon.work_area,
-            &mgr.cfg,
-            dpi_px(mgr.cfg.tab_bar_height, monitor_dpi(mon.hmon)),
-        ),
-        _ => dwindle_layout(
-            mon.work_area,
-            n,
-            mgr.cfg.outer_gap,
-            mgr.cfg.inner_gap,
-            &ws.splits,
-        ),
+    let (area, outer) = mon.tile_area();
+    let inner = mgr.cfg.inner_gap;
+    let rects = match mgr.layout(mi, wi) {
+        "master" => master_stack(area, n, mgr.cfg.master_ratio, outer, inner),
+        "columns" => columns_layout(area, n, outer, inner),
+        "grid" => grid_layout(area, n, outer, inner),
+        "monocle" => monocle_layout(area, n, outer),
+        l if config::is_strip(l) => {
+            let (tile, vertical) = mgr.strip_tile(mi, wi);
+            strip_rects(
+                &ws.strip,
+                &tiled,
+                ws.focused,
+                tile,
+                &mgr.cfg,
+                dpi_px(mgr.cfg.tab_bar_height, monitor_dpi(mon.hmon)),
+                vertical,
+            )
+        }
+        _ => dwindle_layout(area, n, outer, inner, &ws.splits),
     };
     if rects.len() < n {
         return Vec::new();
@@ -7408,6 +7658,13 @@ unsafe fn motion_start(
         cold.iter().filter(|c| c.1.is_some()).count(),
         cold.len()
     ));
+    // A strip glide lasts at least STRIP_GLIDE_MIN_MS (a half-screen scroll
+    // at 140 ms read as a jump, #15); other layouts take animation_ms as is.
+    let ms = if map.own.is_some() {
+        mgr.cfg.animation_ms.max(STRIP_GLIDE_MIN_MS)
+    } else {
+        mgr.cfg.animation_ms.max(1)
+    };
     let req = GlideReq {
         generation,
         retarget: reaim,
@@ -7416,10 +7673,10 @@ unsafe fn motion_start(
         area,
         items,
         cold,
-        dur_ms: mgr.cfg.animation_ms.max(1) as u64,
+        dur_ms: ms as u64,
         dpi,
         queued: probe_now(),
-        ex_style: overlay_ex_style(mgr.cfg.animation_ms),
+        ex_style: overlay_ex_style(ms),
     };
     GLIDE_GF.store(gf, Ordering::Relaxed);
     if reaim {
@@ -7560,13 +7817,9 @@ unsafe fn motion_extras(
             let tiled = tiled_windows(ws);
             let cols = ws.strip.columns(&tiled);
             let tab_h = dpi_px(mgr.cfg.tab_bar_height, dpi);
+            let (tile, vertical) = mgr.strip_tile(mi, mon.active);
             let out = strip_out(
-                &ws.strip,
-                &tiled,
-                ws.focused,
-                mon.work_area,
-                &mgr.cfg,
-                tab_h,
+                &ws.strip, &tiled, ws.focused, tile, &mgr.cfg, tab_h, vertical,
             );
             let slots = tab_bar_slots(&ws.strip, &cols, ws.focused, &out, map);
             (cols, slots)
@@ -7657,9 +7910,15 @@ unsafe fn place_tiles(rects: Vec<(isize, RECT)>, map: &PlaceMap, probe: &mut Pro
 
 /// The window motion animation is on. It shows live thumbnails scaled into
 /// each window's moving rect: a resized window morphs, its content stretched
-/// between the ends and 1:1 at both.
+/// between the ends and 1:1 at both. Any `window_anim` but off: `spring`
+/// (the old Springy preset) used to turn every glide off.
 fn glide_enabled(cfg: &Config) -> bool {
-    cfg.animations && cfg.animation_ms > 0 && cfg.window_anim == "glide"
+    cfg.animations && cfg.animation_ms > 0 && cfg.window_anim != "off"
+}
+
+/// The workspace switch animates (slide or fade).
+fn slide_enabled(cfg: &Config) -> bool {
+    cfg.animations && cfg.animation_ms > 0 && WsAnim::from_cfg(cfg) != WsAnim::Off
 }
 
 /// GetWindowRect, or an empty rect when the window is gone.
@@ -8094,9 +8353,10 @@ unsafe fn tile_slot(mgr: &Manager, h: isize) -> Option<(RECT, Vis)> {
 /// the strip scrolls to it and a hidden tab shows. The retile is the
 /// animated one. A cheap no-op on every other layout.
 unsafe fn strip_reveal(mgr: &mut Manager, h: isize) {
-    let Some((mi, wi)) = mgr.locate(h).filter(|&(mi, wi)| {
-        mgr.monitors[mi].layout == "scrolling" && wi == mgr.monitors[mi].active
-    }) else {
+    let Some((mi, wi)) = mgr
+        .locate(h)
+        .filter(|&(mi, wi)| config::is_strip(mgr.layout(mi, wi)) && wi == mgr.monitors[mi].active)
+    else {
         return;
     };
     if tile_slot(mgr, h).is_none_or(|(_, v)| v == Vis::Full) {
@@ -8439,7 +8699,7 @@ struct SlideReq {
     rect: RECT,           // work-area rect (overlay geometry)
     dir: i32,             // +1 = new ws came from the right, -1 from the left
     dur_ms: u64,
-    mode: WsAnim,              // slide / spring / fade (off never reaches the worker)
+    mode: WsAnim,              // slide / fade (off never reaches the worker)
     queued: Option<Instant>,   // dispatch time, for the pickup probe (debug only)
     gen: u64,                  // SLIDE_GEN of this request (see the overlay state notes)
     ex_style: WINDOW_EX_STYLE, // overlay_ex_style of the configured animation_ms
@@ -8933,6 +9193,9 @@ static WP_WANTED: AtomicBool = AtomicBool::new(false);
 static WP_TARGETS: Mutex<Vec<(isize, RECT)>> = Mutex::new(Vec::new());
 /// Registered "TaskbarCreated" message (Explorer broadcasts it on (re)start).
 static TASKBAR_CREATED_MSG: AtomicU32 = AtomicU32::new(0);
+/// Registered "AsturRestart": Settings posts it to the marker to restart
+/// Astur (its folder move, #26), through the system menu's Restart Astur.
+static RESTART_MSG: AtomicU32 = AtomicU32::new(0);
 
 /// One cropped wallpaper DDB for one monitor's work area.
 struct WpEntry {
@@ -8979,17 +9242,17 @@ static WP_RENDERS: AtomicU64 = AtomicU64::new(0);
 static WP_RENDER_MS: AtomicU32 = AtomicU32::new(0);
 
 /// Does any configured animation composite over the wallpaper? Moving slide
-/// and spring frames do, and so does the glide. Fade crossfades two whole
+/// frames do, and so does the glide. Fade crossfades two whole
 /// captures and never reads it. `animations` = animations on AND a non-zero
 /// duration.
 fn wallpaper_needed(animations: bool, ws: WsAnim, window_anim: &str) -> bool {
-    animations && (matches!(ws, WsAnim::Slide | WsAnim::Spring) || window_anim == "glide")
+    animations && (ws == WsAnim::Slide || window_anim != "off")
 }
 
-/// Does this slide read the wallpaper? Only moving slide/spring frames: a
+/// Does this slide read the wallpaper? Only moving slide frames: a
 /// first visit (no incoming image) holds frame 0, and fade blends captures.
 fn slide_wants_wallpaper(mode: WsAnim, have_incoming: bool) -> bool {
-    have_incoming && matches!(mode, WsAnim::Slide | WsAnim::Spring)
+    have_incoming && mode == WsAnim::Slide
 }
 
 /// May a compositor blit this crop? Only a current-gen crop made for exactly
@@ -9047,16 +9310,25 @@ fn wp_explorer_restarted() {
 /// Manager: publish what to crop for and whether to bother, then mark every
 /// crop stale. Call wherever monitors, work areas or animation settings may
 /// have changed (startup, reload, display change), after `reserve_bar`.
-fn wp_publish(monitors: &[Monitor], cfg: &Config, delay: std::time::Duration) {
-    WP_WANTED.store(
-        wallpaper_needed(
-            cfg.animations && cfg.animation_ms > 0,
-            WsAnim::from_cfg(cfg),
-            &cfg.window_anim,
-        ),
-        Ordering::Relaxed,
+/// `reload`: the wallpaper itself is unchanged (a change of it is
+/// wp_invalidate's), so with the same targets and need the crops stay
+/// current. Marking them stale anyway made every glide and slide instant for
+/// WP_DEBOUNCE plus a render after each Settings change.
+fn wp_publish(monitors: &[Monitor], cfg: &Config, delay: std::time::Duration, reload: bool) {
+    let wanted = wallpaper_needed(
+        cfg.animations && cfg.animation_ms > 0,
+        WsAnim::from_cfg(cfg),
+        &cfg.window_anim,
     );
-    *WP_TARGETS.lock().unwrap() = monitors.iter().map(|m| (m.hmon, m.work_area)).collect();
+    let targets: Vec<(isize, RECT)> = monitors.iter().map(|m| (m.hmon, m.work_area)).collect();
+    let was = WP_WANTED.swap(wanted, Ordering::Relaxed);
+    {
+        let mut cur = WP_TARGETS.lock().unwrap();
+        if reload && was == wanted && *cur == targets {
+            return;
+        }
+        *cur = targets;
+    }
     WALLPAPER_GEN.fetch_add(1, Ordering::AcqRel);
     wp_schedule(delay);
 }
@@ -9760,15 +10032,56 @@ fn drawn_alpha(alpha: u8, dim: u8) -> u8 {
 }
 
 /// Eased progress of a segment at linear time `t`. A motion's first segment
-/// eases in and out (no first-frame leap from a standing start); a re-aimed
-/// one is already moving, so it starts at speed with ease-out cubic (an
-/// ease-in there would stall the windows mid-flight on every key repeat).
-fn motion_ease(t: f64, reaimed: bool) -> f64 {
+/// (`v0` None) eases in and out (no first-frame leap from a standing start).
+/// A re-aimed one carries the speed the items had (`v0`, reaim_slope): a
+/// cubic Hermite from 0 at slope v0 to 1 at rest. v0 in 0..=3 keeps it
+/// monotonic (no overshoot); 3 is exactly ease-out cubic, the old re-aim
+/// curve, which kicked the motion on every key repeat; 0 starts from rest.
+fn motion_ease(t: f64, v0: Option<f64>) -> f64 {
     let t = t.clamp(0.0, 1.0);
-    if reaimed {
-        ease_out_cubic(t)
+    match v0 {
+        None => ease_in_out_cubic(t),
+        Some(v) => v * t * (1.0 - t) * (1.0 - t) + t * t * (3.0 - 2.0 * t),
+    }
+}
+
+/// d(motion_ease)/dt: the eased speed at `t`, per segment duration; 0 past
+/// the end (a finished segment waiting for its placement stands).
+fn motion_slope(t: f64, v0: Option<f64>) -> f64 {
+    if !(0.0..1.0).contains(&t) {
+        return 0.0;
+    }
+    match v0 {
+        None if t < 0.5 => 12.0 * t * t,
+        None => 12.0 * (1.0 - t) * (1.0 - t),
+        Some(v) => (1.0 - t) * (v * (1.0 - 3.0 * t) + 6.0 * t),
+    }
+}
+
+/// The start slope (motion_ease's v0) of a re-aimed segment, so it goes on
+/// at the speed its items have now. `s` = the running segment's eased slope
+/// (motion_slope), `pairs` = (old segment, new segment) per item in both;
+/// segments last the same duration. One slope serves every item, so it is
+/// fitted (least squares over their edges) to each moving item's current
+/// edge speed as a share of its remaining distance; a Static one stands.
+/// Clamped to 0..=3: never faster than the old ease-out restart, and a
+/// reversal starts from rest.
+fn reaim_slope(s: f64, pairs: &[(MotionItem, MotionItem)]) -> f64 {
+    let edges = |r: RECT| [r.left, r.top, r.right, r.bottom].map(f64::from);
+    let (mut num, mut den) = (0.0, 0.0);
+    for (old, new) in pairs.iter().filter(|p| p.1.kind == MotionKind::Move) {
+        let s = if old.kind == MotionKind::Move { s } else { 0.0 };
+        let speed = edges(old.to).into_iter().zip(edges(old.from));
+        let left = edges(new.to).into_iter().zip(edges(new.from));
+        for ((ot, of), (nt, nf)) in speed.zip(left) {
+            num += (ot - of) * s * (nt - nf);
+            den += (nt - nf) * (nt - nf);
+        }
+    }
+    if den > 0.0 {
+        (num / den).clamp(0.0, 3.0)
     } else {
-        ease_in_out_cubic(t)
+        0.0
     }
 }
 
@@ -10407,15 +10720,17 @@ fn reaim_admits(
 /// a new one joins at its `from` (only if its path enters the overlay rect
 /// `area`: a re-aim lists every tile; and a cold one only with a snapshot in
 /// `cold`), and every other continues from where it is drawn now
-/// (retarget_item), off screen or not. True when the segment restarts; the
-/// same layout again changes nothing.
+/// (retarget_item), off screen or not. Some(the new segment's start slope,
+/// reaim_slope of the running one's `slope`) when the segment restarts;
+/// None for the same layout again, which changes nothing.
 unsafe fn motion_reaim(
     overlay: HWND,
     area: RECT,
     items: &mut Vec<LiveItem>,
     next: &[MotionItem],
     cold: &mut [(isize, Option<ColdBmp>)],
-) -> bool {
+    slope: f64,
+) -> Option<f64> {
     let cur: Vec<MotionItem> = items
         .iter()
         .filter(|it| it.live())
@@ -10428,11 +10743,16 @@ unsafe fn motion_reaim(
         .map(|n| reaim_keep(&cur, n))
         .collect();
     if !reaim_changes(&cur, &next) {
-        return false;
+        return None;
     }
+    let mut pairs = Vec::new();
     for it in items.iter_mut().filter(|it| it.live()) {
         match next.iter().find(|n| n.hwnd == it.seg.hwnd) {
-            Some(n) => it.seg = retarget_item(it.at, it.alpha, it.dim, n),
+            Some(n) => {
+                let seg = retarget_item(it.at, it.alpha, it.dim, n);
+                pairs.push((it.seg, seg));
+                it.seg = seg;
+            }
             None => it.retire(), // closed, minimised or moved away
         }
     }
@@ -10441,7 +10761,7 @@ unsafe fn motion_reaim(
             items.push(l);
         }
     }
-    true
+    Some(reaim_slope(slope, &pairs))
 }
 
 /// Composite one motion: wallpaper crop + drawn shadows (and cold windows'
@@ -10586,7 +10906,8 @@ unsafe fn run_window_glide(mut req: GlideReq, wpc: &mut WpCache) {
     // be uncovered half done, a manager stuck on a hung app must not hold it.
     let hold = std::time::Duration::from_millis(req.dur_ms.max(1) + GLIDE_HOLD_MS);
     let mut start = Instant::now();
-    let mut reaimed = false;
+    // The running segment's start slope: None = the first (motion_ease).
+    let mut v0: Option<f64> = None;
     let mut reaims = 0u32;
     let mut msg = MSG::default();
     // An item dropped out after the last compose: its shadow must go.
@@ -10604,9 +10925,18 @@ unsafe fn run_window_glide(mut req: GlideReq, wpc: &mut WpCache) {
         let mut dirty = std::mem::take(&mut stale);
         // Snapshots the re-aim does not use are freed with `next`, here.
         if let Some(mut next) = motion_take_retarget(generation) {
-            if motion_reaim(overlay, area, &mut items, &next.items, &mut next.cold) {
+            let t = start.elapsed().as_secs_f64() * 1000.0 / dur;
+            let slope = motion_slope(t, v0);
+            if let Some(v) = motion_reaim(
+                overlay,
+                area,
+                &mut items,
+                &next.items,
+                &mut next.cold,
+                slope,
+            ) {
                 start = Instant::now();
-                reaimed = true;
+                v0 = Some(v);
                 reaims += 1;
                 dirty = true;
             }
@@ -10617,7 +10947,7 @@ unsafe fn run_window_glide(mut req: GlideReq, wpc: &mut WpCache) {
         }
         let t = start.elapsed().as_secs_f64() * 1000.0 / dur;
         let tf = probe.on().then(Instant::now);
-        dirty |= motion_step(&mut items, motion_ease(t, reaimed));
+        dirty |= motion_step(&mut items, motion_ease(t, v0));
         // An unchanged picture (frame 0 again, Static-only items, a settled
         // tail) is not composed and blitted again.
         if dirty {
@@ -10834,15 +11164,17 @@ fn cold_clear() {
 
 /// Is a cold tile worth a snapshot? Only when it is parked (`sent`, the rect
 /// last sent to it, lies on none of the monitors `fulls`) with its layout
-/// slot within one view width of the work area `wa`: the columns a scroll
-/// brings in next, and the inactive tabs of a column in view. A farther one
-/// would cost a print for a jump that seldom comes, and appears at the reveal.
+/// slot within one view of the work area `wa`, beside it or (a vertical
+/// strip's rows) above or below: the columns a scroll brings in next, and
+/// the inactive tabs of a column in view. A farther one would cost a print
+/// for a jump that seldom comes, and appears at the reveal.
 fn cold_wanted(sent: RECT, slot: RECT, wa: RECT, fulls: &[RECT]) -> bool {
-    let vw = wa.right - wa.left;
+    let (vw, vh) = (wa.right - wa.left, wa.bottom - wa.top);
     let near = RECT {
         left: wa.left - vw,
+        top: wa.top - vh,
         right: wa.right + vw,
-        ..wa
+        bottom: wa.bottom + vh,
     };
     !fulls.iter().any(|f| rects_overlap(&sent, f)) && rects_overlap(&slot, &near)
 }
@@ -10856,10 +11188,17 @@ fn cold_wanted(sent: RECT, slot: RECT, wa: RECT, fulls: &[RECT]) -> bool {
 /// whatever is no longer a candidate leaves the cache. One condvar poke
 /// however many are queued.
 unsafe fn cold_request(mgr: &Manager) {
-    if !mgr.tiling
-        || !glide_enabled(&mgr.cfg)
-        || !mgr.monitors.iter().any(|m| m.layout == "scrolling")
-    {
+    if !mgr.tiling || !glide_enabled(&mgr.cfg) {
+        return;
+    }
+    let scrolling: Vec<usize> = (0..mgr.monitors.len())
+        .filter(|&mi| config::is_strip(mgr.active_layout(mi)))
+        .collect();
+    if scrolling.is_empty() {
+        // A switch onto a workspace of another layout (#28) can leave no
+        // strip on screen: drop the left strip's shots, as the prune below
+        // would, or they would come back stale when it is shown again.
+        cold_clear();
         return;
     }
     let fulls: Vec<RECT> = mgr.monitors.iter().map(|m| m.full).collect();
@@ -10873,7 +11212,7 @@ unsafe fn cold_request(mgr: &Manager) {
         let (Some(slots), Some(sent)) = (slots.as_ref(), sent.as_ref()) else {
             return;
         };
-        for m in mgr.monitors.iter().filter(|m| m.layout == "scrolling") {
+        for m in scrolling.iter().map(|&mi| &mgr.monitors[mi]) {
             let Some(ws) = m.workspaces.get(m.active) else {
                 continue;
             };
@@ -10884,7 +11223,11 @@ unsafe fn cold_request(mgr: &Manager) {
                 if let (Some(&r), Some(&s)) = (sent.get(&h), slots.get(&h)) {
                     if cold_wanted(r, s, m.work_area, &fulls) {
                         let wa = m.work_area;
-                        cands.push((h, (wa.left - s.right).max(s.left - wa.right).max(0)));
+                        let d = (wa.left - s.right)
+                            .max(s.left - wa.right)
+                            .max(wa.top - s.bottom)
+                            .max(s.top - wa.bottom);
+                        cands.push((h, d.max(0)));
                     }
                 }
             }
@@ -11122,7 +11465,7 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
     // freshly-shown (surface-discarded) window makes before it repaints.
     let have_incoming = in_raw != 0;
     // The still wallpaper backdrop, only when a frame will read it: moving
-    // slide/spring frames. A first visit holds frame 0 and fade blends whole
+    // slide frames. A first visit holds frame 0 and fade blends whole
     // captures, so neither touches it. It comes ready-made from the capture
     // thread, never rendered here: this used to be a PrintWindow right here,
     // squarely on the manager's critical path, since the manager waits for our
@@ -11317,7 +11660,6 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
     // contiguous with it (no seam).
     let target = -req.dir * w;
     let dur = req.dur_ms.max(1) as f64;
-    let has_wp = wp != 0;
     // Timer pacing for iterations that present nothing (see the loop's end).
     let frame_dur = std::time::Duration::from_micros(8_333);
     let mut next = start;
@@ -11430,18 +11772,7 @@ unsafe fn run_transition(req: SlideReq, wpc: &mut WpCache) {
                         blend.SourceConstantAlpha = fade_alpha(t);
                         let _ = AlphaBlend(backdc, 0, 0, w, h, indc, 0, 0, w, h, blend);
                     }
-                    WsAnim::Spring if has_wp => {
-                        // Overshoot past the target then settle. Needs a
-                        // wallpaper backdrop: at peak overshoot a thin band past
-                        // the edge is exposed and must show the still
-                        // wallpaper, not black.
-                        let off = (target as f64 * ease_out_back(t)).round() as i32;
-                        compose(off);
-                    }
                     _ => {
-                        // Slide (and spring with no wallpaper backdrop — fall
-                        // back to the symmetric ease so the overshoot can't
-                        // expose a black sliver).
                         let off = (target as f64 * ease_in_out_cubic(t)).round() as i32;
                         compose(off);
                     }
@@ -11767,7 +12098,7 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     bump_follow_settle();
     // Not gated on tiling: the transition is cosmetic and works in float mode too.
     let mode = WsAnim::from_cfg(&mgr.cfg);
-    let mut want_slide = mgr.cfg.animations && mgr.cfg.animation_ms > 0 && mode != WsAnim::Off;
+    let mut want_slide = slide_enabled(&mgr.cfg);
     let dir = if n > old { 1 } else { -1 };
     let hmon = mgr.monitors[mi].hmon;
     // Slide region = the tiling work area, NOT the full monitor. This excludes the
@@ -11842,7 +12173,7 @@ unsafe fn switch_monitor_workspace(mgr: &mut Manager, mi: usize, n: usize) {
     // goes over uncopied and comes back through SNAP_RETURNS as `old`'s
     // snapshot. Always raise the overlay when we have an outgoing capture
     // — even on the FIRST visit to `n`, where there's no cached snapshot to slide
-    // in. With an incoming image the worker animates (slide/spring/fade); without
+    // in. With an incoming image the worker animates (slide/fade); without
     // one it briefly holds the outgoing frame to cover the switch + first paint,
     // then reveals. Either way the destination never flashes its background
     // before it repaints.
@@ -12018,15 +12349,25 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             }
         }
     }
-    // Scrolling strips by (HMONITOR, local workspace). Windows re-home below
-    // in their old order, so a surviving workspace keeps its columns, widths
-    // and scroll position; ids of windows that went elsewhere are pruned when
-    // touched, and windows arriving from a gone monitor are columns of their
-    // own at the end.
-    let mut strips: Vec<(isize, usize, Strip)> = Vec::new();
-    for mon in mgr.monitors.iter_mut() {
+    // Scrolling strips go where their windows go: by global workspace number
+    // in shared mode, by (HMONITOR, local workspace) per monitor. Windows
+    // re-home below in their old order, so a surviving workspace keeps its
+    // columns, widths and scroll position; ids of windows that went elsewhere
+    // are pruned when touched, and windows arriving from a gone monitor are
+    // columns of their own at the end. A runtime layout switch goes along with
+    // its strip (#28); every other workspace's layout follows its new
+    // position (#33).
+    let mut strips: Vec<(isize, usize, usize, Strip, Option<&'static str>)> = Vec::new();
+    for (mi, mon) in mgr.monitors.iter_mut().enumerate() {
         for (wi, ws) in mon.workspaces.iter_mut().enumerate() {
-            strips.push((mon.hmon, wi, std::mem::take(&mut ws.strip)));
+            let global = wi * old_n + (mi + old_n - old_primary % old_n) % old_n;
+            strips.push((
+                mon.hmon,
+                wi,
+                global,
+                std::mem::take(&mut ws.strip),
+                ws.layout,
+            ));
         }
     }
     let mut fresh = enumerate_monitors();
@@ -12039,21 +12380,11 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
             }
         }
     }
-    for (hmon, wi, strip) in strips {
-        if let Some(ws) = fresh
-            .iter_mut()
-            .find(|m| m.hmon == hmon)
-            .and_then(|m| m.workspaces.get_mut(wi))
-        {
-            ws.strip = strip;
-        }
-    }
     reserve_bar(&mut fresh, &mgr.cfg);
-    resolve_layouts(&mut fresh, &mgr.cfg, &mgr.monitors);
     mgr.monitors = fresh;
     mgr.primary = primary;
     // New monitors / work areas: new crop targets, every old crop stale.
-    wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
+    wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE, false);
     // Re-resolve focus to the same physical monitor (its index may have moved);
     // fall back to primary if that screen is gone. Must run before any
     // global_to_ml below — it reads focused_mon in per_monitor mode.
@@ -12061,6 +12392,17 @@ unsafe fn refresh_monitors(mgr: &mut Manager) {
         .mon_by_hmon(old_focused_hmon)
         .unwrap_or(primary)
         .min(mgr.monitors.len().saturating_sub(1));
+    for (hmon, wi, global, strip, layout) in strips {
+        let at = if per_monitor {
+            mgr.mon_by_hmon(hmon).map(|mi| (mi, wi))
+        } else {
+            Some(mgr.global_to_ml(global))
+        };
+        if let Some(ws) = at.and_then(|(mi, l)| mgr.monitors.get_mut(mi)?.workspaces.get_mut(l)) {
+            ws.strip = strip;
+            ws.layout = layout;
+        }
+    }
     for (old_hmon, wi, global, h, floating) in tracked {
         if !tracked_window_alive(hwnd_from(h)) {
             continue;
@@ -12178,7 +12520,7 @@ unsafe fn refresh_work_areas(mgr: &mut Manager) {
     snap_clear();
     cold_clear();
     reserve_bar(&mut mgr.monitors, &mgr.cfg);
-    wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
+    wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE, false);
     log_monitors(mgr);
     ensure_visible_all(mgr);
     retile_all(mgr);
@@ -12203,7 +12545,7 @@ unsafe fn log_monitors(mgr: &Manager) {
             m.full,
             m.work_area,
             monitor_dpi(m.hmon),
-            m.layout,
+            mgr.active_layout(i),
             m.active,
             i == mgr.primary
         );
@@ -12528,39 +12870,36 @@ unsafe fn run_bar_action(mgr: &mut Manager, hmon: isize, wgt: u8, button: u8, su
         // still act on the window the user is typing in.
         "next_layout" => {
             if let Some(mi) = mgr.mon_by_hmon(hmon) {
-                let next = next_layout(&mgr.monitors[mi].layout);
-                set_monitor_layout(mgr, mi, next.to_string());
+                set_workspace_layout(mgr, mi, "next");
             }
         }
         other => run_action(mgr, other, &arg),
     }
 }
 
-/// Switch monitor `mi` to `layout` (ignored if unknown or `mi` is gone) and
-/// retile it. Takes the monitor rather than reading focused_mon so a bar
-/// click can change another screen's layout without moving the focus there.
-unsafe fn set_monitor_layout(mgr: &mut Manager, mi: usize, layout: String) {
-    if !config::LAYOUTS.contains(&layout.as_str()) || mi >= mgr.monitors.len() {
+/// Switch monitor `mi`'s ACTIVE workspace to `layout` (#28): a layout name,
+/// or `next` / `previous` from its current one (config::layout_step). Ignored
+/// if unknown or `mi` is gone. Retiles it. Takes the monitor rather than
+/// reading focused_mon so a bar click can change another screen's layout
+/// without moving the focus there.
+unsafe fn set_workspace_layout(mgr: &mut Manager, mi: usize, layout: &str) {
+    let Some(a) = mgr.monitors.get(mi).map(|m| m.active) else {
         return;
-    }
+    };
+    let cur = mgr.layout(mi, a);
+    let Some(new) = config::layout_step(cur, layout) else {
+        return;
+    };
     // Away from scrolling the new layout's tiles are all on screen, so the
-    // retile brings every parked window back; a hidden workspace's parked
-    // windows come back when it is next shown. Nothing is parked there to
-    // need a cold snapshot.
-    if mgr.monitors[mi].layout == "scrolling" && layout != "scrolling" {
+    // retile brings every parked window back. Nothing is parked there to
+    // need a cold snapshot. To the other strip axis every tile changes size,
+    // so the shots are stale.
+    if config::is_strip(cur) && new != cur {
         cold_clear();
     }
-    mgr.monitors[mi].layout = layout;
-    let a = mgr.monitors[mi].active;
+    mgr.monitors[mi].workspaces[a].layout = Some(new);
     ensure_visible(mgr, mi, a);
     retile_monitor(mgr, mi);
-}
-
-/// The layout after `cur` in config::LAYOUTS, wrapping (the first for an
-/// unknown one). Pure.
-fn next_layout(cur: &str) -> &'static str {
-    let i = config::LAYOUTS.iter().position(|l| *l == cur);
-    config::LAYOUTS[i.map_or(0, |i| (i + 1) % config::LAYOUTS.len())]
 }
 
 /// Repaint every bar (a value changed outside a snapshot: the mute state).
@@ -12695,7 +13034,7 @@ unsafe fn untrack_window(mgr: &mut Manager, h: isize) {
             // real focus too, not whichever window Windows activates next
             // (plan/scrolling.md "Defaults"). Its stale FOREGROUND event then
             // fails Cmd::Focused's foreground check.
-            if was_focus && mgr.monitors[mi].layout == "scrolling" {
+            if was_focus && config::is_strip(mgr.layout(mi, wi)) {
                 let f = mgr.monitors[mi].workspaces[wi].focused;
                 if f != 0 {
                     focus_window(f);
@@ -12810,7 +13149,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     );
                     if quiet && prev_focus != 0 {
                         mgr.monitors[mi].workspaces[wi].focused = prev_focus;
-                        if !floating && mgr.monitors[mi].layout == "scrolling" {
+                        if !floating && config::is_strip(mgr.layout(mi, wi)) {
                             ensure_visible(mgr, mi, wi);
                         }
                     }
@@ -13005,7 +13344,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 // Never scrolls (plan/scrolling.md "Focus"): hovering a
                 // peeking tile does not focus it. Off scrolling every tile
                 // is Full, and the layout check keeps that free.
-                if mgr.monitors[mi].layout == "scrolling"
+                if config::is_strip(mgr.layout(mi, wi))
                     && tile_slot(mgr, h).is_some_and(|(_, v)| v != Vis::Full)
                 {
                     return;
@@ -13051,9 +13390,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             button,
             sub,
         } => run_bar_action(mgr, hmon, wgt, button, sub),
-        // The focused monitor only: layouts are per monitor. The extra
+        // The focused monitor's active workspace only (#28). The extra
         // hotkey `layout` and the IPC verb both arrive here.
-        Cmd::SetLayout(layout) => set_monitor_layout(mgr, mgr.focused_mon, layout),
+        Cmd::SetLayout(layout) => set_workspace_layout(mgr, mgr.focused_mon, &layout),
         Cmd::ToggleScratchpad => toggle_scratchpad(mgr),
         Cmd::BarCycle(hmon, dir) => {
             // Wheel over the bar: previous/next workspace on that monitor (wraps).
@@ -13097,20 +13436,32 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 SCRATCHPAD_HIDDEN.store(false, Ordering::Relaxed);
                 SCRATCHPAD_PENDING_AT.store(0, Ordering::Relaxed);
             }
+            // Which animations were on: their caches are current (below).
+            let (slid, glided) = (slide_enabled(&mgr.cfg), glide_enabled(&mgr.cfg));
             mgr.cfg = *cfg;
             // The file wins over runtime layout switches on EVERY reload, as
             // it did while the layout was global (the diff above saw the
-            // switch in mgr.cfg). Now the switch lives on the monitor, so the
-            // diff cannot see it: re-resolve, and re-tile if anything moved.
-            if resolve_layouts(&mut mgr.monitors, &mgr.cfg, &[]) {
-                g.wm = true;
+            // switch in mgr.cfg). Now the switch lives on the workspace
+            // (#28), so the diff cannot see it: drop every switch, and
+            // re-tile if a workspace's layout moved.
+            for mi in 0..mgr.monitors.len() {
+                for wi in 0..mgr.monitors[mi].workspaces.len() {
+                    if let Some(l) = mgr.monitors[mi].workspaces[wi].layout.take() {
+                        g.wm |= l != mgr.layout(mi, wi);
+                    }
+                }
             }
-            if g.wm || g.style || g.anim {
-                // Gaps/opacity may have changed — cached snapshots are now stale.
-                // Animations too: a switch with the slide off neither captures
-                // nor drops the workspace it leaves, so a snapshot from before
-                // an animations-off spell would slide in its old layout.
+            // Gaps/opacity may have changed — cached snapshots are now stale.
+            // Each cache too after an off spell of its own animation: a switch
+            // with the slide off neither captures nor drops the workspace it
+            // leaves, so a snapshot from before it would slide in its old
+            // layout; with the glide off nothing re-shoots cold tiles. A
+            // change while its animation was on keeps it: clearing made the
+            // next switch to each workspace a cover with no slide.
+            if g.wm || g.style || (g.anim && !slid) {
                 snap_clear();
+            }
+            if g.wm || g.style || (g.anim && !glided) {
                 cold_clear(); // window sizes and styles too
             }
             if g.wm {
@@ -13130,9 +13481,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             if g.wm || g.anim {
                 // Bar height and the animation settings may have changed: new
-                // crop targets (and whether to render at all), every old crop
-                // stale.
-                wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE);
+                // crop targets (and whether to render at all); old crops stay
+                // only for unchanged ones (see wp_publish). An explicit Reload
+                // (full) re-renders anyway: it is the recovery for a wallpaper
+                // change Astur missed or a failed render.
+                wp_publish(&mgr.monitors, &mgr.cfg, WP_DEBOUNCE, !full);
             }
             if g.style {
                 // Reset every window's styling so disabling opacity/borders
@@ -13201,7 +13554,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 return;
             }
             let mi = mgr.focused_mon;
-            if mgr.monitors[mi].layout == "master" {
+            if mgr.active_layout(mi) == "master" {
                 // Master layout: one master width shared by every master monitor.
                 mgr.cfg.master_ratio = (mgr.cfg.master_ratio + delta).clamp(0.15, 0.85);
             } else {
@@ -13476,14 +13829,28 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // Dropped on a scrolling monitor: a drop zone (plan/scrolling.md
             // "Keys"), which part of a window it landed on or which end of
             // the strip; None when it landed back in its own slot.
-            let scrolling = mgr.monitors[to_mi].layout == "scrolling";
+            let scrolling = config::is_strip(mgr.active_layout(to_mi));
             let zone = if scrolling {
+                // A vertical strip runs the same zones transposed: the
+                // top / bottom quarter is a new row above / below, the
+                // middle joins the row.
+                let v = config::strip_vertical(mgr.active_layout(to_mi));
+                let tr = |r: RECT| if v { transpose(r) } else { r };
                 let own = (to_mi == from_mi)
                     .then(|| tile_slot(mgr, h))
                     .flatten()
-                    .map(|(slot, _)| slot);
-                let on = target.map(|t| (t, window_rect_of(t)));
-                drop_zone(pt, on, own, mgr.monitors[to_mi].work_area)
+                    .map(|(slot, _)| tr(slot));
+                let on = target.map(|t| (t, tr(window_rect_of(t))));
+                let tiles: Vec<(isize, RECT)> =
+                    workspace_layout(mgr, to_mi, mgr.monitors[to_mi].active)
+                        .into_iter()
+                        .filter(|&(w, _)| w != h)
+                        .map(|(w, r)| (w, tr(r)))
+                        .collect();
+                let p = if v { POINT { x: y, y: x } } else { pt };
+                // The work area, not strip_tile: peek slivers count as on
+                // screen, so the gap beside one is a gap (R9).
+                drop_zone(p, on, own, tr(mgr.monitors[to_mi].work_area), &tiles)
             } else {
                 None
             };
@@ -13585,19 +13952,49 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     r
                 }
             };
-            let wa = mgr.monitors[mi].work_area;
-            if mgr.monitors[mi].layout == "scrolling" {
+            let (wa, outer) = mgr.monitors[mi].tile_area();
+            if config::is_strip(mgr.layout(mi, wi)) {
                 // A horizontal edge sets the column width, a vertical one the
-                // tile's share of its column (plan/scrolling.md "Keys").
-                if let Some((slot, _)) = tile_slot(mgr, h) {
-                    let placed = adjust_for_border(hwnd_from(h), slot);
-                    let (new_w, new_h) = strip_resize(r, placed, slot);
-                    let (outer, inner) = (mgr.cfg.outer_gap, mgr.cfg.inner_gap);
+                // tile's share of its column (plan/scrolling.md "Keys"). A
+                // vertical strip runs it transposed: the bottom edge sets
+                // the row height, a side edge the tile's share of its row.
+                if let Some((mut slot, _)) = tile_slot(mgr, h) {
+                    let (tile, v) = mgr.strip_tile(mi, wi);
+                    let tr = |r: RECT| if v { transpose(r) } else { r };
+                    let placed = tr(adjust_for_border(hwnd_from(h), slot));
+                    let tiled = tiled_windows(&mgr.monitors[mi].workspaces[wi]);
+                    if v {
+                        // strip_layout_v cuts a tabbed row's bar off the
+                        // tile, but col_width reads the whole row: measure
+                        // the row from the bar's top.
+                        let ws = &mgr.monitors[mi].workspaces[wi];
+                        let dpi = monitor_dpi(mgr.monitors[mi].hmon);
+                        let tab_h = dpi_px(mgr.cfg.tab_bar_height, dpi);
+                        let out =
+                            strip_out(&ws.strip, &tiled, ws.focused, tile, &mgr.cfg, tab_h, v);
+                        let cols = ws.strip.columns(&tiled);
+                        if let Some(bar) = locate_tile(&cols, h)
+                            .and_then(|(ci, _)| out.tab_bars.get(ci).copied().flatten())
+                        {
+                            slot.top = bar.top;
+                        }
+                    }
+                    let (slot, view) = (tr(slot), tr(tile.0));
+                    let (new_w, new_h) = strip_resize(tr(r), placed, slot);
+                    let inner = mgr.cfg.inner_gap;
                     let default = mgr.cfg.scroll_default_width;
                     let ws = &mut mgr.monitors[mi].workspaces[wi];
-                    let tiled = tiled_windows(ws);
                     if let Some(px) = new_w {
-                        let width = col_width(wa.right - wa.left, px, outer, inner);
+                        let cols = ws.strip.columns(&tiled);
+                        let widths: Vec<f32> = ws
+                            .strip
+                            .strip_cols(&cols, ws.focused, default)
+                            .iter()
+                            .map(|c| c.width)
+                            .collect();
+                        let ci = locate_tile(&cols, h).map_or(usize::MAX, |(ci, _)| ci);
+                        let len = view.right - view.left;
+                        let width = drag_width(len, &widths, ci, px, outer, inner, tile.2);
                         ws.strip.set_width(h, width, default);
                     }
                     if let (Some(px), Some((_, share))) = (new_h, ws.strip.tile_share(&tiled, h)) {
@@ -13622,11 +14019,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 })
                 .collect();
             let n = tiled.len();
-            if mgr.monitors[mi].layout == "master" {
+            if mgr.layout(mi, wi) == "master" {
                 // Master width sets the ratio; stack windows snap back.
                 if tiled.first() == Some(&h) {
-                    let total =
-                        (wa.right - wa.left - 2 * mgr.cfg.outer_gap - mgr.cfg.inner_gap).max(1);
+                    let total = (wa.right - wa.left - 2 * outer - mgr.cfg.inner_gap).max(1);
                     let mw = (r.right - r.left).max(1);
                     mgr.cfg.master_ratio = (mw as f32 / total as f32).clamp(0.15, 0.85);
                 }
@@ -13636,7 +14032,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     &mut mgr.monitors[mi].workspaces[wi].splits,
                     wa,
                     n,
-                    mgr.cfg.outer_gap,
+                    outer,
                     mgr.cfg.inner_gap,
                     idx,
                     r,
@@ -13732,6 +14128,12 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let other = mi != mgr.focused_mon;
             mgr.focused_mon = mi;
             let before = mgr.focused().2;
+            // A mouse gesture leaves the pointer where the hand put it: no
+            // cursor_follows_focus warp for this one (keys and IPC still do).
+            // Except with focus_follows_mouse: the next nudge would focus the
+            // column left under the still pointer and undo the wheel's pick.
+            let warp = mgr.cfg.cursor_follows_focus;
+            mgr.cfg.cursor_follows_focus &= mgr.cfg.focus_follows_mouse;
             process(
                 mgr,
                 if carry {
@@ -13740,6 +14142,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     Cmd::ScrollFocus(steps)
                 },
             );
+            mgr.cfg.cursor_follows_focus = warp;
             // A ScrollFocus that moved focused a window there. From a focus on
             // another monitor, a move, or a focus step stopped at the strip
             // end, would leave the real focus behind while focused_mon (what
@@ -13764,9 +14167,7 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // (a tab closed meanwhile): anything that no longer resolves is
             // dropped.
             let Some((mi, wi)) = mgr.locate(w).filter(|&(mi, wi)| {
-                mgr.tiling
-                    && mgr.monitors[mi].layout == "scrolling"
-                    && wi == mgr.monitors[mi].active
+                mgr.tiling && config::is_strip(mgr.layout(mi, wi)) && wi == mgr.monitors[mi].active
             }) else {
                 return;
             };
@@ -13833,6 +14234,9 @@ unsafe fn move_to_adjacent_monitor(mgr: &mut Manager, mi: usize, h: isize, dir: 
 /// any other command or layout, and Alt+arrows from a focus outside the
 /// strip (a floating window), which keep the geometric pick. A strip end on
 /// Alt+(Shift+)Left/Right goes to the adjacent monitor, as on other layouts.
+/// A vertical strip turns the arrows (plan/scrolling.md "Vertical"):
+/// Up/Down pick and move rows (nothing at the strip ends), Left/Right walk
+/// inside the row and at its end go to the adjacent monitor.
 unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
     use Cmd::*;
     if !matches!(
@@ -13859,10 +14263,24 @@ unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
         return false;
     }
     let (mi, a, h) = mgr.focused();
-    if mgr.monitors[mi].layout != "scrolling" {
+    if !config::is_strip(mgr.layout(mi, a)) {
         return false;
     }
+    let vertical = config::strip_vertical(mgr.layout(mi, a));
+    // The arrow in strip terms: Left/Right along the strip, Up/Down across.
+    let turn = |d: Dir| match (vertical, d) {
+        (false, d) => d,
+        (true, Dir::Up) => Dir::Left,
+        (true, Dir::Down) => Dir::Right,
+        (true, Dir::Left) => Dir::Up,
+        (true, Dir::Right) => Dir::Down,
+    };
+    // At an end, the key's own Left/Right goes on to the adjacent monitor
+    // (monitors are ordered left to right): the strip's end on a horizontal
+    // strip, the row's on a vertical one.
+    let crosses = |d: Dir| matches!(d, Dir::Left | Dir::Right);
     let default = mgr.cfg.scroll_default_width;
+    let stack = mgr.cfg.scroll_move == "stack";
     let ws = &mut mgr.monitors[mi].workspaces[a];
     let mut tiled = tiled_windows(ws);
     let cols = ws.strip.columns(&tiled);
@@ -13870,28 +14288,24 @@ unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
     // Which column to focus, for the focus keys that pick one.
     let focus_col = |c: usize| column_entry(&ws.strip, &cols[c]);
     let changed = match *cmd {
-        FocusGeo(dir) => {
+        FocusGeo(key) => {
             let Some((ci, ti)) = at else {
                 return false;
             };
-            let target = match dir {
-                Dir::Left | Dir::Right => {
-                    let n = if matches!(dir, Dir::Left) { -1 } else { 1 };
-                    match column_target(Some(ci), n, cols.len()) {
-                        Some(c) => Some(focus_col(c)),
-                        None => {
-                            focus_adjacent_monitor(mgr, mi, dir);
-                            bump_follow_settle();
-                            return true;
-                        }
-                    }
-                }
+            let target = match turn(key) {
+                Dir::Left => column_target(Some(ci), -1, cols.len()).map(focus_col),
+                Dir::Right => column_target(Some(ci), 1, cols.len()).map(focus_col),
                 // A tabbed column steps through its tabs the same way.
                 Dir::Up => step(ti, -1, cols[ci].len()).map(|t| cols[ci][t]),
                 Dir::Down => step(ti, 1, cols[ci].len()).map(|t| cols[ci][t]),
             };
-            if let Some(t) = target {
-                strip_focus(mgr, mi, a, t);
+            match target {
+                Some(t) => strip_focus(mgr, mi, a, t),
+                None if crosses(key) => {
+                    focus_adjacent_monitor(mgr, mi, key);
+                    bump_follow_settle();
+                }
+                None => {}
             }
             return true;
         }
@@ -13923,25 +14337,26 @@ unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
             return true;
         }
         _ if at.is_none() => return !matches!(cmd, MoveGeo(_)),
-        MoveGeo(dir) => match dir {
-            Dir::Left | Dir::Right => {
-                let n = if matches!(dir, Dir::Left) { -1 } else { 1 };
-                if !ws.move_column(&tiled, h, n) {
-                    move_to_adjacent_monitor(mgr, mi, h, dir);
-                    return true;
-                }
-                true
+        MoveGeo(key) => {
+            let moved = match turn(key) {
+                Dir::Left => ws.move_step(&tiled, h, -1, stack),
+                Dir::Right => ws.move_step(&tiled, h, 1, stack),
+                Dir::Up => ws.move_tile(&tiled, h, -1),
+                Dir::Down => ws.move_tile(&tiled, h, 1),
+            };
+            if !moved && crosses(key) {
+                move_to_adjacent_monitor(mgr, mi, h, key);
+                return true;
             }
-            Dir::Up => ws.move_tile(&tiled, h, -1),
-            Dir::Down => ws.move_tile(&tiled, h, 1),
-        },
-        SwapDir(d) => ws.move_column(&tiled, h, d),
+            moved
+        }
+        SwapDir(d) => ws.move_step(&tiled, h, d, stack),
         ScrollMove(n) => {
-            // One column per step; the order changes under each, so the
-            // tiled list is re-read.
+            // One step each; the order changes under each, so the tiled
+            // list is re-read.
             let mut moved = false;
             for _ in 0..n.unsigned_abs() {
-                if !ws.move_column(&tiled, h, n.signum()) {
+                if !ws.move_step(&tiled, h, n.signum(), stack) {
                     break;
                 }
                 moved = true;
@@ -13973,9 +14388,18 @@ unsafe fn process_strip(mgr: &mut Manager, cmd: &Cmd) -> bool {
             true
         }
         CenterColumn => {
-            let view_w = mgr.monitors[mi].work_area.right - mgr.monitors[mi].work_area.left;
+            let (tile, v) = mgr.strip_tile(mi, a);
             let ws = &mut mgr.monitors[mi].workspaces[a];
-            match strip_show_offset(&ws.strip, &tiled, h, view_w, &mgr.cfg, Center::Always) {
+            match strip_show_offset(
+                &ws.strip,
+                &tiled,
+                h,
+                tile,
+                &mgr.cfg,
+                Center::Always,
+                v,
+                false,
+            ) {
                 Some(off) if off != ws.strip.offset => {
                     ws.strip.offset = off;
                     true
@@ -15492,13 +15916,15 @@ unsafe fn update_bar(mgr: &Manager) {
             title,
             apps,
             ws_icons,
+            // The shown workspace's layout (#28).
             layout: match m.workspaces.get(m.active) {
                 // `scrolling 2/5`: the focused column of the shown strip.
-                Some(ws) if m.layout == "scrolling" => {
+                Some(ws) if config::is_strip(mgr.active_layout(mi)) => {
                     let cols = ws.strip.columns(&tiled_windows(ws));
-                    scroll_label(locate_tile(&cols, ws.focused).map(|p| p.0), cols.len())
+                    let at = locate_tile(&cols, ws.focused).map(|p| p.0);
+                    scroll_label(mgr.active_layout(mi), at, cols.len())
                 }
-                _ => m.layout.clone(),
+                _ => mgr.active_layout(mi).to_string(),
             },
         });
     }
@@ -15514,7 +15940,7 @@ unsafe fn update_bar(mgr: &Manager) {
 
     // Diff against the previous snapshot so only changed monitors repaint, and
     // seed a pill-highlight slide on any monitor whose active workspace moved.
-    let animate_pills = mgr.cfg.animations;
+    let animate_pills = mgr.cfg.animations && mgr.cfg.animation_ms > 0;
     let mut changed: Vec<isize> = Vec::new();
     let mut anim_seeds: Vec<(isize, i32, i32)> = Vec::new();
     {
@@ -17890,11 +18316,9 @@ unsafe fn tab_bars_build(mgr: &Manager) -> Vec<TabBarData> {
     let colors = (r.bg, r.fg, r.accent, r.muted);
     for (mi, m) in mgr.monitors.iter().enumerate() {
         // The no-tabs case (nearly always) costs a scan of the column metadata.
-        let Some(ws) = m
-            .workspaces
-            .get(m.active)
-            .filter(|ws| m.layout == "scrolling" && ws.strip.cols.values().any(|c| c.tabbed))
-        else {
+        let Some(ws) = m.workspaces.get(m.active).filter(|ws| {
+            config::is_strip(mgr.active_layout(mi)) && ws.strip.cols.values().any(|c| c.tabbed)
+        }) else {
             continue;
         };
         let tiled = tiled_windows(ws);
@@ -17902,7 +18326,10 @@ unsafe fn tab_bars_build(mgr: &Manager) -> Vec<TabBarData> {
         let dpi = monitor_dpi(m.hmon);
         // The same physical height workspace_layout leaves room for.
         let tab_h = dpi_px(mgr.cfg.tab_bar_height, dpi);
-        let out = strip_out(&ws.strip, &tiled, ws.focused, m.work_area, &mgr.cfg, tab_h);
+        let (tile, vertical) = mgr.strip_tile(mi, m.active);
+        let out = strip_out(
+            &ws.strip, &tiled, ws.focused, tile, &mgr.cfg, tab_h, vertical,
+        );
         let map = PlaceMap::new(mgr, mi, m.active);
         for (ci, rect, active) in tab_bar_slots(&ws.strip, &cols, ws.focused, &out, &map) {
             // The bar's icon size, so the icons share its cache entries (and
@@ -18817,7 +19244,6 @@ fn manager_loop(cfg: Config) {
             }
         }
         reserve_bar(&mut monitors, &cfg);
-        resolve_layouts(&mut monitors, &cfg, &[]);
         let mut m = Manager {
             monitors,
             focused_mon: primary,
@@ -18836,7 +19262,7 @@ fn manager_loop(cfg: Config) {
         ensure_visible_all(&mut m);
         // Warm the wallpaper cache now, not on the first animation. Until it
         // lands (one render, ~60-110 ms) glides place instantly.
-        wp_publish(&m.monitors, &m.cfg, std::time::Duration::ZERO);
+        wp_publish(&m.monitors, &m.cfg, std::time::Duration::ZERO, false);
         queue_workspace_wallpaper(&m, primary, m.monitors[primary].active);
         if m.tiling {
             // Instant, never the glide (ANIM-16): the motion handshake (overlay
@@ -19036,12 +19462,30 @@ fn strip_after_command(mgr: &mut Manager) {
     let rects: Vec<RECT> = mgr
         .monitors
         .iter()
-        .filter(|m| mgr.tiling && m.layout == "scrolling")
-        .map(|m| m.full)
+        .enumerate()
+        .filter(|&(mi, _)| mgr.tiling && config::is_strip(mgr.active_layout(mi)))
+        .map(|(_, m)| m.full)
         .collect();
     scrollmon_publish(&rects);
+    let mut slivers = Vec::new();
     // SAFETY: manager thread; visibility reads of tracked windows only.
-    unsafe { cold_request(mgr) };
+    unsafe {
+        for (mi, m) in mgr.monitors.iter().enumerate() {
+            if !mgr.tiling || !config::is_strip(mgr.active_layout(mi)) {
+                continue;
+            }
+            let ((area, outer, peek), v) = mgr.strip_tile(mi, m.active);
+            let p = peek_px(strip_len(area, v), peek);
+            let map = PlaceMap::new(mgr, mi, m.active);
+            for (h, raw) in workspace_layout(mgr, mi, m.active) {
+                if map.vis(h, raw) == Vis::Peek {
+                    slivers.extend(peek_slivers(area, outer, p, v, raw).map(|r| (r, h)));
+                }
+            }
+        }
+        cold_request(mgr);
+    }
+    peek_publish(&slivers);
 }
 
 /// Refresh the shutdown registry and the O(1) locate index from current manager
@@ -19088,7 +19532,7 @@ fn sync_managed(mgr: &Manager) {
 // hard kill (taskkill /F, Task Manager End task, a crash that skips the panic
 // hook) cannot — the windows would stay hidden or off screen ("died"). So the
 // manager persists the CURRENTLY HIDDEN and PARKED sets to
-// ~/.astur/rescue.lst whenever they change, and the next launch un-hides and
+// rescue.lst (Astur's folder) whenever they change, and the next launch un-hides and
 // unparks any verified survivors before adopting windows. A graceful restore
 // deletes the file.
 static LAST_RESCUE_HASH: AtomicU64 = AtomicU64::new(0);
@@ -24501,8 +24945,10 @@ Usage: astur.exe [option]
   --wait-for-pid <pid> wait for that process to exit, then run (used by the
                        tray's Restart so two instances never overlap)
 
-Config: %USERPROFILE%\.astur\astur.conf and navbar.conf
-Log:    %USERPROFILE%\.astur\astur.log (set log_level in astur.conf)
+Config: astur.conf and navbar.conf in %APPDATA%\Astur, or in
+        %USERPROFILE%\.astur with config_folder = home in astur.conf (Astur
+        moves the folder there when it starts)
+Log:    astur.log in the same folder (set log_level in astur.conf)
 ";
 
 enum CliAction {
@@ -24614,6 +25060,27 @@ unsafe fn wait_for_predecessor(pid: u32) {
     };
     let _ = WaitForSingleObject(handle, 10_000);
     let _ = CloseHandle(handle);
+}
+
+/// Rename the Astur folder to the one `config_folder` names (#26), whole:
+/// never copy-then-delete. None = nothing to move. A closing Settings still
+/// holds settings.lock in it (access denied / sharing violation), so those
+/// are retried for about 2 s; anything else (another drive) fails at once.
+fn move_config_folder(
+    choice: &str,
+) -> Option<(std::path::PathBuf, std::path::PathBuf, std::io::Result<()>)> {
+    let (from, to) = config::folder_move(choice)?;
+    let mut r = std::fs::rename(&from, &to);
+    for _ in 0..20 {
+        match &r {
+            Err(e) if matches!(e.raw_os_error(), Some(5 | 32)) => {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                r = std::fs::rename(&from, &to);
+            }
+            _ => break,
+        }
+    }
+    Some((from, to, r))
 }
 
 // =========================================================================
@@ -25040,11 +25507,38 @@ fn main() {
 
         // Load config once here so the bars (main thread) and the manager thread
         // share the exact same settings.
-        let (cfg, cfg_err) = load_config_for_startup();
+        let (mut cfg, mut cfg_err) = load_config_for_startup();
+        // #26: put the folder where config_folder says, now: after the
+        // single-instance claim and the restart hand-off, before the log,
+        // state, rescue or launcher history open a file in it. Not on an
+        // unread config (the choice is unknown). Then read it from there.
+        let moved = if cfg_err.is_none() {
+            move_config_folder(&cfg.config_folder)
+        } else {
+            None
+        };
+        if let Some((_, _, Ok(()))) = moved {
+            (cfg, cfg_err) = load_config_for_startup();
+        }
         let cfg_unread = cfg_err.is_some();
         apply_hook_config(&cfg); // also applies log_level, so log after this
         if let Some(e) = cfg_err {
             log_error!("running on built-in defaults, config file left untouched: {e}");
+        }
+        match moved {
+            Some((from, to, Ok(()))) => {
+                log_info!(
+                    "config folder moved: {} -> {}",
+                    from.display(),
+                    to.display()
+                )
+            }
+            Some((from, to, Err(e))) => log_error!(
+                "config folder not moved to {} ({e}); still using {}",
+                to.display(),
+                from.display()
+            ),
+            None => {}
         }
         log_startup_environment(dpi_aware.is_ok());
         if cfg.persist_state {
@@ -25126,6 +25620,10 @@ fn main() {
         // remarks). Allowed only when elevated: that is the only case needing it.
         let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
         TASKBAR_CREATED_MSG.store(taskbar_created, Ordering::Relaxed);
+        RESTART_MSG.store(
+            RegisterWindowMessageW(w!("AsturRestart")),
+            Ordering::Relaxed,
+        );
         if taskbar_created != 0 && process_elevated() {
             let _ = ChangeWindowMessageFilterEx(marker, taskbar_created, MSGFLT_ALLOW, None);
         }
@@ -25310,7 +25808,10 @@ fn main() {
         println!("  --- config ---");
         println!("  Default 'shared' mode spreads workspaces across monitors:");
         println!("  ws1=mon1, ws2=mon2, ws3=mon3, ws4=mon1 (2nd), and so on.");
-        println!("  Edit %USERPROFILE%\\.astur\\astur.conf then restart.");
+        println!(
+            "  Edit {} then restart.",
+            config_path("ASTUR_CONFIG", "astur.conf").display()
+        );
         println!("  workspace_mode = shared | per_monitor; set terminal/browser too.");
         println!("Press Ctrl+C in this window to quit (windows are restored).");
 
@@ -25710,19 +26211,17 @@ mod tests {
         assert!(!wallpaper_needed(true, WsAnim::Off, "off"));
         assert!(wallpaper_needed(true, WsAnim::Fade, "glide"));
         assert!(wallpaper_needed(true, WsAnim::Off, "glide"));
-        // Moving slide / spring frames read it with or without the glide.
+        assert!(wallpaper_needed(true, WsAnim::Off, "spring")); // = glide
+                                                                // Moving slide frames read it with or without the glide.
         assert!(wallpaper_needed(true, WsAnim::Slide, "off"));
-        assert!(wallpaper_needed(true, WsAnim::Spring, "off"));
     }
 
     #[test]
     fn only_moving_slides_take_a_wallpaper() {
         assert!(slide_wants_wallpaper(WsAnim::Slide, true));
-        assert!(slide_wants_wallpaper(WsAnim::Spring, true));
         // Fade blends whole captures; a first visit holds frame 0.
         assert!(!slide_wants_wallpaper(WsAnim::Fade, true));
         assert!(!slide_wants_wallpaper(WsAnim::Slide, false));
-        assert!(!slide_wants_wallpaper(WsAnim::Spring, false));
         assert!(!slide_wants_wallpaper(WsAnim::Fade, false));
     }
 
@@ -26176,22 +26675,31 @@ mod tests {
 
     #[test]
     fn motion_alpha_and_ease_hit_their_ends_and_never_step_back() {
-        for reaimed in [false, true] {
-            assert_eq!(motion_ease(0.0, reaimed), 0.0);
-            assert_eq!(motion_ease(1.0, reaimed), 1.0);
+        for v0 in [None, Some(0.0), Some(1.2), Some(3.0)] {
+            assert_eq!(motion_ease(0.0, v0), 0.0);
+            assert_eq!(motion_ease(1.0, v0), 1.0);
             // Past either end it holds the end (a late frame, a clock skew).
-            assert_eq!(motion_ease(-0.5, reaimed), 0.0);
-            assert_eq!(motion_ease(1.5, reaimed), 1.0);
+            assert_eq!(motion_ease(-0.5, v0), 0.0);
+            assert_eq!(motion_ease(1.5, v0), 1.0);
             let mut last = 0.0;
             for i in 0..=100 {
-                let e = motion_ease(i as f64 / 100.0, reaimed);
-                assert!(e >= last);
+                let e = motion_ease(i as f64 / 100.0, v0);
+                assert!(e >= last && e <= 1.0, "no overshoot");
                 last = e;
+                // The slope is the curve's derivative, 0 at the end.
+                let t = i as f64 / 100.0;
+                let h = 1e-6;
+                let num = (motion_ease(t + h, v0) - motion_ease(t - h, v0)) / (2.0 * h);
+                if (0.01..0.99).contains(&t) {
+                    assert!((motion_slope(t, v0) - num).abs() < 1e-4, "{v0:?} {t}");
+                }
             }
+            assert_eq!(motion_slope(1.0, v0), 0.0);
         }
-        // A re-aimed segment is already moving: it starts at speed, the first
-        // one eases in.
-        assert!(motion_ease(0.1, true) > 3.0 * motion_ease(0.1, false));
+        // A re-aimed segment starts at the speed it was handed; at 3 it is
+        // the old ease-out cubic.
+        assert!((motion_slope(0.0, Some(1.2)) - 1.2).abs() < 1e-12);
+        assert!((motion_ease(0.3, Some(3.0)) - (1.0 - 0.7f64.powi(3))).abs() < 1e-12);
         assert_eq!(motion_alpha(0, 255, 0.0), 0);
         assert_eq!(motion_alpha(0, 255, 1.0), 255);
         assert_eq!(motion_alpha(255, 0, 0.5), 128);
@@ -26203,7 +26711,7 @@ mod tests {
         // Halfway through a morph (moving and widening), a new layout sends
         // it elsewhere at another size.
         let first = item(rc(0, 0, 640, 480), rc(1000, 0, 1900, 480), MotionKind::Move);
-        let at = motion_rect(&first, motion_ease(0.5, false));
+        let at = motion_rect(&first, motion_ease(0.5, None));
         assert_eq!(at, rc(500, 0, 1270, 480));
         let next = item(
             rc(1000, 0, 1900, 480),
@@ -26213,8 +26721,8 @@ mod tests {
         let seg = retarget_item(at, 255, 255, &next);
         // Frame 0 of the new segment draws exactly where it was, size
         // included: no jump. It ends exactly at its new slot.
-        assert_eq!(motion_rect(&seg, motion_ease(0.0, true)), at);
-        assert_eq!(motion_rect(&seg, motion_ease(1.0, true)), next.to);
+        assert_eq!(motion_rect(&seg, motion_ease(0.0, Some(2.0))), at);
+        assert_eq!(motion_rect(&seg, motion_ease(1.0, Some(2.0))), next.to);
         assert_eq!(seg.kind, MotionKind::Move);
         // A fade and a dim continue from where they are too.
         let fading = MotionItem {
@@ -26243,6 +26751,35 @@ mod tests {
         let seg = retarget_item(refused.from, 255, 255, &refused);
         assert_eq!(seg.kind, MotionKind::Static);
         assert_eq!(motion_rect(&seg, 0.6), refused.from);
+    }
+
+    #[test]
+    fn a_reaim_carries_the_speed_it_had() {
+        // Mid-scroll (first segment halfway, eased slope 3), a key press
+        // sends the strip a column further: the new segment starts at the
+        // tiles' speed as a share of what is left (3 x 1000 / 1500 = 2).
+        let s = motion_slope(0.5, None);
+        assert!((s - 3.0).abs() < 1e-12);
+        let old = item(
+            rc(0, 0, 900, 480),
+            rc(-1000, 0, -100, 480),
+            MotionKind::Move,
+        );
+        let at = motion_rect(&old, motion_ease(0.5, None));
+        let seg = |to: RECT| retarget_item(at, 255, 255, &item(old.to, to, MotionKind::Move));
+        let on = seg(rc(-2000, 0, -1100, 480));
+        assert_eq!(reaim_slope(s, &[(old, on)]), 2.0);
+        // A reversal starts from rest; a hop shorter than the speed carries
+        // is capped at ease-out cubic's 3 (never an overshoot).
+        assert_eq!(reaim_slope(s, &[(old, seg(rc(0, 0, 900, 480)))]), 0.0);
+        assert_eq!(reaim_slope(s, &[(old, seg(rc(-510, 0, 390, 480)))]), 3.0);
+        // A tile that stood carries no speed; nothing moving = rest.
+        let stood = MotionItem {
+            kind: MotionKind::Static,
+            ..old
+        };
+        assert_eq!(reaim_slope(s, &[(stood, on)]), 0.0);
+        assert_eq!(reaim_slope(s, &[]), 0.0);
     }
 
     #[test]
@@ -26508,6 +27045,10 @@ mod tests {
         // More than a view width off either side: not worth a print.
         assert!(!cold_wanted(parked, rc(3900, 0, 4800, 1040), wa, &fulls));
         assert!(!cold_wanted(parked, rc(-2900, 0, -1930, 1040), wa, &fulls));
+        // A vertical strip's next row, just below the view (R8); not two
+        // views down.
+        assert!(cold_wanted(parked, rc(8, 1050, 1912, 1560), wa, &fulls));
+        assert!(!cold_wanted(parked, rc(8, 2100, 1912, 2600), wa, &fulls));
         // Last sent on a monitor (either one): it paints there, no snapshot.
         let on = rc(100, 0, 900, 1040);
         assert!(!cold_wanted(on, on, wa, &fulls));
@@ -26598,6 +27139,10 @@ mod tests {
         assert_eq!(fade_alpha(0.0), 0);
         assert_eq!(fade_alpha(1.0), 255);
         assert_eq!(fade_alpha(7.0), 255);
+        // The first composed frame of a 100 ms fade (its clock ~17 ms in)
+        // is a soft start, not ease-out's 43% pop; the midpoint is half.
+        assert!(fade_alpha(0.17) < 13, "{}", fade_alpha(0.17));
+        assert_eq!(fade_alpha(0.5), 128);
         // Never steps back in between.
         let mut last = 0u8;
         for i in 0..=1000 {
@@ -27776,10 +28321,6 @@ mod tests {
             [(0x5B, false), (0x4E, false), (0x4E, true), (0x5B, true)]
         );
         assert_eq!(chord_order(&[0xB3]), [(0xB3, false), (0xB3, true)]);
-        assert_eq!(next_layout("dwindle"), config::LAYOUTS[1]);
-        let last = config::LAYOUTS[config::LAYOUTS.len() - 1];
-        assert_eq!(next_layout(last), config::LAYOUTS[0]);
-        assert_eq!(next_layout("bogus"), config::LAYOUTS[0]);
     }
 
     #[test]
@@ -27833,18 +28374,46 @@ mod tests {
             .iter()
             .position(|w| *w == "layout")
             .unwrap() as u8;
-        let (before, other) = (
-            mgr.monitors[1].layout.clone(),
-            mgr.monitors[0].layout.clone(),
-        );
+        let next = config::layout_step(&mgr.cfg.layout, "next").unwrap();
         let hmon = mgr.monitors[1].hmon;
         unsafe { run_bar_action(&mut mgr, hmon, wgt, 0, 0) };
-        assert_eq!(mgr.monitors[1].layout, next_layout(&before));
-        assert_eq!(mgr.monitors[0].layout, other);
+        assert_eq!(mgr.active_layout(1), next);
+        assert_eq!(mgr.active_layout(0), mgr.cfg.layout);
         assert_eq!(mgr.focused_mon, 0, "the focus never moved");
-        unsafe { set_monitor_layout(&mut mgr, 1, "bogus".into()) };
-        unsafe { set_monitor_layout(&mut mgr, 9, "grid".into()) };
-        assert_eq!(mgr.monitors[1].layout, next_layout(&before));
+        unsafe { set_workspace_layout(&mut mgr, 1, "bogus") };
+        unsafe { set_workspace_layout(&mut mgr, 9, "grid") };
+        assert_eq!(mgr.active_layout(1), next);
+    }
+
+    /// #28: a layout switch changes the active workspace only; a hidden one
+    /// keeps its workspace_layouts entry, a blank one its monitor's layout.
+    /// A reload's clear (the WM drops every switch) restores the file.
+    #[test]
+    fn layout_switches_are_per_workspace() {
+        let mut mgr = test_manager(1, 3);
+        mgr.cfg.layout = "master".into();
+        mgr.cfg.workspace_layouts = vec![String::new(), "scrolling".into()];
+        assert_eq!(mgr.layout(0, 0), "master");
+        assert_eq!(mgr.layout(0, 1), "scrolling");
+        assert_eq!(mgr.layout(0, 2), "master");
+        assert_eq!(mgr.layout(0, 9), "", "no such workspace");
+        unsafe { set_workspace_layout(&mut mgr, 0, "grid") };
+        unsafe { set_workspace_layout(&mut mgr, 0, "previous") };
+        assert_eq!(
+            mgr.layout(0, 0),
+            config::layout_step("grid", "previous").unwrap()
+        );
+        assert_eq!(mgr.layout(0, 1), "scrolling", "hidden: untouched");
+        mgr.monitors[0].active = 1;
+        unsafe { set_workspace_layout(&mut mgr, 0, "next") };
+        assert_eq!(
+            mgr.active_layout(0),
+            config::layout_step("scrolling", "next").unwrap()
+        );
+        for ws in &mut mgr.monitors[0].workspaces {
+            ws.layout = None;
+        }
+        assert_eq!(mgr.layout(0, 1), "scrolling");
     }
 
     /// The custom widget's timeout stops the program cmd started, not just
@@ -28499,41 +29068,26 @@ mod tests {
 
     #[test]
     fn layouts_resolve_per_monitor_and_survive_a_display_change() {
-        let mut cfg = Config::defaults();
-        cfg.layout = "master".into();
-        cfg.monitor_layouts = vec!["scrolling".into(), String::new()];
-        let layouts = |m: &[Monitor]| m.iter().map(|m| m.layout.clone()).collect::<Vec<_>>();
         let mut mgr = test_manager(3, 1);
-        assert!(resolve_layouts(&mut mgr.monitors, &cfg, &[]));
-        assert_eq!(layouts(&mgr.monitors), ["scrolling", "master", "master"]);
-        assert!(!resolve_layouts(&mut mgr.monitors, &cfg, &[]), "no change");
-        // A runtime switch on monitor 2; a reload (no keep) resets it.
-        mgr.monitors[1].layout = "grid".into();
-        assert!(resolve_layouts(&mut mgr.monitors, &cfg, &[]));
-        assert_eq!(mgr.monitors[1].layout, "master");
-        // A display change: a new monitor appears leftmost. A runtime switch
-        // stays on its screen (by HMONITOR); config-derived layouts follow
-        // position, so the old monitor 1 picks up monitor 2's entry (#33).
-        mgr.monitors[1].layout = "grid".into();
-        let mut fresh = vec![
-            Monitor::new(0x9000, RECT::default(), 1),
-            Monitor::new(0x1000, RECT::default(), 1),
-            Monitor::new(0x1001, RECT::default(), 1),
-            Monitor::new(0x1002, RECT::default(), 1),
-        ];
-        resolve_layouts(&mut fresh, &cfg, &mgr.monitors);
-        assert_eq!(layouts(&fresh), ["scrolling", "master", "grid", "master"]);
-        // Late detection: Astur started with one screen, a second shows up to
-        // its left. Both resolve to what a restart would give.
-        cfg.monitor_layouts = vec!["scrolling".into(), "grid".into()];
-        let mut one = vec![Monitor::new(0x1000, RECT::default(), 1)];
-        resolve_layouts(&mut one, &cfg, &[]);
-        let mut two = vec![
-            Monitor::new(0x9000, RECT::default(), 1),
-            Monitor::new(0x1000, RECT::default(), 1),
-        ];
-        resolve_layouts(&mut two, &cfg, &one);
-        assert_eq!(layouts(&two), ["scrolling", "grid"]);
+        mgr.cfg.layout = "master".into();
+        mgr.cfg.monitor_layouts = vec!["scrolling".into(), String::new()];
+        let layouts = |m: &Manager| {
+            (0..m.monitors.len())
+                .map(|i| m.active_layout(i).to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(layouts(&mgr), ["scrolling", "master", "master"]);
+        // A display change: a new monitor appears leftmost. Config-derived
+        // layouts follow position, so the old monitor 1 picks up monitor 2's
+        // entry (#33); a runtime switch rides along with its workspace
+        // (refresh_monitors carries it with the strip, #28).
+        let mut fresh: Vec<Monitor> = [0x9000, 0x1000, 0x1001, 0x1002]
+            .into_iter()
+            .map(|h| Monitor::new(h, RECT::default(), 1))
+            .collect();
+        fresh[2].workspaces[0].layout = Some("grid");
+        mgr.monitors = fresh;
+        assert_eq!(layouts(&mgr), ["scrolling", "master", "grid", "master"]);
     }
 
     #[test]
@@ -28677,6 +29231,41 @@ mod tests {
         assert_eq!(cols_of(&ws), vec![vec![B], vec![A], vec![C]]);
         // Not in the strip.
         assert!(!ws.consume_or_expel(&t, 0x99, 1));
+        // An untiled window (F, standing in for minimised) between the two
+        // columns: the join moves C next to B, so F coming back cannot split it.
+        let mut ws = strip_ws(&[A, B, F, C], &[]);
+        ws.floating = vec![F];
+        assert!(ws.consume_or_expel(&[A, B, C], C, -1));
+        assert_eq!(ws.windows, vec![A, B, C, F]);
+        ws.floating.clear();
+        let t = ws.windows.clone();
+        assert_eq!(ws.tidy_columns(&t), vec![vec![A], vec![B, C], vec![F]]);
+    }
+
+    #[test]
+    fn stack_move_walks_the_window_through_the_columns() {
+        let mut ws = strip_ws(&[A, B, C], &[]);
+        let t = [A, B, C];
+        let walk = [
+            vec![vec![A], vec![B, C]],
+            vec![vec![A], vec![C], vec![B]],
+            vec![vec![A, C], vec![B]],
+            vec![vec![C], vec![A], vec![B]],
+        ];
+        for want in walk {
+            let t: Vec<isize> = ws.windows.clone();
+            assert!(ws.move_step(&t, C, -1, true));
+            assert_eq!(cols_of(&ws), want);
+        }
+        // Strip end, alone: nothing to join, false (the caller then tries
+        // the next monitor), nothing changed.
+        assert!(!ws.move_step(&[C, A, B], C, -1, true));
+        assert_eq!(cols_of(&ws), vec![vec![C], vec![A], vec![B]]);
+        // Column mode still swaps whole columns.
+        let mut ws = strip_ws(&[A, B, C], &[(B, 1), (C, 1)]);
+        assert!(ws.move_step(&t, C, -1, false));
+        assert_eq!(cols_of(&ws), vec![vec![B, C], vec![A]]);
+        assert!(!ws.move_step(&[B, C, A], B, -1, false));
     }
 
     #[test]
@@ -28820,7 +29409,7 @@ mod tests {
         let mut s = strip_ws(&[], &[(B, 1), (C, 1)]).strip;
         let t = [A, B, C, D];
         // col_px(1920, 0.5, 8, 8) = 948: spans 8..956, 964..1912, 1920..2868.
-        let r = strip_rects(&s, &t, A, area, &cfg, 26);
+        let r = strip_rects(&s, &t, A, (area, 8, 0), &cfg, 26, false);
         assert_eq!(r.len(), 4);
         assert_eq!((r[0].left, r[0].right), (8, 956));
         assert_eq!((r[1].left, r[1].right), (r[2].left, r[2].right));
@@ -28828,11 +29417,14 @@ mod tests {
         assert_eq!(r[3].left, 1920, "D starts off-screen right");
         // Past the end clamps to the last full view; before 0 clamps to 0.
         s.offset = 100_000;
-        let r = strip_rects(&s, &t, A, area, &cfg, 26);
+        let r = strip_rects(&s, &t, A, (area, 8, 0), &cfg, 26, false);
         assert_eq!((r[3].left, r[3].right), (964, 1912));
         assert_eq!(r[0].right, 956 - 956);
         s.offset = -50;
-        assert_eq!(strip_rects(&s, &t, A, area, &cfg, 26)[0].left, 8);
+        assert_eq!(
+            strip_rects(&s, &t, A, (area, 8, 0), &cfg, 26, false)[0].left,
+            8
+        );
         // Tabbed: every tab on one rect, below the tab bar.
         s.cols.insert(
             1,
@@ -28841,11 +29433,50 @@ mod tests {
                 ..meta(0.5)
             },
         );
-        let r = strip_rects(&s, &t, A, area, &cfg, 26);
+        let r = strip_rects(&s, &t, A, (area, 8, 0), &cfg, 26, false);
         assert_eq!(r[1], r[2]);
         assert_eq!(r[1].top, 8 + 26);
         // Degenerate area: no rects, windows stay where they are.
-        assert!(strip_rects(&s, &t, A, rect(0, 0, 10, 10), &cfg, 26).is_empty());
+        assert!(strip_rects(&s, &t, A, (rect(0, 0, 10, 10), 8, 0), &cfg, 26, false).is_empty());
+        // Vertical (R8): full-width rows along y. A fitting strip sits at the
+        // top (D2) where a horizontal one centres: col_px(1080, 0.5, 8, 8) = 528.
+        let one = Strip::default();
+        let v = strip_rects(&one, &[A], A, (area, 8, 0), &cfg, 26, true);
+        assert_eq!(v, [rect(8, 8, 1912, 536)]);
+        let h = strip_rects(&one, &[A], A, (area, 8, 0), &cfg, 26, false);
+        assert_eq!(h[0].left, 8 + (1920 - 964) / 2, "centred");
+    }
+
+    /// 2026-11-23: the WM path (strip_tile's peek through strip_out and
+    /// strip_show_offset) has no end band. Area 0..3840, gaps 8, peek 48.
+    #[test]
+    fn strip_with_peek_fits_edge_to_edge_and_slivers_only_beside_a_column() {
+        let mut cfg = Config::defaults();
+        cfg.outer_gap = 8;
+        cfg.inner_gap = 8;
+        cfg.scroll_default_width = 0.5;
+        let tile = (rect(0, 0, 3840, 2000), 8, 48);
+        let xs = |r: Vec<RECT>| r.iter().map(|r| (r.left, r.right)).collect::<Vec<_>>();
+        let mut s = Strip::default();
+        // Two halves fit: edge to edge, outer gap only.
+        let two = strip_rects(&s, &[A, B], A, tile, &cfg, 26, false);
+        assert_eq!(xs(two), [(8, 1916), (1924, 3832)]);
+        // Three overflow: C shows 96 px at offset 0; B needs no scroll.
+        let t = [A, B, C];
+        let r = strip_rects(&s, &t, A, tile, &cfg, 26, false);
+        assert_eq!(xs(r), [(8, 1868), (1876, 3736), (3744, 5604)]);
+        let show =
+            |s: &Strip, h| strip_show_offset(s, &t, h, tile, &cfg, Center::Never, false, false);
+        assert_eq!(show(&s, B), Some(0));
+        assert_eq!(show(&s, C), Some(1772));
+        s.offset = 1772;
+        let r = strip_rects(&s, &t, C, tile, &cfg, 26, false);
+        assert_eq!(xs(r), [(-1764, 96), (104, 1964), (1972, 3832)]);
+        // Vertical: the same along y from the area's top (bar 40 px above).
+        let vt = (rect(0, 40, 2000, 3880), 8, 48);
+        let v = strip_rects(&Strip::default(), &[A, B], A, vt, &cfg, 26, true);
+        let ys: Vec<_> = v.iter().map(|r| (r.top, r.bottom)).collect();
+        assert_eq!(ys, [(48, 1956), (1964, 3872)]);
     }
 
     // ---- tab bars (scrolling slice 6) ----
@@ -28878,7 +29509,7 @@ mod tests {
             hidden: s.hidden_tabs(&t, focused),
         };
         let slots = |s: &Strip, focused, others: Vec<RECT>, tab_h| {
-            let out = strip_out(s, &t, focused, area, &cfg, tab_h);
+            let out = strip_out(s, &t, focused, (area, 8, 0), &cfg, tab_h, false);
             tab_bar_slots(s, &cols, focused, &out, &map_for(s, others, focused))
         };
         let bar = rect(1442, 8, 2390, 34);
@@ -28897,9 +29528,9 @@ mod tests {
         assert_eq!(shown[0].1.right, 1912, "clamped to the last full view");
         // No area, no bar; nor off scrolling; nor on a degenerate view.
         assert!(slots(&s, A, vec![], 0).is_empty());
-        let out = strip_out(&s, &t, A, area, &cfg, 26);
+        let out = strip_out(&s, &t, A, (area, 8, 0), &cfg, 26, false);
         assert!(tab_bar_slots(&s, &cols, A, &out, &PlaceMap::default()).is_empty());
-        let out = strip_out(&s, &t, A, rect(0, 0, 10, 10), &cfg, 26);
+        let out = strip_out(&s, &t, A, (rect(0, 0, 10, 10), 8, 0), &cfg, 26, false);
         assert!(tab_bar_slots(&s, &cols, A, &out, &map_for(&s, vec![], A)).is_empty());
         // Untabbed: no bar.
         s.cols.get_mut(&1).unwrap().tabbed = false;
@@ -29012,7 +29643,17 @@ mod tests {
         let mut s = Strip::default();
         let t = [A, B, C];
         let show = |s: &Strip, cfg: &Config, h| {
-            strip_show_offset(s, &t, h, 1920, cfg, center_mode(&cfg.scroll_center))
+            let view = (rect(0, 0, 1920, 1080), 8, 0);
+            strip_show_offset(
+                s,
+                &t,
+                h,
+                view,
+                cfg,
+                center_mode(&cfg.scroll_center),
+                false,
+                false,
+            )
         };
         // never: the least scroll that shows the column whole.
         assert_eq!(show(&s, &cfg, C), Some(2868 + 8 - 1920));
@@ -29097,6 +29738,16 @@ mod tests {
     }
 
     #[test]
+    fn quit_brings_in_slivers_but_not_edge_tiles() {
+        let m = rect(0, 0, 3840, 2160);
+        // V10: a top sliver (90 px of 963 on screen) and a left one.
+        assert!(mostly_outside(&rect(8, -873, 3832, 90), &m));
+        assert!(mostly_outside(&rect(-1812, 50, 47, 2081), &m));
+        // An edge tile whose invisible border pokes past the monitor stays.
+        assert!(!mostly_outside(&rect(-3, 50, 1911, 2081), &m));
+    }
+
+    #[test]
     fn slide_rects_are_clipped_to_the_work_area() {
         let origin = rect(1920, 40, 3840, 1080);
         let clip = |r| clip_local(r, origin, 1920, 1040);
@@ -29116,7 +29767,7 @@ mod tests {
     #[test]
     fn leaving_a_scrolling_workspace_takes_the_strip_entries_along() {
         let mut mgr = test_manager(1, 2);
-        mgr.monitors[0].layout = "scrolling".into();
+        mgr.monitors[0].workspaces[0].layout = Some("scrolling");
         {
             let ws = &mut mgr.monitors[0].workspaces[0];
             ws.windows = vec![A, B, C];
@@ -29453,31 +30104,41 @@ mod tests {
     }
 
     #[test]
-    fn alt_wheel_steps_per_notch_once_per_swipe_and_forgets_after_a_pause() {
-        let (mut acc, mut latch) = (0, 0);
-        let mut s = |last, now, delta| scroll_wheel_steps(&mut acc, &mut latch, last, now, delta);
+    fn alt_wheel_steps_per_notch_per_swipe_distance_and_forgets_after_a_pause() {
+        let (mut acc, mut latch, mut stepped) = (0, 0, 0);
+        let mut s = |last, now, delta| {
+            scroll_wheel_steps(&mut acc, &mut latch, &mut stepped, last, now, delta)
+        };
         // A notch is a column, and a fast spin can carry two in one event.
         assert_eq!(s(0, 10, 120), 1);
         assert_eq!(s(10, 20, 120), 1);
         assert_eq!(s(20, 30, -240), -2);
-        // A swipe's small deltas add up to one column, and the rest of the
-        // swipe steps no further, however long it runs...
+        // A swipe's small deltas add up to one column...
         assert_eq!(s(30, 40, 40), 0);
         assert_eq!(s(40, 50, 40), 0);
         assert_eq!(s(50, 60, 40), 1);
-        for t in 0..20 {
-            assert_eq!(s(60 + t * 10, 70 + t * 10, 40), 0);
+        // ...and a longer one steps again per 120, but not within 150 ms of
+        // its last step: the 120 reached at 90 waits for 210.
+        for t in 0..14 {
+            assert_eq!(s(60 + t * 10, 70 + t * 10, 40), 0, "at {}", 70 + t * 10);
         }
-        // ...until a pause over 300 ms: the next swipe steps again.
-        assert_eq!(s(260, 600, 130), 1);
-        // A reversal ends a swipe too, and drops its remainder.
-        assert_eq!(s(600, 610, 60), 0);
-        assert_eq!(s(610, 620, -60), 0);
-        assert_eq!(s(620, 630, -60), -1);
+        // A whole 120 inside the swipe waits too: no skip, no banked double.
+        assert_eq!(s(200, 205, 120), 0);
+        assert_eq!(s(205, 210, 40), 1);
+        // A slow stretch steps only once it has added up 120 again.
+        assert_eq!(s(210, 400, 50), 0);
+        assert_eq!(s(400, 420, 50), 0);
+        assert_eq!(s(420, 440, 50), 1);
+        // After a pause over 300 ms the next swipe steps afresh.
+        assert_eq!(s(440, 800, 130), 1);
+        // A reversal ends a swipe too, drops its remainder and its cooldown.
+        assert_eq!(s(800, 810, 60), 0);
+        assert_eq!(s(810, 820, -60), 0);
+        assert_eq!(s(820, 830, -60), -1);
         // A partial delta is dropped after a pause, kept inside one.
-        assert_eq!(s(630, 640, 100), 0);
-        assert_eq!(s(640, 1000, 100), 0);
-        assert_eq!(s(1000, 1010, 20), 1);
+        assert_eq!(s(830, 840, 100), 0);
+        assert_eq!(s(840, 1200, 100), 0);
+        assert_eq!(s(1200, 1210, 20), 1);
         // The hook clock wraps (GetTickCount-style).
         assert_eq!(s(u32::MAX - 5, 10, -130), -1);
     }
@@ -29536,6 +30197,40 @@ mod tests {
         scrollmon_publish(&[]);
     }
 
+    /// 2026-11-23: tile area 0..3840, outer 8, peek 48, so the region
+    /// reaches 2 * 48 + 8 = 104 px in from each strip-axis edge.
+    #[test]
+    fn peek_slivers_cover_the_end_sliver_and_clip_a_half_visible_column() {
+        let area = rect(0, 0, 3840, 2000);
+        let at = |raw| peek_slivers(area, 8, 48, false, raw).collect::<Vec<RECT>>();
+        // An end sliver (2 * peek wide, strip_base) is all Astur's.
+        let l = at(rect(-1764, 8, 96, 1992));
+        let r = at(rect(3744, 8, 5604, 1992));
+        assert_eq!(l, [rect(0, 8, 96, 1992)]);
+        assert_eq!(r, [rect(3744, 8, 3840, 1992)]);
+        // A middle-of-strip sliver (peek wide) too.
+        assert_eq!(at(rect(-1812, 8, 48, 1992)), [rect(0, 8, 48, 1992)]);
+        // Half visible (scroll_center = always): only the 104 px band.
+        assert_eq!(at(rect(-900, 8, 960, 1992)), [rect(0, 8, 104, 1992)]);
+        assert_eq!(at(rect(2900, 8, 4760, 1992)), [rect(3736, 8, 3840, 1992)]);
+        assert!(at(rect(500, 8, 2360, 1992)).is_empty());
+        // Peek 0: no region at all.
+        let none = peek_slivers(area, 8, 0, false, rect(-900, 8, 24, 1992));
+        assert_eq!(none.count(), 0);
+        // Vertical: the top and bottom bands.
+        let v: Vec<RECT> = peek_slivers(area, 8, 48, true, rect(8, -1764, 3832, 96)).collect();
+        assert_eq!(v, [rect(8, 0, 3832, 96)]);
+        // The hook finds the whole end sliver, nothing past it.
+        peek_publish(&[(l[0], 7), (r[0], 9)]);
+        assert_eq!(peek_at(POINT { x: 10, y: 20 }), 7);
+        assert_eq!(peek_at(POINT { x: 95, y: 20 }), 7, "all 96 px");
+        assert_eq!(peek_at(POINT { x: 3800, y: 20 }), 9);
+        assert_eq!(peek_at(POINT { x: 96, y: 20 }), 0, "right edge is outside");
+        assert_eq!(peek_at(POINT { x: 10, y: 4 }), 0, "gap above the tile");
+        peek_publish(&[]);
+        assert_eq!(peek_at(POINT { x: 10, y: 20 }), 0);
+    }
+
     #[test]
     fn column_steps_clamp_and_start_from_outside_the_strip() {
         assert_eq!(column_target(Some(1), 1, 3), Some(2));
@@ -29549,15 +30244,15 @@ mod tests {
     }
 
     #[test]
-    fn a_drop_picks_the_window_quarter_its_own_slot_or_a_strip_end() {
+    fn a_drop_picks_the_window_quarter_its_own_slot_a_gap_or_a_strip_end() {
         let view = rect(0, 0, 1920, 1080);
         let t = Some((A, rect(400, 0, 800, 1080)));
-        let at = |x, y, own| drop_zone(POINT { x, y }, t, own, view);
+        let at = |x, y, own| drop_zone(POINT { x, y }, t, own, view, &[]);
         assert_eq!(at(450, 500, None), Some(DropAt::Before(A)));
         assert_eq!(at(700, 500, None), Some(DropAt::After(A)));
         assert_eq!(at(799, 500, None), Some(DropAt::After(A)));
         assert_eq!(at(600, 500, None), Some(DropAt::Below(A)));
-        let none = |x, own| drop_zone(POINT { x, y: 500 }, None, own, view);
+        let none = |x, own| drop_zone(POINT { x, y: 500 }, None, own, view, &[]);
         assert_eq!(none(100, None), Some(DropAt::First));
         assert_eq!(none(1500, None), Some(DropAt::Last));
         // Back in its own slot: stay put, never a reorder.
@@ -29566,6 +30261,38 @@ mod tests {
             none(100, Some(rect(1000, 0, 1900, 1080))),
             Some(DropAt::First)
         );
+        // In a gap between on-screen tiles B | C (D off screen): the slot
+        // between them, from the nearer side; past the outermost, an end.
+        let tiles = [
+            (B, rect(8, 8, 956, 1072)),
+            (C, rect(964, 8, 1912, 1072)),
+            (D, rect(1920, 8, 2868, 1072)),
+        ];
+        let gap = |x, y| drop_zone(POINT { x, y }, None, None, view, &tiles);
+        assert_eq!(gap(958, 500), Some(DropAt::After(B)));
+        assert_eq!(gap(962, 500), Some(DropAt::Before(C)));
+        assert_eq!(gap(500, 2), Some(DropAt::Below(B)), "above the middle of B");
+        assert_eq!(gap(1915, 500), Some(DropAt::Last));
+        assert_eq!(gap(3, 500), Some(DropAt::First));
+        // A stacked column B over C: under C = below C, between them = below B.
+        let stack = [(B, rect(8, 8, 956, 536)), (C, rect(8, 544, 956, 1072))];
+        let st = |y| drop_zone(POINT { x: 500, y }, None, None, view, &stack);
+        assert_eq!(st(1076), Some(DropAt::Below(C)));
+        assert_eq!(st(542), Some(DropAt::Below(B)));
+        assert_eq!(st(2), Some(DropAt::Below(B)));
+        // Its own slot still wins over the gap rule.
+        let own = Some(rect(8, 8, 956, 1072));
+        assert_eq!(
+            drop_zone(POINT { x: 500, y: 500 }, None, own, view, &tiles),
+            None
+        );
+        // Vertical (R8): the caller transposes, so a row's top quarter is a
+        // new row above it, its middle joins it.
+        let row = Some((A, transpose(rect(0, 400, 1920, 800))));
+        let v = |y| drop_zone(POINT { x: y, y: 900 }, row, None, transpose(view), &[]);
+        assert_eq!(v(450), Some(DropAt::Before(A)));
+        assert_eq!(v(600), Some(DropAt::Below(A)));
+        assert_eq!(v(790), Some(DropAt::After(A)));
     }
 
     #[test]
@@ -29628,9 +30355,13 @@ mod tests {
 
     #[test]
     fn the_bar_shows_the_focused_column_of_a_scrolling_strip() {
-        assert_eq!(scroll_label(Some(1), 5), "scrolling 2/5");
-        assert_eq!(scroll_label(None, 3), "scrolling -/3", "focus floating");
-        assert_eq!(scroll_label(None, 0), "scrolling");
+        assert_eq!(scroll_label("scrolling", Some(1), 5), "scrolling 2/5");
+        let l = "scrolling";
+        assert_eq!(scroll_label(l, None, 3), "scrolling -/3", "focus floating");
+        assert_eq!(scroll_label(l, None, 0), "scrolling");
+        let v = "scrolling_vertical";
+        assert_eq!(scroll_label(v, Some(0), 2), "vertical 1/2");
+        assert_eq!(scroll_label(v, None, 0), "scrolling_vertical");
     }
 
     #[test]
