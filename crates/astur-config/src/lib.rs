@@ -2857,6 +2857,22 @@ fn plan_move(
     (from != to && is_dir(&from) && !is_dir(&to)).then_some((from, to))
 }
 
+/// The override (ASTUR_CONFIG / ASTUR_NAVBAR) that points inside `from`:
+/// moving that folder would strand the file it names, so the WM does not.
+/// Case-insensitive, as Windows paths are; `..` and relative overrides are
+/// made absolute first (std, lexical).
+// ponytail: 8.3 short names and \\?\ verbatim overrides are not matched;
+// canonicalising would need the file to exist.
+pub fn pinned_by(from: &Path, var: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let from = from.to_string_lossy().to_lowercase();
+    ["ASTUR_CONFIG", "ASTUR_NAVBAR"].into_iter().find(|k| {
+        var(k).is_some_and(|v| {
+            let v = std::path::absolute(&v).unwrap_or(v.into());
+            Path::new(&v.to_string_lossy().to_lowercase()).starts_with(&from)
+        })
+    })
+}
+
 /// `path` re-based from the Astur folder not in use (`other`) onto `dir`,
 /// the one in use: a wallpaper picked inside the folder before a move
 /// follows it. None when it is not inside `other`.
@@ -5926,6 +5942,24 @@ floating = true"
             Some(r"C:\U\R\Astur\wallpapers\a.jpg")
         );
         assert_eq!(moved_path(r"D:\pics\a.jpg", &old, &new), None);
+    }
+
+    #[test]
+    fn an_override_inside_the_folder_pins_it() {
+        let at =
+            |path: &'static str| move |k: &str| (k == "ASTUR_CONFIG").then(|| path.to_string());
+        let old = Path::new(r"C:\U\.astur");
+        assert_eq!(
+            pinned_by(old, at(r"c:\u\.astur\astur.conf")),
+            Some("ASTUR_CONFIG")
+        );
+        assert_eq!(pinned_by(old, at(r"D:\x.conf")), None);
+        assert_eq!(pinned_by(old, at(r"C:\U\.asturx\a.conf")), None);
+        assert_eq!(
+            pinned_by(old, at(r"C:\U\x\..\.astur\a.conf")),
+            Some("ASTUR_CONFIG"),
+            "a `..` spelling still pins it"
+        );
     }
 
     #[test]

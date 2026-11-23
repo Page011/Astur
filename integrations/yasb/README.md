@@ -16,7 +16,8 @@ The settings exe embeds the examples, so these copy buttons work with a portable
 installation too. For manual configuration:
 
 1. Run an Astur build containing this integration. In
-   `astur.conf` (in `%APPDATA%\Astur`, or `%USERPROFILE%\.astur` with
+   `astur.conf` (in the Astur folder in use: Settings > Troubleshooting >
+   Files shows it; normally `%APPDATA%\Astur`, or `%USERPROFILE%\.astur` with
    `config_folder = home`), add:
 
    ```ini

@@ -391,7 +391,9 @@ folder) keeps it in `%USERPROFILE%\.astur\` instead. Astur moves the whole
 folder to the chosen place when it starts, so an install from before 2.5.0
 moves from `.astur` to `%APPDATA%\Astur` on its first start. It never merges:
 if a folder is already at the target, nothing moves until you rename or
-delete that one. Wallpaper paths inside the old folder follow the move;
+delete that one. Nor while `ASTUR_CONFIG` or `ASTUR_NAVBAR` points inside
+the folder (the log and Settings say so); point overrides outside both
+Astur folders. Wallpaper paths inside the old folder follow the move;
 paths you typed into commands or launcher entries do not. Astur Lite and
 builds before 2.5.0 read only `%USERPROFILE%\.astur\`: set
 `config_folder = home` and restart Astur before switching to one. A reload

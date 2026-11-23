@@ -387,10 +387,18 @@ pub(crate) fn col_width(view_w: i32, px: i32, outer: i32, inner: i32) -> f32 {
     (px + inner) as f32 / (view_w - 2 * outer + inner).max(1) as f32
 }
 
-/// `scroll_peek` in px as the strip uses it: capped at a quarter of the
-/// strip-axis length `len`, so the columns keep at least half of it.
-pub(crate) fn peek_px(len: i32, peek: i32) -> i32 {
-    peek.clamp(0, (len / 4).max(0))
+/// `scroll_peek` in px as the strip uses it, plus what an `inner` gap wider
+/// than `outer` eats of the sliver (so the neighbour still shows the full
+/// peek past the gap), the sum capped at a quarter of the strip-axis length
+/// `len` so the columns keep at least half of it (a huge inner gap shrinks
+/// the sliver, not the columns). 0 stays 0 (edge to edge).
+pub(crate) fn peek_px(len: i32, peek: i32, outer: i32, inner: i32) -> i32 {
+    let p = peek.clamp(0, (len / 4).max(0));
+    if p > 0 {
+        (p + (inner - outer).max(0)).min(len / 4)
+    } else {
+        0
+    }
 }
 
 /// The length columns are sized on (`col_px`'s `view_w`) for a strip of
@@ -409,7 +417,7 @@ pub(crate) fn strip_base(
     outer: i32,
     inner: i32,
 ) -> (i32, i32) {
-    let p = peek_px(len, peek);
+    let p = peek_px(len, peek, outer, inner);
     let lo = len - 2 * p;
     let sum = widths.iter().sum::<f32>().max(1.0);
     let fill = ((len - 2 * outer + inner) as f32 / sum).round() as i32 + 2 * outer - inner;
@@ -448,7 +456,7 @@ pub(crate) fn drag_width(
         .sum();
     let span = (px + inner) as f32;
     let full = (len - 2 * outer + inner).max(1) as f32;
-    let lo_len = len - 2 * peek_px(len, peek);
+    let lo_len = len - 2 * peek_px(len, peek, outer, inner);
     let lo = (lo_len - 2 * outer + inner).max(1) as f32;
     let fits = col_width(len, px, outer, inner);
     let over = col_width(lo_len, px, outer, inner);
@@ -1599,6 +1607,19 @@ mod tests {
         assert_eq!(strip_base(100, &[0.5; 4], 500, 0, 0), (50, 25));
         let p0 = strip_layout(area, &vec![col(0.5, &[1.0]); 3], 0, 8, 8, 0, 0).tiles[2];
         assert_eq!((p0.left, classify(p0, area, &[])), (3840, Vis::Park));
+    }
+
+    /// An inner gap wider than the outer one still leaves the full peek of
+    /// each neighbour on screen (the gap is added to the sliver, not taken).
+    #[test]
+    fn a_wide_inner_gap_keeps_the_whole_peek() {
+        let (base, p) = strip_base(1000, &[1.0; 3], 32, 8, 60);
+        let s = strip_spans(base, &[1.0; 3], 8, 60);
+        let o = scroll_to_show(1000, &s, 8, p, 1, 0, Center::Never, true);
+        assert_eq!((s[0].1 - o, s[2].0 - o), (32, 968));
+        assert_eq!(peek_px(1000, 0, 8, 60), 0, "peek 0 stays edge to edge");
+        // Peek plus a huge inner gap is still capped: columns keep half.
+        assert!(strip_base(1032, &[1.0; 3], 200, 0, 500).0 >= 1032 / 2);
     }
 
     /// The same numbers along y (R8): top-aligned when it fits, and the bar

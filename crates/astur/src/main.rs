@@ -3213,8 +3213,8 @@ fn peek_at(pt: POINT) -> isize {
 /// hook timestamps (ms, wrapping): a pause over SCROLL_WHEEL_GAP_MS drops the
 /// carried remainder first. A notched wheel steps per notch (a whole 120
 /// inside a running swipe waits like the rest). A swipe (partial
-/// deltas: a touchpad, a smooth wheel) steps one column per 120 of delta, at
-/// most once per SCROLL_SWIPE_STEP_MS: `latch` is the direction it last
+/// deltas: a touchpad, a smooth wheel) steps one column per 120 of delta (a
+/// step's remainder carries), at most once per SCROLL_SWIPE_STEP_MS: `latch` is the direction it last
 /// stepped (0 = none) at `stepped`, and while that cools down at most one
 /// more step waits in `acc`. A pause or a reversal clears it. Pure, so the
 /// hook's arithmetic is testable.
@@ -3241,7 +3241,6 @@ fn scroll_wheel_steps(
         *acc = steps.signum() * 120;
         return 0;
     }
-    *acc = 0;
     *latch = steps.signum();
     *stepped = now;
     steps.signum()
@@ -4746,14 +4745,16 @@ fn column_target(from: Option<usize>, n: i32, len: usize) -> Option<usize> {
 /// window's own slot `own`, since a drag that went nowhere must not reorder;
 /// between the outermost of the strip's `tiles` on `view` (the work area), a
 /// gap, the nearest of them by x (then y) under the same quarter rule (the slot
-/// between two columns either way); elsewhere a new column at the strip end
-/// on that side of `view`.
+/// between two columns either way), an inactive tab (`hidden`, same rect as
+/// the shown one) losing ties; elsewhere a new column at the strip end on
+/// that side of the tiles (of `view` when there are none).
 fn drop_zone(
     pt: POINT,
     target: Option<(isize, RECT)>,
     own: Option<RECT>,
     view: RECT,
     tiles: &[(isize, RECT)],
+    hidden: &[isize],
 ) -> Option<DropAt> {
     let inside = |o: RECT| pt.x >= o.left && pt.x < o.right && pt.y >= o.top && pt.y < o.bottom;
     if target.is_none() && own.is_some_and(inside) {
@@ -4775,7 +4776,7 @@ fn drop_zone(
             // the point, so Below fills the gap it is in; else the top one.
             let dy = |r: &RECT| (r.top - pt.y).max(pt.y - r.bottom + 1).max(0);
             shown
-                .min_by_key(|(_, r)| (dist(r), r.top > pt.y, dy(r)))
+                .min_by_key(|(t, r)| (dist(r), r.top > pt.y, dy(r), hidden.contains(t)))
                 .copied()
         })
         .flatten();
@@ -4789,7 +4790,14 @@ fn drop_zone(
             DropAt::Below(t)
         });
     }
-    Some(if pt.x < (view.left + view.right) / 2 {
+    // Outside the tiles (a point inside them always has a gap): the end on
+    // that side, so a start-aligned vertical strip that fits works too.
+    let mid = if lo < hi {
+        lo
+    } else {
+        (view.left + view.right) / 2
+    };
+    Some(if pt.x < mid {
         DropAt::First
     } else {
         DropAt::Last
@@ -11049,11 +11057,13 @@ struct ColdBmp {
 /// Requests and snapshots. `want` is in request order; the worker shoots its
 /// first and leaves it there until stored, so nothing is queued twice. A
 /// stored None = the shot failed (hung, gone, GDI): not retried until the
-/// entry is evicted.
+/// entry is evicted. `epoch` counts clears, so a shot taken before one is
+/// never stored after it (even when the window was asked for again).
 #[derive(Default)]
 struct ColdCache {
     want: Vec<isize>,
     snaps: Vec<(isize, Option<ColdBmp>)>, // oldest first, at most COLD_MAX
+    epoch: u32,
 }
 
 /// Snapshots kept at most, oldest dropped first. Requests only cover tiles
@@ -11069,6 +11079,7 @@ const COLD_BUSY_POLL_MS: u64 = 25;
 static COLD: Mutex<ColdCache> = Mutex::new(ColdCache {
     want: Vec::new(),
     snaps: Vec::new(),
+    epoch: 0,
 });
 static COLD_CV: Condvar = Condvar::new();
 
@@ -11082,12 +11093,13 @@ impl ColdCache {
         true
     }
 
-    /// Store the worker's shot of `h` if it is still wanted (an eviction
-    /// meanwhile cancelled it). Returns what leaves the cache, for the caller
-    /// to drop after the lock: an entry replaced or pushed out by COLD_MAX,
-    /// or the unwanted shot itself.
-    fn store(&mut self, h: isize, shot: Option<ColdBmp>) -> Vec<ColdBmp> {
-        if !self.want.contains(&h) {
+    /// Store the worker's shot of `h`, taken in `epoch`, if it is still
+    /// wanted (an eviction meanwhile cancelled it) and no clear came between
+    /// (a fresh request then stays queued). Returns what leaves the cache,
+    /// for the caller to drop after the lock: an entry replaced or pushed out
+    /// by COLD_MAX, or the unwanted shot itself.
+    fn store(&mut self, h: isize, epoch: u32, shot: Option<ColdBmp>) -> Vec<ColdBmp> {
+        if epoch != self.epoch || !self.want.contains(&h) {
             return shot.into_iter().collect();
         }
         let mut dead = self.forget(h);
@@ -11120,6 +11132,19 @@ impl ColdCache {
             queued |= self.request(h);
         }
         (queued, dead)
+    }
+
+    /// Empty the cache into the returned one (to drop after the lock) and
+    /// start a new epoch.
+    fn clear(&mut self) -> ColdCache {
+        let epoch = self.epoch.wrapping_add(1);
+        std::mem::replace(
+            self,
+            ColdCache {
+                epoch,
+                ..Default::default()
+            },
+        )
     }
 
     /// Drop `h`'s request and entry; returns its snapshot to drop after the
@@ -11155,10 +11180,11 @@ fn cold_take(cold: &[isize]) -> Vec<(isize, Option<ColdBmp>)> {
 
 /// Drop every request and snapshot: window images are not valid any more
 /// (display, work-area or layout change, reload). A shot in flight is
-/// discarded when it comes back; the next command's cold_request asks again
-/// for whatever is still cold.
+/// discarded when it comes back (ColdCache::epoch), even if the window was
+/// asked for again; the next command's cold_request asks again for whatever
+/// is still cold.
 fn cold_clear() {
-    let old = std::mem::take(&mut *COLD.lock().unwrap());
+    let old = COLD.lock().unwrap().clear();
     drop(old); // freed after the lock is released
 }
 
@@ -11358,8 +11384,12 @@ fn cold_worker() {
             std::thread::sleep(std::time::Duration::from_millis(COLD_BUSY_POLL_MS));
         }
         // Read after the wait: an eviction meanwhile may have cancelled it.
-        let Some(h) = COLD.lock().unwrap().want.first().copied() else {
-            continue;
+        let (h, epoch) = {
+            let c = COLD.lock().unwrap();
+            let Some(&h) = c.want.first() else {
+                continue;
+            };
+            (h, c.epoch)
         };
         let t = Instant::now();
         let shot = unsafe { cold_shoot(h) };
@@ -11369,7 +11399,7 @@ fn cold_worker() {
                 .map_or("failed".to_string(), |s| format!("{}x{}", s.w, s.h)),
             t.elapsed().as_millis()
         );
-        let dead = COLD.lock().unwrap().store(h, shot);
+        let dead = COLD.lock().unwrap().store(h, epoch, shot);
         drop(dead); // freed after the lock is released
     }
 }
@@ -13850,7 +13880,9 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 let p = if v { POINT { x: y, y: x } } else { pt };
                 // The work area, not strip_tile: peek slivers count as on
                 // screen, so the gap beside one is a gap (R9).
-                drop_zone(p, on, own, tr(mgr.monitors[to_mi].work_area), &tiles)
+                let hidden = PlaceMap::new(mgr, to_mi, mgr.monitors[to_mi].active).hidden;
+                let view = tr(mgr.monitors[to_mi].work_area);
+                drop_zone(p, on, own, view, &tiles, &hidden)
             } else {
                 None
             };
@@ -13920,6 +13952,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             focus_window(h);
         }
         Cmd::DragResized(h, rect) => {
+            // The user (or this drag) just placed it: the rect Astur last
+            // sent no longer describes it, so Quit's sliver restore must not
+            // pull it back there (tiled windows are re-placed below anyway).
+            last_sent_forget(h);
             // Tiled resize: apply its final slot once. Floating/unmanaged
             // windows keep the exact release rect; native drags already landed.
             if let Some(r) = rect {
@@ -19475,7 +19511,7 @@ fn strip_after_command(mgr: &mut Manager) {
                 continue;
             }
             let ((area, outer, peek), v) = mgr.strip_tile(mi, m.active);
-            let p = peek_px(strip_len(area, v), peek);
+            let p = peek_px(strip_len(area, v), peek, outer, mgr.cfg.inner_gap);
             let map = PlaceMap::new(mgr, mi, m.active);
             for (h, raw) in workspace_layout(mgr, mi, m.active) {
                 if map.vis(h, raw) == Vis::Peek {
@@ -24219,13 +24255,22 @@ unsafe fn sysmenu_exec(act: SysAct) {
                 // manage the same windows at once. Spawned before the restore,
                 // which the exit watchdog may end this process inside (a hung
                 // app): the restart still happens. Its wait (10 s cap) is well
-                // past that bound.
-                let _ = std::process::Command::new(exe)
+                // past that bound. No replacement (exe gone, AV block): keep
+                // running rather than leave the desktop with no WM.
+                match std::process::Command::new(&exe)
                     .arg("--wait-for-pid")
                     .arg(std::process::id().to_string())
-                    .spawn();
-                restore_all_windows();
-                std::process::exit(0);
+                    .spawn()
+                {
+                    Ok(_) => {
+                        restore_all_windows();
+                        std::process::exit(0);
+                    }
+                    Err(e) => log_error!(
+                        "restart: could not start {}: {e}; still running",
+                        exe.display()
+                    ),
+                }
             }
         }
         SysAct::Screenshot => launcher_launch("ms-screenclip:"),
@@ -25070,6 +25115,12 @@ fn move_config_folder(
     choice: &str,
 ) -> Option<(std::path::PathBuf, std::path::PathBuf, std::io::Result<()>)> {
     let (from, to) = config::folder_move(choice)?;
+    // An override inside it would read a missing file after the move and
+    // run on (and write) defaults while the real settings sit in `to`.
+    if let Some(k) = config::pinned_by(&from, |k| std::env::var(k).ok()) {
+        let e = std::io::Error::other(format!("{k} points inside it"));
+        return Some((from, to, Err(e)));
+    }
     let mut r = std::fs::rename(&from, &to);
     for _ in 0..20 {
         match &r {
@@ -26963,7 +27014,7 @@ mod tests {
         assert!(c.request(0xA));
         assert!(!c.request(0xA), "queued once");
         assert!(c.request(0xB));
-        assert!(c.store(0xA, Some(cold_bmp(0x1A))).is_empty());
+        assert!(c.store(0xA, 0, Some(cold_bmp(0x1A))).is_empty());
         assert!(!c.request(0xA), "stored: not asked again");
         assert_eq!(c.want, vec![0xB]);
         // Handed over whole, once; then a re-ask queues it again.
@@ -26975,21 +27026,33 @@ mod tests {
         assert_eq!(freed(), vec![0x1A]);
         assert!(c.request(0xA));
         // A failed shot stays (no retry), and is never handed over.
-        assert!(c.store(0xB, None).is_empty());
+        assert!(c.store(0xB, 0, None).is_empty());
         assert!(c.take(0xB).is_none());
         assert!(!c.request(0xB));
         // An eviction cancels a request: the shot coming back is not stored
         // but handed back to be freed.
         assert!(c.request(0xC));
         assert!(c.forget(0xC).is_empty());
-        let back = c.store(0xC, Some(cold_bmp(0x1C)));
+        let back = c.store(0xC, 0, Some(cold_bmp(0x1C)));
         assert_eq!(raws(&back), vec![0x1C]);
         assert!(c.snaps.iter().all(|s| s.0 != 0xC));
         drop(back);
         assert_eq!(freed(), vec![0x1C]);
+        // A clear with a shot in flight: the stale shot comes back freed and
+        // the request made after the clear stays queued, to be shot again.
+        let mut k = ColdCache::default();
+        assert!(k.request(0xE));
+        let e = k.epoch;
+        drop(k.clear());
+        assert!(k.request(0xE));
+        let back = k.store(0xE, e, Some(cold_bmp(0x1E)));
+        assert_eq!(raws(&back), vec![0x1E]);
+        assert_eq!((k.want.as_slice(), k.snaps.len()), (&[0xE][..], 0));
+        drop(back);
+        assert_eq!(freed(), vec![0x1E]);
         // Untracked windows leave with their snapshot and their request.
         assert!(c.request(0xD));
-        assert!(c.store(0xD, Some(cold_bmp(0x1D))).is_empty());
+        assert!(c.store(0xD, 0, Some(cold_bmp(0x1D))).is_empty());
         let gone = c.retain(|h| h != 0xD && h != 0xA);
         assert_eq!(raws(&gone), vec![0x1D]);
         assert!(!c.want.contains(&0xA));
@@ -26999,12 +27062,30 @@ mod tests {
         let mut c = ColdCache::default();
         for i in 0..COLD_MAX as isize + 2 {
             assert!(c.request(0x100 + i));
-            drop(c.store(0x100 + i, Some(cold_bmp(0x200 + i))));
+            drop(c.store(0x100 + i, 0, Some(cold_bmp(0x200 + i))));
         }
         assert_eq!(c.snaps.len(), COLD_MAX);
         assert_eq!(freed(), vec![0x200, 0x201]);
         drop(c);
         assert_eq!(freed().len(), COLD_MAX);
+    }
+
+    #[test]
+    fn a_native_drag_end_forgets_the_rect_astur_last_sent() {
+        let mut m = test_manager(1, 1);
+        m.tiling = false;
+        let h = 0x7E57_0734;
+        LAST_SENT
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(h, rc(-900, 0, 100, 500));
+        unsafe { process(&mut m, Cmd::DragResized(h, None)) };
+        assert!(LAST_SENT
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|s| !s.contains_key(&h)));
     }
 
     #[test]
@@ -27018,7 +27099,7 @@ mod tests {
         assert_eq!(c.want.as_slice(), &cands[..COLD_MAX]);
         for &h in &cands[..COLD_MAX] {
             assert!(
-                c.store(h, Some(cold_bmp(h + 0x100))).is_empty(),
+                c.store(h, 0, Some(cold_bmp(h + 0x100))).is_empty(),
                 "never overflows"
             );
         }
@@ -30125,10 +30206,11 @@ mod tests {
         // A whole 120 inside the swipe waits too: no skip, no banked double.
         assert_eq!(s(200, 205, 120), 0);
         assert_eq!(s(205, 210, 40), 1);
-        // A slow stretch steps only once it has added up 120 again.
+        // A slow stretch steps only once it has added up 120 again, the 40
+        // left over from the step at 210 included.
         assert_eq!(s(210, 400, 50), 0);
-        assert_eq!(s(400, 420, 50), 0);
-        assert_eq!(s(420, 440, 50), 1);
+        assert_eq!(s(400, 420, 50), 1);
+        assert_eq!(s(420, 440, 50), 0);
         // After a pause over 300 ms the next swipe steps afresh.
         assert_eq!(s(440, 800, 130), 1);
         // A reversal ends a swipe too, drops its remainder and its cooldown.
@@ -30141,6 +30223,14 @@ mod tests {
         assert_eq!(s(1200, 1210, 20), 1);
         // The hook clock wraps (GetTickCount-style).
         assert_eq!(s(u32::MAX - 5, 10, -130), -1);
+        // 240 of swipe is two columns: the 30 past the first step carries.
+        let (mut acc, mut latch, mut stepped) = (0, 0, 0);
+        let mut s = |last, now, delta| {
+            scroll_wheel_steps(&mut acc, &mut latch, &mut stepped, last, now, delta)
+        };
+        assert_eq!(s(0, 10, 100), 0);
+        assert_eq!(s(10, 20, 50), 1);
+        assert_eq!(s(20, 180, 90), 1);
     }
 
     #[test]
@@ -30247,12 +30337,12 @@ mod tests {
     fn a_drop_picks_the_window_quarter_its_own_slot_a_gap_or_a_strip_end() {
         let view = rect(0, 0, 1920, 1080);
         let t = Some((A, rect(400, 0, 800, 1080)));
-        let at = |x, y, own| drop_zone(POINT { x, y }, t, own, view, &[]);
+        let at = |x, y, own| drop_zone(POINT { x, y }, t, own, view, &[], &[]);
         assert_eq!(at(450, 500, None), Some(DropAt::Before(A)));
         assert_eq!(at(700, 500, None), Some(DropAt::After(A)));
         assert_eq!(at(799, 500, None), Some(DropAt::After(A)));
         assert_eq!(at(600, 500, None), Some(DropAt::Below(A)));
-        let none = |x, own| drop_zone(POINT { x, y: 500 }, None, own, view, &[]);
+        let none = |x, own| drop_zone(POINT { x, y: 500 }, None, own, view, &[], &[]);
         assert_eq!(none(100, None), Some(DropAt::First));
         assert_eq!(none(1500, None), Some(DropAt::Last));
         // Back in its own slot: stay put, never a reorder.
@@ -30268,7 +30358,7 @@ mod tests {
             (C, rect(964, 8, 1912, 1072)),
             (D, rect(1920, 8, 2868, 1072)),
         ];
-        let gap = |x, y| drop_zone(POINT { x, y }, None, None, view, &tiles);
+        let gap = |x, y| drop_zone(POINT { x, y }, None, None, view, &tiles, &[]);
         assert_eq!(gap(958, 500), Some(DropAt::After(B)));
         assert_eq!(gap(962, 500), Some(DropAt::Before(C)));
         assert_eq!(gap(500, 2), Some(DropAt::Below(B)), "above the middle of B");
@@ -30276,23 +30366,46 @@ mod tests {
         assert_eq!(gap(3, 500), Some(DropAt::First));
         // A stacked column B over C: under C = below C, between them = below B.
         let stack = [(B, rect(8, 8, 956, 536)), (C, rect(8, 544, 956, 1072))];
-        let st = |y| drop_zone(POINT { x: 500, y }, None, None, view, &stack);
+        let st = |y| drop_zone(POINT { x: 500, y }, None, None, view, &stack, &[]);
         assert_eq!(st(1076), Some(DropAt::Below(C)));
         assert_eq!(st(542), Some(DropAt::Below(B)));
         assert_eq!(st(2), Some(DropAt::Below(B)));
         // Its own slot still wins over the gap rule.
         let own = Some(rect(8, 8, 956, 1072));
         assert_eq!(
-            drop_zone(POINT { x: 500, y: 500 }, None, own, view, &tiles),
+            drop_zone(POINT { x: 500, y: 500 }, None, own, view, &tiles, &[]),
             None
         );
         // Vertical (R8): the caller transposes, so a row's top quarter is a
         // new row above it, its middle joins it.
         let row = Some((A, transpose(rect(0, 400, 1920, 800))));
-        let v = |y| drop_zone(POINT { x: y, y: 900 }, row, None, transpose(view), &[]);
+        let v = |y| drop_zone(POINT { x: y, y: 900 }, row, None, transpose(view), &[], &[]);
         assert_eq!(v(450), Some(DropAt::Before(A)));
         assert_eq!(v(600), Some(DropAt::Below(A)));
         assert_eq!(v(790), Some(DropAt::After(A)));
+        // A vertical strip that fits is top-aligned: below its last row is
+        // the end, even above the view's middle.
+        let rows = [
+            (B, transpose(rect(0, 8, 1920, 108))),
+            (C, transpose(rect(0, 116, 1920, 216))),
+        ];
+        let below = POINT { x: 300, y: 900 };
+        assert_eq!(
+            drop_zone(below, None, None, transpose(view), &rows, &[]),
+            Some(DropAt::Last)
+        );
+        // A tabbed column [A, B] showing B: its tab bar answers for B, but
+        // A still answers when it is the only candidate (B being dragged).
+        let tab = rect(8, 48, 956, 1072);
+        let bar = POINT { x: 500, y: 20 };
+        assert_eq!(
+            drop_zone(bar, None, None, view, &[(A, tab), (B, tab)], &[A]),
+            Some(DropAt::Below(B))
+        );
+        assert_eq!(
+            drop_zone(bar, None, None, view, &[(A, tab)], &[A]),
+            Some(DropAt::Below(A))
+        );
     }
 
     #[test]

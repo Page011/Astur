@@ -17,12 +17,12 @@ use astur_config::{
     apply_updates, chord_label, color_to_hex, compile_keys, config_path, default_config_text,
     default_navbar_text, disk_root, format_chord, format_clock, format_date, format_hotkeys,
     format_launcher_entries, format_system_actions, format_window_rules, gap_entry, gaps_text,
-    key_to_vk, layout_step, parse_chord, parse_hotkeys, parse_into, parse_launcher_entries,
-    parse_pair, parse_system_actions, parse_window_rules, pin_theme_color, set_conf_key, text_on,
-    vk_to_key, workspace_label, Action, BarPreset, BarRoles, BindIssue, Config, HotkeyDef,
-    LauncherEntry, Level, MainKey, SystemAction, WindowRule, BAR_ACTIONS, BAR_CLICK_DEFAULTS,
-    BAR_CLICK_WIDGETS, BAR_DARK, BAR_LIGHT, BAR_PRESETS, BAR_WIDGETS, LAYOUTS, MAX_WORKSPACES,
-    MOD_ALT, MOD_CTRL, MOD_HYPER, MOD_SHIFT, MOD_WIN, PALETTES, SWATCH_NAMES,
+    key_to_vk, layout_step, parse_chord, parse_gaps, parse_hotkeys, parse_into,
+    parse_launcher_entries, parse_pair, parse_system_actions, parse_window_rules, pin_theme_color,
+    set_conf_key, text_on, vk_to_key, workspace_label, Action, BarPreset, BarRoles, BindIssue,
+    Config, HotkeyDef, LauncherEntry, Level, MainKey, SystemAction, WindowRule, BAR_ACTIONS,
+    BAR_CLICK_DEFAULTS, BAR_CLICK_WIDGETS, BAR_DARK, BAR_LIGHT, BAR_PRESETS, BAR_WIDGETS, LAYOUTS,
+    MAX_WORKSPACES, MOD_ALT, MOD_CTRL, MOD_HYPER, MOD_SHIFT, MOD_WIN, PALETTES, SWATCH_NAMES,
 };
 use eframe::egui::{
     self, Align, Color32, CornerRadius, FontFamily, FontId, Layout, Margin, RichText, Sense,
@@ -647,10 +647,15 @@ impl App {
         // Astur moved its folder (#26) under a Settings that held no lock
         // in it (ours is gone, the resolver points elsewhere): writing the
         // old paths would recreate a near-default folder that wins over the
-        // moved one on the next start.
-        if !self.paths[0].parent().is_some_and(Path::is_dir)
-            && config_path("ASTUR_CONFIG", "astur.conf") != self.paths[0]
-        {
+        // moved one on the next start. Both files: with only one overridden
+        // the lock sits outside the folder that moves.
+        let files = [
+            ("ASTUR_CONFIG", "astur.conf"),
+            ("ASTUR_NAVBAR", "navbar.conf"),
+        ];
+        if (self.paths.iter().zip(files)).any(|(p, (env, name))| {
+            !p.parent().is_some_and(Path::is_dir) && config_path(env, name) != *p
+        }) {
             self.error =
                 Some("Not saved: Astur moved its folder. Close and reopen Settings.".into());
             return;
@@ -3172,6 +3177,13 @@ impl App {
                 warn_note(
                     ui,
                     &format!("{to} already exists: rename or delete it first."),
+                );
+            } else if let Some(k) = astur_config::pinned_by(&in_use, |k| std::env::var(k).ok()) {
+                warn_note(
+                    ui,
+                    &format!(
+                        "{k} points inside it: Astur does not move it until {k} points elsewhere."
+                    ),
                 );
             } else {
                 note(
@@ -6174,9 +6186,11 @@ fn fold_mirrors(c: &mut Config, m: &mut Mirrors) {
     trim_defaults(&mut c.monitor_outer_gaps);
     // Keep the parser's invariant (outer_gap = smallest edge, min extra 0),
     // or four raised extras show one gap here and read back as another.
-    let low = c.outer_gap_extra.into_iter().min().unwrap_or(0);
-    c.outer_gap += low;
-    c.outer_gap_extra = c.outer_gap_extra.map(|e| e - low);
+    // The parser also clamps each edge (0..=500), so an edge pushed past it
+    // (hand-edited outer_gap 450 + extra 100) reads back as written.
+    let g = parse_gaps(&gaps_text(c.outer_gaps(), " ")).unwrap_or(c.outer_gaps());
+    c.outer_gap = g.into_iter().min().unwrap_or(0);
+    c.outer_gap_extra = g.map(|e| e - c.outer_gap);
     // Normalise the text mirrors to what survived validation; rows stay.
     *m = Mirrors {
         rows: std::mem::take(&mut m.rows),
@@ -9733,6 +9747,22 @@ mod tests {
         let mut m = Mirrors::from(&c);
         fold_mirrors(&mut c, &mut m);
         assert_eq!((c.outer_gap, c.outer_gap_extra), (18, [0, 2, 0, 0]));
+        // An edge past the parser's 500 clamp is clamped here too, so the
+        // file reads back as Settings shows it.
+        let mut c = Config {
+            outer_gap: 500,
+            outer_gap_extra: [0, 0, 10, 0],
+            ..Config::defaults()
+        };
+        let mut m = Mirrors::from(&c);
+        fold_mirrors(&mut c, &mut m);
+        assert_eq!((c.outer_gap, c.outer_gap_extra), (500, [0; 4]));
+        let mut back = Config::defaults();
+        parse_into(
+            &mut back,
+            &format!("outer_gap = {}", gaps_text(c.outer_gaps(), ", ")),
+        );
+        assert_eq!(back.outer_gaps(), c.outer_gaps());
     }
 
     #[test]
@@ -9926,6 +9956,15 @@ mod tests {
         app.cfg.inner_gap = 3;
         app.commit();
         assert!(!paths[0].parent().unwrap().exists());
+        assert!(app.error.as_deref().is_some_and(|e| e.contains("moved")));
+        // Only astur.conf overridden elsewhere: navbar.conf's folder moving
+        // is caught too.
+        let (a, b) = (temp_paths("moved-a", "", ""), temp_paths("moved-b", "", ""));
+        let mut app = App::load([a[0].clone(), b[1].clone()]);
+        std::fs::remove_dir_all(b[1].parent().unwrap()).unwrap();
+        app.cfg.bar_height += 1;
+        app.commit();
+        assert!(!b[1].parent().unwrap().exists());
         assert!(app.error.as_deref().is_some_and(|e| e.contains("moved")));
     }
 
