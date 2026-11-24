@@ -23,7 +23,7 @@ Windows 10 and 11.
 > app launcher · file search · master-stack layout · Niri-style scrolling layout ·
 > Rust window manager
 
-![Astur tiling windows with a status bar on a live Windows desktop](https://astur.app/in-use-screenshot-1.png)
+![Astur tiling windows with a status bar on a live Windows desktop](https://astur.app/astur-showcase-poster.webp)
 
 > See it in motion: [watch the demo clip](https://astur.app/#showcase) on the website.
 
