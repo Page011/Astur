@@ -33,9 +33,9 @@ use config::{config_path, load_config, Config, HotkeyDef, WindowRule};
 use layout::{
     clamp_offset, classify, columns_layout, drag_width, dwindle_layout, edge_inset, grid_layout,
     master_stack, monocle_layout, mosaic_fit, mosaic_insert, mosaic_layout, mosaic_pick,
-    mosaic_resized, next_preset, park_spot, peek_px, resize_dwindle, scroll_to_show, snap_offset,
-    split_ratio, strip_base, strip_layout, strip_layout_v, strip_spans, transpose, Center,
-    StripCol, StripOut, Vis, MOSAIC_MAX,
+    mosaic_resized, next_preset, park_spot, peek_px, resize_dwindle, rows_layout, scroll_to_show,
+    snap_offset, split_ratio, strip_base, strip_layout, strip_layout_v, strip_spans, transpose,
+    Center, StripCol, StripOut, Vis, MOSAIC_MAX,
 };
 
 use windows::core::{w, PCWSTR};
@@ -7458,6 +7458,7 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
     let rects = match mgr.layout(mi, wi) {
         "master" => master_stack(area, n, mgr.cfg.master_ratio, outer, inner),
         "columns" => columns_layout(area, n, outer, inner),
+        "rows" => rows_layout(area, n, outer, inner),
         "grid" => grid_layout(area, n, outer, inner),
         "monocle" => monocle_layout(area, n, outer),
         "mosaic" => mosaic_layout(area, &mosaic_sizes(mgr, mi, &tiled), outer, inner),

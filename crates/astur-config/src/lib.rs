@@ -586,11 +586,11 @@ pub const LAYOUTS: &[&str] = &[
     "dwindle",
     "master",
     "columns",
+    "rows",
     "grid",
     "monocle",
     "scrolling",
     "scrolling_vertical",
-    // Appended, so next / previous keep the older layouts' neighbours.
     "mosaic",
     "floating",
 ];
@@ -1608,19 +1608,21 @@ start_tiled = true
 #             bottom corner (spiral default).
 #   master  = one large master column on the left, the rest stacked on the right.
 #   columns = equal-width columns
+#   rows    = equal-height full-width rows, top to bottom (portrait monitors)
 #   grid    = balanced rows and columns
 #   monocle = every tiled window fills work area; focused window sits on top
 #   scrolling = Niri-style: windows sit in columns on an endless horizontal
 #             strip; columns past the screen edge are a scroll away.
 #   scrolling_vertical = the same strip turned: full-width rows from top to
 #             bottom, Alt+Up / Alt+Down scroll it, a row's windows side by
-#             side. With scroll_center = always the focused row stays in
-#             the middle, like a slot machine.
+#             side. With scroll_center = always the focused row is kept
+#             in the middle, like a slot machine (the first and last rows
+#             stop at the edges).
 #   mosaic  = every window keeps its own size, in centred rows; they all
 #             shrink together only when they don't fit (grid below half size).
 #             Alt + right-drag and Alt+H / Alt+L change a window's size.
 #   floating = Astur places nothing: windows stay where you put them.
-# values: dwindle | master | columns | grid | monocle | scrolling |
+# values: dwindle | master | columns | rows | grid | monocle | scrolling |
 #         scrolling_vertical | mosaic | floating
 layout = dwindle
 
@@ -4981,11 +4983,12 @@ outer_gap = 4
     }
 
     #[test]
-    fn layouts_lists_all_nine() {
+    fn layouts_lists_all_ten() {
         for name in [
             "dwindle",
             "master",
             "columns",
+            "rows",
             "grid",
             "monocle",
             "scrolling",
@@ -4995,9 +4998,11 @@ outer_gap = 4
         ] {
             assert!(LAYOUTS.contains(&name), "{name}");
         }
-        assert_eq!(LAYOUTS.len(), 9);
-        // next / previous: vertical right after scrolling, the two new ones
-        // appended (#27, #28), then wrap.
+        assert_eq!(LAYOUTS.len(), 10);
+        // next / previous: rows right after columns, vertical right after
+        // scrolling, mosaic and floating last, then wrap.
+        assert_eq!(layout_step("columns", "next"), Some("rows"));
+        assert_eq!(layout_step("rows", "next"), Some("grid"));
         assert_eq!(layout_step("scrolling", "next"), Some("scrolling_vertical"));
         assert_eq!(layout_step("scrolling_vertical", "next"), Some("mosaic"));
         assert_eq!(layout_step("mosaic", "next"), Some("floating"));

@@ -5045,6 +5045,11 @@ fn layout_tiles(name: &str) -> &'static [[f32; 4]] {
             [0.34, 0.0, 0.67, 1.0],
             [0.67, 0.0, 1.0, 1.0],
         ],
+        "rows" => &[
+            [0.0, 0.0, 1.0, 0.34],
+            [0.0, 0.34, 1.0, 0.67],
+            [0.0, 0.67, 1.0, 1.0],
+        ],
         "grid" => &[
             [0.0, 0.0, 0.5, 0.5],
             [0.5, 0.0, 1.0, 0.5],
@@ -6552,6 +6557,7 @@ fn layout_label(name: &str) -> &str {
         "dwindle" => "Spiral",
         "master" => "Main + side",
         "columns" => "Columns",
+        "rows" => "Rows",
         "grid" => "Grid",
         "monocle" => "One at a time",
         "scrolling" => "Scrolling",
@@ -6570,6 +6576,7 @@ fn layout_help(name: &str) -> &str {
         "dwindle" => "Spiral: each new window takes half of the space of the one before it.",
         "master" => "Main + side: one big window on the left, the others stacked on the right.",
         "columns" => "Columns: every window side by side, equally wide.",
+        "rows" => "Rows: every window full width, stacked top to bottom, equally tall. For portrait monitors.",
         "grid" => "Grid: the windows in an even grid.",
         "monocle" => {
             "One at a time: each window fills the screen; the focus keys step through them."

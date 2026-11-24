@@ -165,6 +165,12 @@ pub(crate) fn columns_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Ve
     grid_cells(area, n, n.max(1), outer, inner)
 }
 
+/// Rows (#33): columns turned on its side. Every window full width, stacked
+/// top to bottom, equally tall, all on screen (for portrait monitors).
+pub(crate) fn rows_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
+    grid_cells(area, n, 1, outer, inner)
+}
+
 /// Balanced grid using approximately square cells. Last row stretches across
 /// its available columns rather than leaving dead tiles.
 pub(crate) fn grid_layout(area: RECT, n: usize, outer: i32, inner: i32) -> Vec<RECT> {
@@ -268,9 +274,10 @@ pub(crate) fn mosaic_fit(w: f64, h: f64, ww: f64, hh: f64) -> (f64, f64) {
 /// Mosaic layout (#27), after GNOME's mosaic mockups and MosaicWM: each
 /// window keeps its natural size `sizes[i]` (px, capped by mosaic_fit), in
 /// rows of tiled order, each row centred and the block centred on the area.
-/// Rows meet at one seam: rows above the middle sit on their band's foot,
-/// rows below hang from its top, and the middle row (or a lone row) is
-/// centred, so every gap is `inner`. When they don't fit, every window
+/// Rows hug the middle: rows above it sit on their band's foot, rows below
+/// hang from its top, and the middle row (or a lone row) is centred. Gaps
+/// between windows in a row and between bands are `inner`; with two rows
+/// every window touches the one seam. When they don't fit, every window
 /// shrinks by one shared scale, with the row breaks that shrink least;
 /// never grown. Then the most compact cluster wins (closest window centres),
 /// then rows of even width with the widest in the middle. Below
@@ -2665,6 +2672,31 @@ mod tests {
             }
             assert!(d(&v, k) <= start, "case {case}: moved away {v:?}");
         }
+    }
+
+    /// #33: rows is columns turned on its side: full width, equal heights,
+    /// the inner gap between them, the last one to the bottom edge.
+    #[test]
+    fn rows_stack_full_width_top_to_bottom() {
+        let v = rows_layout(r(0, 0, 1080, 1920), 3, 8, 8);
+        assert_eq!(
+            v,
+            [
+                r(8, 8, 1072, 637),
+                r(8, 645, 1072, 1274),
+                r(8, 1282, 1072, 1912)
+            ]
+        );
+        assert_eq!(
+            rows_layout(r(0, 0, 1080, 1920), 1, 8, 8),
+            [r(8, 8, 1072, 1912)]
+        );
+        assert!(rows_layout(r(0, 0, 1080, 1920), 0, 8, 8).is_empty());
+        let t: Vec<RECT> = columns_layout(r(0, 0, 1920, 1080), 3, 8, 8)
+            .into_iter()
+            .map(transpose)
+            .collect();
+        assert_eq!(rows_layout(r(0, 0, 1080, 1920), 3, 8, 8), t);
     }
 
     #[test]
