@@ -1,0 +1,108 @@
+/* The structure every preset builds on: spacing, icon and text sizes, the
+   states widgets mark with classes, and the error plate. Colours come from
+   custom properties (--fg, --muted, --warn, ...) with fallbacks, so a bar
+   with no preset still reads. Presets and style.css change the look on top. */
+
+bar {
+	color: var(--fg, #f2f2f5);
+	font-family: "Segoe UI", sans-serif;
+	font-size: 13px;
+	padding: 0 6px;
+	align-items: center;
+}
+
+zone,
+widget {
+	align-items: center;
+}
+
+icon {
+	font-size: 15px;
+}
+
+/* Status items: cpu, memory, battery, volume, network, media, title, clock,
+   date and text all draw a row with this class. */
+.item {
+	height: 24px;
+	padding: 0 8px;
+	gap: 6px;
+	border-radius: 6px;
+	align-items: center;
+	transition: background-color 120ms ease-out;
+}
+
+.item.button:hover {
+	background: var(--hover, rgba(255, 255, 255, 0.14));
+	color: var(--fg, #f2f2f5);
+}
+
+.item.button:active {
+	background: var(--press, rgba(255, 255, 255, 0.22));
+}
+
+.label {
+	font-weight: 600;
+}
+
+.value {
+	font-variant-numeric: tabular-nums;
+}
+
+.ellipsis {
+	text-overflow: ellipsis;
+}
+
+/* Workspaces: one pill each. (box.workspaces: the widget wrapper carries the
+   widget name as a class too.) */
+box.workspaces {
+	gap: 4px;
+	padding: 0 4px;
+	align-items: center;
+}
+
+.ws {
+	min-width: 26px;
+	height: 22px;
+	padding: 0 8px;
+	border-radius: 11px;
+	justify-content: center;
+	align-items: center;
+	transition: background-color 120ms ease-out;
+}
+
+.ws.focused {
+	font-weight: 600;
+}
+
+/* States a widget puts on its own root element. */
+.stale,
+.absent,
+.offline,
+.muted,
+.idle,
+.paused {
+	color: var(--muted, #c1c6d1);
+}
+
+.warn,
+.low,
+.no-internet {
+	color: var(--warn, #ffc562);
+}
+
+/* The runtime adds .error to a widget's root for ten seconds after one of
+   its handlers failed; the widget keeps running. */
+.error {
+	border: 1px solid var(--error, #ffb3b3);
+}
+
+/* A widget that stopped shows a plate instead. */
+widget.stopped {
+	padding: 0 2px;
+}
+
+plate {
+	background: #9b1c1c;
+	color: #ffffff;
+	border-radius: 4px;
+}

@@ -1,0 +1,14 @@
+# default: a full-width bar at the top, dark or light with Windows.
+# Keys you leave out of your own bar.toml come from here.
+
+[[bar]]
+name = "main"
+monitors = "*"
+position = "top"
+height = 32
+floating = false
+reserve = true
+fullscreen = "below"
+left = ["workspaces", "title"]
+center = ["clock"]
+right = ["media", "network", "volume", "battery", "cpu", "memory", "date"]

@@ -1,0 +1,67 @@
+/* default: a full-width translucent bar, dark or light with Windows, accent
+   pills for workspaces. Change a colour by setting the custom property in
+   your own style.css, for example  :root { --accent: #e5a50a; }  */
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: rgba(28, 28, 32, 0.88);
+		--fg: #f2f2f5;
+		--muted: #c1c6d1;
+		--warn: #ffc562;
+		--error: #ffb3b3;
+		--pill: rgba(255, 255, 255, 0.1);
+		--hover: rgba(255, 255, 255, 0.14);
+		--press: rgba(255, 255, 255, 0.22);
+		--accent: #4cc2ff;
+		--accent-fg: #06202e;
+	}
+}
+
+@media (prefers-color-scheme: light) {
+	:root {
+		--bg: rgba(243, 243, 246, 0.88);
+		--fg: #1b1e24;
+		--muted: #3f4654;
+		--warn: #7a4600;
+		--error: #9b1c1c;
+		--pill: rgba(0, 0, 0, 0.07);
+		--hover: rgba(0, 0, 0, 0.1);
+		--press: rgba(0, 0, 0, 0.16);
+		--accent: #0f6cbd;
+		--accent-fg: #ffffff;
+	}
+}
+
+bar {
+	background: var(--bg);
+	color: var(--fg);
+}
+
+/* The first pill sits as far from the left edge as the last item does from the right (14 px). */
+box.workspaces {
+	padding: 0 8px;
+}
+
+.ws {
+	background: var(--pill);
+	border: 1px solid transparent;
+}
+
+.ws.button:hover {
+	background: var(--hover);
+	color: var(--fg);
+}
+
+.ws.empty {
+	color: var(--muted);
+}
+
+.ws.visible {
+	border-color: var(--accent);
+}
+
+.ws.focused,
+.ws.focused:hover {
+	background: var(--accent);
+	color: var(--accent-fg);
+}

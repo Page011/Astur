@@ -1,0 +1,94 @@
+/* astur-classic: Astur's own bar. Same colours, 28 px height, Segoe UI
+   semibold at half the bar height, square 34 px workspace pills with no gap
+   between them, 8 px at the edges, text labels (CPU, RAM, VOL, BAT) instead
+   of icons.
+
+   Astur's "inactive" text colour measures 2.8:1 on its dark background and
+   3.4:1 on its light one, below the 4.5:1 this theme holds itself to, so empty
+   workspace labels use --inactive-text (the same hues, lighter or darker);
+   --inactive keeps the exact Astur value. Astur's layout indicator is not
+   part of this theme: RSB has no layout widget.
+
+   Astur's colours are dark unless its theme setting says otherwise. The dark
+   palette is the base here; the light one applies while Windows is in light
+   mode, so this bar follows Windows where Astur's own default does not.
+   The window title sits in the middle of the bar, not of the space left
+   between the zones. */
+
+:root {
+	--bg: #1a1b26;
+	--fg: #c0caf5;
+	--accent: #66aaff;
+	--accent-fg: #1a1b26;
+	--inactive: #565f89;
+	--inactive-text: #8189b4;
+	--muted: #8189b4;
+	--warn: #e0af68;
+	--error: #f7768e;
+	--hover: rgba(192, 202, 245, 0.12);
+	--press: rgba(192, 202, 245, 0.2);
+}
+
+@media (prefers-color-scheme: light) {
+	:root {
+		--bg: #eceef2;
+		--fg: #1b1e24;
+		--accent: #336382;
+		--accent-fg: #eceef2;
+		--inactive: #778291;
+		--inactive-text: #5b6573;
+		--muted: #5b6573;
+		--warn: #8a5a00;
+		--error: #9b1c1c;
+		--hover: rgba(27, 30, 36, 0.08);
+		--press: rgba(27, 30, 36, 0.14);
+	}
+}
+
+bar {
+	background: var(--bg);
+	color: var(--fg);
+	font-size: 14px;
+	font-weight: 600;
+	padding: 0 0 0 8px;
+}
+
+.item {
+	height: 20px;
+	border-radius: 0;
+}
+
+box.workspaces {
+	gap: 0;
+	padding: 0;
+}
+
+.ws {
+	width: 34px;
+	min-width: 34px;
+	height: 20px;
+	padding: 0;
+	border-radius: 0;
+	background: transparent;
+	border: 1px solid transparent;
+	color: var(--fg);
+}
+
+.ws.button:hover {
+	background: var(--hover);
+	color: var(--fg);
+}
+
+.ws.empty {
+	color: var(--inactive-text);
+}
+
+.ws.visible {
+	border-color: var(--accent);
+}
+
+.ws.focused,
+.ws.focused:hover {
+	background: var(--accent);
+	color: var(--accent-fg);
+}

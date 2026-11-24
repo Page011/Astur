@@ -1,0 +1,49 @@
+[package]
+name = "rsb"
+description = "RSB, a status bar for Windows: the rsb.exe binary."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+build = "build.rs"
+
+# The wiring lives in a library so integration tests can reach the pipe,
+# the command line and the config loader; the binary is a few lines.
+[lib]
+name = "rsb_app"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rsb"
+path = "src/main.rs"
+
+[dependencies]
+rsb-core.workspace = true
+rsb-render.workspace = true
+rsb-win.workspace = true
+rsb-services.workspace = true
+rsb-script.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_IO",
+    "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+]
+
+[lints]
+workspace = true

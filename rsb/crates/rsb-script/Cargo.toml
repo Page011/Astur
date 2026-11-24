@@ -1,0 +1,20 @@
+[package]
+name = "rsb-script"
+description = "Luau runtime: sandboxed VMs, the rsb API v1, signals, scheduler, permissions, and the type definition generator."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+rsb-core.workspace = true
+mlua.workspace = true
+serde_json.workspace = true
+log.workspace = true
+
+[dev-dependencies]
+rsb-render.workspace = true
+rsb-services.workspace = true
+
+[lints]
+workspace = true

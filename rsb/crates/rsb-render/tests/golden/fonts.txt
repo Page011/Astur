@@ -1,0 +1,9 @@
+# Font files the text goldens were rendered with (C:\Windows\Fonts).
+segoeui.ttf size=959752 version=Version 5.71
+segoeuib.ttf size=947092 version=Version 5.71
+segoeuii.ttf size=530616 version=Version 5.71
+seguiemj.ttf size=12450664 version=Version 1.60
+SegoeIcons.ttf size=463656 version=Version 1.51
+segmdl2.ttf size=283820 version=Version 1.86
+calibri.ttf size=1650632 version=Version 6.27
+Candara.ttf size=242012 version=Version 5.64
