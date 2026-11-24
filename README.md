@@ -75,7 +75,8 @@ applies.
 - **Alt + left-drag** — move any window by clicking anywhere on it, no title bar needed
 - **Alt + right-drag** — resize from the nearest corner (red bracket shows which corner)
 - **Tiling mode** — `dwindle` (spiral), `master`, equal `columns`, balanced `grid`,
-  stacked `monocle`, or Niri-style `scrolling` and `scrolling_vertical` (see [Scrolling layout](#scrolling-layout))
+  stacked `monocle`, Niri-style `scrolling` and `scrolling_vertical` (see [Scrolling layout](#scrolling-layout)),
+  `mosaic` (windows keep their own size, see [Mosaic layout](#mosaic-layout)) or `floating` (Astur places nothing)
   across up to 20 named/icon-labelled virtual workspaces. Each monitor and each
   workspace can run its own layout (`monitor_layouts`, `workspace_layouts`)
 - **Status bar** — a per-monitor bar (or only on the screens you pick,
@@ -222,8 +223,9 @@ shortcut follow the key you picked.
 | `Alt` + `Shift+J` / `Shift+K` | Swap window with next / previous |
 | `Alt` + arrows | Focus window by direction (cursor follows) |
 | `Alt` + `Shift` + arrows | Move window by direction (across monitors) |
-| `Alt` + `H` / `L` | Shrink / grow master column (`master` layout) |
-| `Alt` + `M` | Promote focused window to master |
+| `Alt` + `H` / `L` | Shrink / grow master column (`master` layout; `mosaic`: the window 10% smaller / bigger) |
+| `Alt` + `M` | Promote focused window to master (`mosaic`: to the slot nearest the middle) |
+| `Alt` + `Y` / `Shift+Y` | Next / previous layout (this workspace) |
 | `Alt` + `F` | Toggle float for focused window |
 | `Alt` + `W` | Close focused window |
 | `Alt` + `Enter` | Launch terminal |
@@ -234,10 +236,15 @@ shortcut follow the key you picked.
 
 `Alt` here is the main key (above): with `main_key = win` read `Win` + `J`, and so on.
 
+Next / previous workspace has no default key (the bar's wheel does it). Bind
+one with the `extra_hotkeys` actions `workspace_next` / `workspace_prev`, e.g.
+`extra_hotkeys = MOD+CTRL+RIGHT|workspace_next| ;; MOD+CTRL+LEFT|workspace_prev|`
+(with `main_key = win` that takes over Windows' own virtual-desktop switch).
+
 On a monitor running the scrolling layout, the arrows, `J K H L M` and a few new
 keys work on columns instead — see [Scrolling layout](#scrolling-layout).
 
-Letter binds (`J K H L M T F W`, and `R C [ ]` for scrolling) plus extra
+Letter binds (`J K H L M T F W Y`, and `R C [ ]` for scrolling) plus extra
 chords (`MOD` = the main key, with `CTRL`, `SHIFT`, `ALT`, `WIN`) are configurable
 in `astur.conf` (see [Configuration](#configuration) for where), along with workspace keys, gaps, layout,
 borders, rules, launcher, menus, and desktop tools. Status bar uses `navbar.conf`
@@ -355,6 +362,25 @@ the next monitor; `Alt+Up` / `Down` stop at the strip's ends. `Alt+C`, `Alt+Shif
 `extra_hotkeys` / IPC actions work as on `scrolling`, with rows for columns.
 The bar shows `vertical 2/5`.
 
+### Mosaic layout
+
+`layout = mosaic` (2.5.0, #27), after GNOME's mosaic design, keeps every
+window at its own size: the size it opened at, or the size you last gave it,
+at most 80% of the screen each way so the wallpaper always frames it. Windows
+sit in a compact cluster of rows in tiling order, each row centred and the
+cluster centred on the screen, never stretched. Rows meet at one seam: the
+rows above it line up on their bottom edges, the rows below on their top
+edges. When they don't fit, all of them shrink together by one factor, shape
+kept, with the row breaks that shrink least; below half size it falls back to
+the grid. A new window joins where the biggest windows stay in the middle.
+`Alt`-drag a window anywhere (onto wallpaper too) or drag it by its title bar,
+and it takes the slot nearest where you let go, everything gliding to make
+room; `Alt+M` moves the focused window to the slot nearest the middle. `Alt` + right-drag (or a border drag) and `Alt+H` / `Alt+L`
+(10% smaller / bigger) change a window's own size; `J` / `K`, the arrows and
+`Alt`-drag drops work as on the other layouts. Nothing is ever moved to
+another workspace. An app with a minimum size larger than its shrunk slot
+can overlap a neighbour.
+
 ### Per-monitor and per-workspace layouts
 
 `layout` is the default; `monitor_layouts` overrides it by monitor number (1 =
@@ -364,14 +390,17 @@ monitor 1 and master on monitor 3. `workspace_layouts` overrides that by workspa
 number, so `workspace_layouts = , scrolling, grid` runs scrolling on workspace 2 and
 grid on workspace 3; an empty entry or `default` keeps its monitor's layout.
 
-A runtime layout switch (`extra_hotkeys` action `layout` with a layout name,
+A runtime layout switch (`Alt+Y` / `Alt+Shift+Y`, `key_cycle_layout`, bound after
+the workspace keys so a workspace key on Y keeps it; `extra_hotkeys` action `layout` with a layout name,
 `next` or `previous`, e.g. `ALT+CTRL+S|layout|scrolling` or
 `ALT+CTRL+L|layout|next`; IPC `layout <name|next|previous>`; a bar click set to
-`next_layout`, e.g. `layout_click = next_layout` in navbar.conf or Settings > Status bar)
+`next_layout` or `previous_layout`, e.g. `layout_click = next_layout` in navbar.conf or Settings > Status bar)
 changes the **workspace you are on only**, until a config reload
 resets it to the file. `next` / `previous` step through the layouts in the order
 Settings lists them, wrapping around. (Before 2.5.0 a switch changed the whole
-monitor.) The bar's layout widget shows the layout of the workspace each monitor
+monitor.) `floating` leaves that workspace's windows wherever you put them
+(a strip's off-screen columns come back on screen, and a window sent there
+from another monitor is centred on this one). The bar's layout widget shows the layout of the workspace each monitor
 shows, plus the focused column on scrolling ones (`scrolling 2/5`, or
 `vertical 2/5` for rows).
 

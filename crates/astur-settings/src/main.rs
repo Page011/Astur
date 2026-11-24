@@ -170,8 +170,8 @@ impl Mirrors {
 /// half a list, and nothing the user typed disappears unseen.
 #[derive(Clone, PartialEq, Default, Debug)]
 struct Rows {
-    /// The 12 single-key binds in `BINDS` order; "" = cleared (not written).
-    keys: [String; 12],
+    /// The 13 single-key binds in `BINDS` order; "" = cleared (not written).
+    keys: [String; 13],
     /// One per workspace, also past `workspaces`: those keep what the file
     /// sets for workspaces not shown, for when the count goes back up.
     ws: Vec<WsRow>,
@@ -1327,7 +1327,7 @@ impl App {
             note(ui, &format!("Hold {name} and press the key shown. To change a shortcut, click its key and press the new one ({held} is added for you). Esc cancels, Backspace clears."));
         }
         section(ui, f, "Windows");
-        for (i, &meta) in BINDS.iter().enumerate().take(8) {
+        for (i, &meta) in BINDS.iter().enumerate().take(9) {
             let k = (&mut m.rows.keys[i], dm.rows.keys[i].as_str());
             let n = notes(&issues, |x| BIND_ACTIONS[i].contains(&x.action));
             keys |= key_row(ui, f, meta, k, live[i], (&held, &n), i);
@@ -1432,7 +1432,7 @@ impl App {
                 &d.browser,
             );
             section(ui, f, "Scrolling layout keys");
-            for (i, &meta) in BINDS.iter().enumerate().skip(8) {
+            for (i, &meta) in BINDS.iter().enumerate().skip(9) {
                 let k = (&mut m.rows.keys[i], dm.rows.keys[i].as_str());
                 let n = notes(&issues, |x| BIND_ACTIONS[i].contains(&x.action));
                 keys |= key_row(ui, f, meta, k, live[i], (&held, &n), i);
@@ -3292,25 +3292,26 @@ impl App {
 /// (label, one plain-language sentence, conf key(s)) for a setting row.
 type Meta<'a> = (&'a str, &'a str, &'a str);
 
-/// The 12 single-key bindings, in `Mirrors::keys` order.
-const BINDS: [Meta<'static>; 12] = [
+/// The 13 single-key bindings, in `Mirrors::keys` order.
+const BINDS: [Meta<'static>; 13] = [
     ("Focus next window", "With Shift too it swaps the window forward instead.", "key_focus_next"),
     ("Focus previous window", "With Shift too it swaps the window backward.", "key_focus_prev"),
-    ("Make the main window smaller", "Main + side: a narrower main window. Spiral: a smaller first split. Scrolling: a narrower column (with Shift: a shorter window).", "key_shrink_master"),
+    ("Make the main window smaller", "Main + side: a narrower main window. Spiral: a smaller first split. Scrolling: a narrower column (with Shift: a shorter window). Mosaic: the window 10% smaller.", "key_shrink_master"),
     ("Make the main window bigger", "The opposite, in every layout.", "key_grow_master"),
-    ("Make it the main window", "Moves the active window into the big spot. Scrolling: makes its column full width, or back.", "key_promote_master"),
+    ("Make it the main window", "Moves the active window into the big spot. Scrolling: makes its column full width, or back. Mosaic: moves it to the slot nearest the middle.", "key_promote_master"),
     ("Turn tiling on or off", "Off leaves every window floating, as on plain Windows; workspaces keep working.", "key_toggle_tiling"),
     ("Float or tile the window", "Lifts the active window out of the tiling so you can place it yourself, or puts it back.", "key_toggle_float"),
     ("Close the window", "", "key_close_window"),
+    ("Cycle layout", "Steps this workspace through the layouts. With Shift: back. A workspace key on the same key keeps it.", "key_cycle_layout"),
     ("Cycle column width", "Scrolling: steps the column through its widths. With Shift: the window's height.", "key_cycle_width"),
     ("Centre the column", "Scrolling: puts the active column in the middle of the screen.", "key_center_column"),
     ("Pull into the left column", "Scrolling: stacks the window into the column on its left. If it already shares a column, it gets its own instead.", "key_consume_left"),
     ("Pull into the right column", "Scrolling: stacks the window into the column on its right. If it already shares a column, it gets its own instead.", "key_consume_right"),
 ];
 
-/// What each of the 12 binds runs, alone and with Shift (compile_keys'
+/// What each of the 13 binds runs, alone and with Shift (compile_keys'
 /// built-ins), to find its notes among compile_keys' issues.
-const BIND_ACTIONS: [[Action; 2]; 12] = {
+const BIND_ACTIONS: [[Action; 2]; 13] = {
     use Action::*;
     [
         [FocusNext, SwapNext],
@@ -3321,6 +3322,7 @@ const BIND_ACTIONS: [[Action; 2]; 12] = {
         [ToggleTiling, ToggleTabbed],
         [ToggleFloat, ToggleFloat],
         [CloseWindow, CloseWindow],
+        [NextLayout, PreviousLayout],
         [CycleWidth, CycleHeight],
         [CenterColumn, CenterColumn],
         [ConsumeLeft, ConsumeLeft],
@@ -3864,7 +3866,7 @@ fn gaps_row(ui: &mut Ui, f: &mut Find, c: &mut Config, d: &Config) {
     }
 }
 
-/// Bind `i` of the 12 as a capture chip (and its default), after the Astur
+/// Bind `i` of the 13 as a capture chip (and its default), after the Astur
 /// key (`held`), which is implied: Left Alt never reaches this window. A
 /// cleared key can't be written (the parser would keep the old one), so it
 /// stays red until a key is set or reset. `live` is the key Astur uses
@@ -5060,6 +5062,12 @@ fn layout_tiles(name: &str) -> &'static [[f32; 4]] {
             [0.0, 0.45, 1.0, 0.9],
             [0.0, 0.9, 1.0, 1.0],
         ],
+        "mosaic" => &[
+            [0.13, 0.22, 0.53, 0.54],
+            [0.56, 0.11, 0.87, 0.54],
+            [0.26, 0.57, 0.74, 0.89],
+        ],
+        "floating" => &[[0.05, 0.08, 0.6, 0.62], [0.38, 0.36, 0.95, 0.92]],
         _ => &[
             [0.0, 0.0, 0.5, 1.0],
             [0.5, 0.0, 1.0, 0.5],
@@ -5439,6 +5447,8 @@ const ACTIONS: &[(&str, &str, Arg)] = &[
         Arg::Workspace,
     ),
     ("layout", "Set this workspace's layout", Arg::Layout),
+    ("workspace_next", "Next workspace", Arg::None),
+    ("workspace_prev", "Previous workspace", Arg::None),
     ("focus_next", "Focus next window", Arg::None),
     ("focus_prev", "Focus previous window", Arg::None),
     ("swap_next", "Swap with the next window", Arg::None),
@@ -5614,8 +5624,8 @@ fn cheat_sheet(c: &Config) -> String {
     lines.join("\n") + "\n"
 }
 
-/// The 12 single-key binds' VK codes, in `BINDS` order.
-fn binds(c: &Config) -> [u32; 12] {
+/// The 13 single-key binds' VK codes, in `BINDS` order.
+fn binds(c: &Config) -> [u32; 13] {
     [
         c.key_focus_next,
         c.key_focus_prev,
@@ -5625,6 +5635,7 @@ fn binds(c: &Config) -> [u32; 12] {
         c.key_toggle_tiling,
         c.key_toggle_float,
         c.key_close_window,
+        c.key_cycle_layout,
         c.key_cycle_width,
         c.key_center_column,
         c.key_consume_left,
@@ -5632,7 +5643,7 @@ fn binds(c: &Config) -> [u32; 12] {
     ]
 }
 
-fn binds_mut(c: &mut Config) -> [&mut u32; 12] {
+fn binds_mut(c: &mut Config) -> [&mut u32; 13] {
     [
         &mut c.key_focus_next,
         &mut c.key_focus_prev,
@@ -5642,6 +5653,7 @@ fn binds_mut(c: &mut Config) -> [&mut u32; 12] {
         &mut c.key_toggle_tiling,
         &mut c.key_toggle_float,
         &mut c.key_close_window,
+        &mut c.key_cycle_layout,
         &mut c.key_cycle_width,
         &mut c.key_center_column,
         &mut c.key_consume_left,
@@ -5948,7 +5960,7 @@ fn ws_problems(rows: &[WsRow], count: usize) -> Vec<Option<String>> {
 
 // The tables into the Config, each only while every row in it is valid.
 
-fn fold_keys(keys: &[String; 12], c: &mut Config) {
+fn fold_keys(keys: &[String; 13], c: &mut Config) {
     for (slot, k) in binds_mut(c).into_iter().zip(keys) {
         if let Some(vk) = key_to_vk(k) {
             *slot = vk;
@@ -6347,6 +6359,7 @@ fn conf_pairs(c: &Config) -> (Pairs, Pairs) {
         ("key_toggle_tiling", vk_to_key(c.key_toggle_tiling)),
         ("key_toggle_float", vk_to_key(c.key_toggle_float)),
         ("key_close_window", vk_to_key(c.key_close_window)),
+        ("key_cycle_layout", vk_to_key(c.key_cycle_layout)),
         ("key_cycle_width", vk_to_key(c.key_cycle_width)),
         ("key_center_column", vk_to_key(c.key_center_column)),
         ("key_consume_left", vk_to_key(c.key_consume_left)),
@@ -6543,6 +6556,8 @@ fn layout_label(name: &str) -> &str {
         "monocle" => "One at a time",
         "scrolling" => "Scrolling",
         "scrolling_vertical" => "Vertical scrolling",
+        "mosaic" => "Mosaic",
+        "floating" => "Floating",
         "next" => "Next layout",
         "previous" => "Previous layout",
         _ => name,
@@ -6565,6 +6580,10 @@ fn layout_help(name: &str) -> &str {
         "scrolling_vertical" => {
             "Vertical scrolling: full-width rows on a strip taller than the screen; Alt+Up and Alt+Down scroll it."
         }
+        "mosaic" => {
+            "Mosaic: windows keep their own size in a compact centred cluster, rows meeting at one seam; they shrink together only when they don't fit."
+        }
+        "floating" => "Floating: Astur leaves this workspace's windows where you put them.",
         _ => name,
     }
 }

@@ -220,16 +220,17 @@ pub struct Config {
     pub key_center_column: u32,  // Alt+<key> scrolling: centre focused column (default C)
     pub key_consume_left: u32,   // Alt+<key> scrolling: consume/expel left (default [)
     pub key_consume_right: u32,  // Alt+<key> scrolling: consume/expel right (default ])
-    pub theme: String,           // popup palette: dark | light | auto (follows Windows)
-    pub acrylic: bool,           // experimental acrylic blur behind the popups
-    pub bar_floating: bool,      // detached rounded bar (margins from the screen edges)
-    pub bar_margin: i32,         // gap between a floating bar and the screen edges (px)
-    pub bar_radius: i32,         // floating-bar corner radius (px)
-    pub bar_autohide: bool,      // slide the bar away; reveal on screen-edge hover
-    pub bar_wheel_ws: bool,      // mouse wheel over the bar cycles workspaces
-    pub bar_show_net: bool,      // show network up/down speed
-    pub bar_show_volume: bool,   // show volume % (wheel adjusts, click mutes)
-    pub bar_show_apps: bool,     // show app buttons for the active workspace's windows
+    pub key_cycle_layout: u32, // Alt+<key> next layout of this workspace, +Shift previous (default Y)
+    pub theme: String,         // popup palette: dark | light | auto (follows Windows)
+    pub acrylic: bool,         // experimental acrylic blur behind the popups
+    pub bar_floating: bool,    // detached rounded bar (margins from the screen edges)
+    pub bar_margin: i32,       // gap between a floating bar and the screen edges (px)
+    pub bar_radius: i32,       // floating-bar corner radius (px)
+    pub bar_autohide: bool,    // slide the bar away; reveal on screen-edge hover
+    pub bar_wheel_ws: bool,    // mouse wheel over the bar cycles workspaces
+    pub bar_show_net: bool,    // show network up/down speed
+    pub bar_show_volume: bool, // show volume % (wheel adjusts, click mutes)
+    pub bar_show_apps: bool,   // show app buttons for the active workspace's windows
     pub bar_show_media: bool,
     pub bar_left: Vec<String>, // widget names, left zone (drawn left-to-right)
     pub bar_center: Vec<String>, // widget names, centered in the remaining gap
@@ -338,6 +339,7 @@ pub const BAR_ACTIONS: &[(&str, &str)] = &[
     ("workspace_next", "Next workspace"),
     ("workspace_prev", "Previous workspace"),
     ("next_layout", "Next layout"),
+    ("previous_layout", "Previous layout"),
     ("switch_workspace", "Go to workspace\u{2026}"),
     ("launch", "Open an app or command\u{2026}"),
 ];
@@ -588,6 +590,9 @@ pub const LAYOUTS: &[&str] = &[
     "monocle",
     "scrolling",
     "scrolling_vertical",
+    // Appended, so next / previous keep the older layouts' neighbours.
+    "mosaic",
+    "floating",
 ];
 
 /// A layout that tiles on a scrolling strip: `scrolling` (columns, along x)
@@ -1344,6 +1349,7 @@ impl Config {
             key_center_column: 0x43,  // C
             key_consume_left: 0xDB,   // [ (VK_OEM_4)
             key_consume_right: 0xDD,  // ] (VK_OEM_6)
+            key_cycle_layout: 0x59,   // Y
             main_key: MainKey::LAlt,
             theme: "dark".to_string(),
             acrylic: false,
@@ -1610,8 +1616,12 @@ start_tiled = true
 #             bottom, Alt+Up / Alt+Down scroll it, a row's windows side by
 #             side. With scroll_center = always the focused row stays in
 #             the middle, like a slot machine.
+#   mosaic  = every window keeps its own size, in centred rows; they all
+#             shrink together only when they don't fit (grid below half size).
+#             Alt + right-drag and Alt+H / Alt+L change a window's size.
+#   floating = Astur places nothing: windows stay where you put them.
 # values: dwindle | master | columns | grid | monocle | scrolling |
-#         scrolling_vertical
+#         scrolling_vertical | mosaic | floating
 layout = dwindle
 
 # Per-monitor layout, by monitor number (1 = leftmost, as in window_rules).
@@ -1622,8 +1632,9 @@ monitor_layouts =
 # Per-workspace layout, by workspace number. Empty or 'default' = the
 # monitor's layout (monitor_layouts, else layout). Example: workspace 2
 # scrolling, workspace 3 grid:  workspace_layouts = , scrolling, grid
-# A layout hotkey (extra_hotkeys action layout: a name, next or previous)
-# changes only the workspace you are on, until the next config reload.
+# Alt+Y / Alt+Shift+Y (key_cycle_layout) and a layout hotkey (extra_hotkeys
+# action layout: a name, next or previous) change only the workspace you are
+# on, until the next config reload.
 workspace_layouts =
 
 # Fraction of the width given to the master window (master layout, and the
@@ -1935,6 +1946,8 @@ async_window_pos = true
 # SHIFT, ALT, WIN and one key name. It needs MOD, ALT or WIN. With
 # main_key = lalt, ALT is Left Alt, the same as MOD.
 # Escape literal field separators with a leading backslash.
+# Next / previous workspace on the focused monitor: workspace_next and
+# workspace_prev, e.g. MOD+CTRL+RIGHT|workspace_next| ;; MOD+CTRL+LEFT|workspace_prev|
 extra_hotkeys = ALT+GRAVE|scratchpad|
 
 # ============================================================================
@@ -1962,7 +1975,9 @@ main_key = lalt
 #   Alt+Shift+arrows     move window by direction (across monitors)
 #   Alt+M                promote focused window to master
 #   Alt+H / Alt+L        master layout: shrink / grow the master column;
-#                        dwindle layout: shrink / grow the focused window's split
+#                        dwindle layout: shrink / grow the focused window's split;
+#                        mosaic: the focused window 10% smaller / bigger
+#   Alt+Y / Alt+Shift+Y  next / previous layout of this workspace
 #   Alt+F                toggle floating for the focused window
 #   Alt+W                close the focused window
 #   Alt+Enter            launch terminal
@@ -2002,7 +2017,7 @@ main_key = lalt
 #   right-drag bottom edge = row height, side edge = share of the row
 #   (README, Vertical scrolling).
 #
-# The letter keys above (J K H L M T F W, and R C [ ] for scrolling) are
+# The letter keys above (J K H L M T F W Y, and R C [ ] for scrolling) are
 # rebindable. Each takes a single key name (see the 'keys' type at the top of
 # this file). Arrows, Home, End and Enter are fixed.  key
 key_focus_next = J
@@ -2017,6 +2032,9 @@ key_cycle_width = R
 key_center_column = C
 key_consume_left = [
 key_consume_right = ]
+# Alt+Y / Alt+Shift+Y: this workspace's next / previous layout. Bound after
+# the workspace keys, so a workspace key or extra hotkey on Y keeps it.
+key_cycle_layout = Y
 # ============================================================================
 ";
 
@@ -2194,7 +2212,7 @@ workspace_apps = false
 #   language_settings next_input storage_settings display_settings
 #   windows_settings astur_settings task_manager open_drive
 #   media_play_pause media_next media_prev launcher system_menu
-#   workspace_next workspace_prev next_layout
+#   workspace_next workspace_prev next_layout previous_layout
 #   switch_workspace N        (go to workspace N)
 #   launch COMMAND            (as extra_hotkeys' launch)
 # Without a line, a click does this (left / right; middle does nothing):
@@ -3360,6 +3378,11 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                     c.key_center_column = k;
                 }
             }
+            "key_cycle_layout" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_cycle_layout = k;
+                }
+            }
             "key_consume_left" => {
                 if let Some(k) = key_to_vk(v) {
                     c.key_consume_left = k;
@@ -3864,6 +3887,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         key_center_column,
         key_consume_left,
         key_consume_right,
+        key_cycle_layout,
         main_key,
         theme,
         acrylic,
@@ -3979,7 +4003,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(live: key_shrink_master, key_grow_master, key_promote_master);
     diff!(live: key_toggle_tiling, key_toggle_float, key_close_window);
     diff!(live: key_cycle_width, key_center_column, key_consume_left, key_consume_right);
-    diff!(live: main_key);
+    diff!(live: key_cycle_layout, main_key);
     // Fail-safe: a difference none of the above caught (a field compared in
     // the wrong place, a PartialEq quirk) must still apply, so do it all.
     if g.is_empty() && old != new {
@@ -4177,6 +4201,8 @@ pub enum Action {
     MoveUp,
     MoveRight,
     MoveDown,
+    NextLayout,
+    PreviousLayout,
     SwitchWorkspace,
     MoveToWorkspace,
     Extra,
@@ -4185,7 +4211,7 @@ pub enum Action {
 impl Action {
     /// Every action in declaration order (`ALL[a as usize] == a`), which is
     /// how a table entry stores it.
-    pub const ALL: [Action; 37] = {
+    pub const ALL: [Action; 39] = {
         use Action::*;
         [
             Launcher,
@@ -4222,6 +4248,8 @@ impl Action {
             MoveUp,
             MoveRight,
             MoveDown,
+            NextLayout,
+            PreviousLayout,
             SwitchWorkspace,
             MoveToWorkspace,
             Extra,
@@ -4266,6 +4294,8 @@ impl Action {
             MoveUp => "Move the window up",
             MoveRight => "Move the window right",
             MoveDown => "Move the window down",
+            NextLayout => "Next layout",
+            PreviousLayout => "Previous layout",
             SwitchWorkspace => "Go to a workspace",
             MoveToWorkspace => "Move the window to a workspace",
             Extra => "Custom shortcut",
@@ -4628,6 +4658,7 @@ pub fn grow_master_key(c: &Config) -> u32 {
         c.key_center_column,
         c.key_consume_left,
         c.key_consume_right,
+        c.key_cycle_layout,
     ];
     let extra_on_o = c.extra_hotkeys.iter().any(|h| {
         (h.action != "scratchpad" || c.scratchpad_enabled)
@@ -4706,6 +4737,9 @@ pub fn compile_keys(c: &Config) -> Keymap {
         k.put_loose(c, m, vk, (SwitchWorkspace, i as u16), false);
         k.put_loose(c, m | MOD_SHIFT, vk, (MoveToWorkspace, i as u16), false);
     }
+    // After the workspace keys (new in 2.5.0): a workspace key the user
+    // already had on Y keeps it, and the clash is reported here.
+    k.put_builtin(c, c.key_cycle_layout, NextLayout, Some(PreviousLayout));
     k
 }
 
@@ -4947,7 +4981,7 @@ outer_gap = 4
     }
 
     #[test]
-    fn layouts_lists_all_seven() {
+    fn layouts_lists_all_nine() {
         for name in [
             "dwindle",
             "master",
@@ -4956,13 +4990,22 @@ outer_gap = 4
             "monocle",
             "scrolling",
             "scrolling_vertical",
+            "mosaic",
+            "floating",
         ] {
             assert!(LAYOUTS.contains(&name), "{name}");
         }
-        assert_eq!(LAYOUTS.len(), 7);
-        // next / previous: vertical right after scrolling, then wrap.
+        assert_eq!(LAYOUTS.len(), 9);
+        // next / previous: vertical right after scrolling, the two new ones
+        // appended (#27, #28), then wrap.
         assert_eq!(layout_step("scrolling", "next"), Some("scrolling_vertical"));
-        assert_eq!(layout_step("scrolling_vertical", "next"), Some("dwindle"));
+        assert_eq!(layout_step("scrolling_vertical", "next"), Some("mosaic"));
+        assert_eq!(layout_step("mosaic", "next"), Some("floating"));
+        assert_eq!(layout_step("floating", "next"), Some("dwindle"));
+        assert_eq!(layout_step("dwindle", "previous"), Some("floating"));
+        assert!(!is_strip("mosaic") && !is_strip("floating"));
+        let c = parse_text("workspace_layouts = , mosaic, floating");
+        assert_eq!(c.workspace_layouts, vec!["", "mosaic", "floating"]);
         let strips: Vec<_> = LAYOUTS.iter().filter(|l| is_strip(l)).collect();
         assert_eq!(strips, [&"scrolling", &"scrolling_vertical"]);
         assert!(strip_vertical("scrolling_vertical") && !strip_vertical("scrolling"));
@@ -5147,6 +5190,28 @@ outer_gap = 4
         assert_eq!(c.key_center_column, 0x71);
         assert_eq!(c.key_consume_left, 0xDD);
         assert_eq!(c.key_consume_right, 0xDD, "invalid name keeps the default");
+        assert_eq!(d.key_cycle_layout, 0x59); // Y
+        assert_eq!(parse_text("key_cycle_layout = q").key_cycle_layout, 0x51);
+        assert_eq!(parse_text("key_cycle_layout = ??").key_cycle_layout, 0x59);
+    }
+
+    /// Alt+Y / Alt+Shift+Y cycle the layout (#28), compiled after the
+    /// workspace keys, so a workspace key the user had on Y keeps it.
+    #[test]
+    fn cycle_layout_key_yields_to_the_workspace_keys() {
+        let c = default_config();
+        let m = keymap(&c);
+        assert_eq!(m[&(MOD_ALT, 0x59)], (Action::NextLayout, 0));
+        assert_eq!(m[&(MOD_ALT | MOD_SHIFT, 0x59)], (Action::PreviousLayout, 0));
+        assert!(compile_keys(&c).issues.is_empty());
+        let mut c = default_config();
+        c.workspace_keys = vec![0x59, 0x55, 0x49, 0x4F];
+        assert_eq!(keymap(&c)[&(MOD_ALT, 0x59)], (Action::SwitchWorkspace, 0));
+        let clash: Vec<_> = (compile_keys(&c).issues.into_iter())
+            .filter(|i| i.action == Action::NextLayout)
+            .map(|i| i.level)
+            .collect();
+        assert_eq!(clash, [Level::Warn]);
     }
 
     #[test]
@@ -5167,6 +5232,7 @@ outer_gap = 4
         assert_eq!(t.key_center_column, d.key_center_column);
         assert_eq!(t.key_consume_left, d.key_consume_left);
         assert_eq!(t.key_consume_right, d.key_consume_right);
+        assert_eq!(t.key_cycle_layout, d.key_cycle_layout);
     }
 
     #[test]
@@ -5847,8 +5913,9 @@ floating = true"
             live: true,
             ..ReloadGroups::default()
         };
-        let keys: [fn(&mut Config); 5] = [
+        let keys: [fn(&mut Config); 6] = [
             |c| c.scroll_move = "stack".into(),
+            |c| c.key_cycle_layout = 0x51,
             |c| c.key_cycle_width = 0x51,
             |c| c.key_center_column = 0x51,
             |c| c.key_consume_left = 0x51,

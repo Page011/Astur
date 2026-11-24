@@ -242,6 +242,360 @@ pub(crate) fn monocle_layout(area: RECT, n: usize, outer: i32) -> Vec<RECT> {
     vec![rect; n]
 }
 
+/// Below this shared scale mosaic is no longer "your sizes": it falls back to
+/// grid_layout. Calibration knob (plan/decisions.md 2026-11-23).
+const MOSAIC_MIN_SCALE: f64 = 0.5;
+/// Up to this many windows every contiguous row split is tried (2^(n-1));
+/// above it, only even splits. Lower it if Probe shows workspace_layout cost.
+const MOSAIC_SEARCH: usize = 12;
+/// A mosaic window is at most this share of the inner box on either axis,
+/// shape kept, so wallpaper always frames it: under a tiling WM an app's
+/// "own" size is often its last tile (full height) or maximised. Calibration
+/// knob (plan/decisions.md 2026-11-24).
+pub(crate) const MOSAIC_MAX: f64 = 0.8;
+
+/// `(w, h)` fitted inside MOSAIC_MAX of an inner box `ww` x `hh`, shape kept,
+/// never grown; each axis at least MIN_TILE (or the cap, if smaller) before
+/// and after, so a sliver-shaped size cannot fit down to nothing.
+pub(crate) fn mosaic_fit(w: f64, h: f64, ww: f64, hh: f64) -> (f64, f64) {
+    let (cw, ch) = (ww * MOSAIC_MAX, hh * MOSAIC_MAX);
+    let floor = |v: f64, cap: f64| v.max((MIN_TILE as f64).min(cap));
+    let (w, h) = (w.max(MIN_TILE as f64), h.max(MIN_TILE as f64));
+    let f = (cw / w).min(ch / h).min(1.0);
+    (floor(w * f, cw), floor(h * f, ch))
+}
+
+/// Mosaic layout (#27), after GNOME's mosaic mockups and MosaicWM: each
+/// window keeps its natural size `sizes[i]` (px, capped by mosaic_fit), in
+/// rows of tiled order, each row centred and the block centred on the area.
+/// Rows meet at one seam: rows above the middle sit on their band's foot,
+/// rows below hang from its top, and the middle row (or a lone row) is
+/// centred, so every gap is `inner`. When they don't fit, every window
+/// shrinks by one shared scale, with the row breaks that shrink least;
+/// never grown. Then the most compact cluster wins (closest window centres),
+/// then rows of even width with the widest in the middle. Below
+/// MOSAIC_MIN_SCALE (or with no valid split) it is grid_layout, so every
+/// window still gets a real on-screen rect.
+pub(crate) fn mosaic_layout(area: RECT, sizes: &[(i32, i32)], outer: i32, inner: i32) -> Vec<RECT> {
+    let n = sizes.len();
+    let (iw, ih) = (
+        area.right - area.left - 2 * outer,
+        area.bottom - area.top - 2 * outer,
+    );
+    if n == 0 || iw <= 0 || ih <= 0 {
+        return Vec::new();
+    }
+    let (ww, hh) = (iw as f64, ih as f64);
+    let gi = inner.max(0);
+    let g = gi as f64;
+    let fit: Vec<(f64, f64)> = sizes
+        .iter()
+        .map(|&(w, h)| mosaic_fit(w as f64, h as f64, ww, hh))
+        .collect();
+    let sum_w = |row: &[(f64, f64)]| row.iter().map(|r| r.0).sum::<f64>();
+    let gaps = |m: usize| g * (m - 1) as f64;
+    let tallest = |row: &[(f64, f64)]| row.iter().map(|r| r.1).fold(0.0, f64::max);
+    // The shared scale of one row split (row lengths), None if invalid.
+    let sigma = |rows: &[usize]| -> Option<f64> {
+        let mut s = f64::INFINITY;
+        let (mut start, mut tall) = (0, 0.0);
+        for &m in rows {
+            let row = &fit[start..start + m];
+            start += m;
+            let avail = ww - gaps(m);
+            if avail <= 0.0 {
+                return None;
+            }
+            s = s.min(avail / sum_w(row));
+            tall += tallest(row);
+        }
+        let avail = hh - gaps(rows.len());
+        (avail > 0.0).then(|| s.min(avail / tall))
+    };
+    // A split's rects at scale `s`, into `out`, in whole pixels: each size
+    // floored (never grows, never overflows the row), every edge from one
+    // integer origin, so gaps are exactly `inner` and seams are shared.
+    let place = |rows: &[usize], s: f64, out: &mut Vec<RECT>| {
+        out.clear();
+        let px = |v: f64| ((s * v + 1e-6).floor() as i32).max(1);
+        let band = |row: &[(f64, f64)]| row.iter().map(|r| px(r.1)).max().unwrap_or(1);
+        let mut start = 0;
+        let mut block = gi * (rows.len() as i32 - 1);
+        for &m in rows {
+            block += band(&fit[start..start + m]);
+            start += m;
+        }
+        let (mut y, mut start) = (area.top + outer + (ih - block).div_euclid(2), 0);
+        for (k, &m) in rows.iter().enumerate() {
+            let row = &fit[start..start + m];
+            start += m;
+            let b = band(row);
+            let width = row.iter().map(|r| px(r.0)).sum::<i32>() + gi * (m as i32 - 1);
+            let mut x = area.left + outer + (iw - width).div_euclid(2);
+            for &(w, h) in row {
+                let (w, h) = (px(w), px(h));
+                let top = match (2 * k + 1).cmp(&rows.len()) {
+                    std::cmp::Ordering::Less => y + b - h,
+                    std::cmp::Ordering::Greater => y,
+                    std::cmp::Ordering::Equal => y + (b - h) / 2,
+                };
+                out.push(RECT {
+                    left: x,
+                    top,
+                    right: x + w,
+                    bottom: top + h,
+                });
+                x += w + gi;
+            }
+            y += b + gi;
+        }
+    };
+    // Lower is better, compared in order: shrink (capped scale); spread (the
+    // widest distance between two window centres, each axis over the inner
+    // box, as MosaicWM ranks compactness); unevenness (each row's shortfall
+    // from the widest, squared); off-centre (row width away from the middle
+    // row); then longer rows first. Quantised, so near-ties compare equal.
+    let q = |x: f64, k: f64| (x * k).round() as i64;
+    let mut buf = Vec::with_capacity(n);
+    let mut best: Option<(f64, [i64; 4], Vec<usize>)> = None;
+    let mut consider = |rows: &[usize]| {
+        let Some(s) = sigma(rows) else {
+            return;
+        };
+        let shrink = q(-s.min(1.0), 1e4);
+        if best.as_ref().is_some_and(|b| shrink > b.1[0]) {
+            return; // shrinks more: cannot win, skip the placement
+        }
+        place(rows, s.min(1.0), &mut buf);
+        // Centres per axis over the inner box (doubled coordinates / 2len).
+        let cx = |r: &RECT| (r.left + r.right) as f64 / (2.0 * ww);
+        let cy = |r: &RECT| (r.top + r.bottom) as f64 / (2.0 * hh);
+        // The widest centre range on one axis is a floor for the spread:
+        // a split already less compact than the best skips the pair scan.
+        let range = |c: &dyn Fn(&RECT) -> f64| {
+            let (lo, hi) = buf
+                .iter()
+                .map(c)
+                .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            hi - lo
+        };
+        let floor = q(range(&cx).max(range(&cy)), 20.0);
+        if best
+            .as_ref()
+            .is_some_and(|b| shrink == b.1[0] && floor > b.1[1])
+        {
+            return;
+        }
+        let mut spread2 = 0.0f64; // squared: one sqrt per split, not per pair
+        for (i, a) in buf.iter().enumerate() {
+            for b in &buf[i + 1..] {
+                let (dx, dy) = (cx(a) - cx(b), cy(a) - cy(b));
+                spread2 = spread2.max(dx * dx + dy * dy);
+            }
+        }
+        let spread = spread2.sqrt();
+        let centre_row = (rows.len() - 1) as f64 / 2.0;
+        let (mut start, mut widest, mut total, mut off) = (0, 0.0f64, 0.0, 0.0);
+        for (k, &m) in rows.iter().enumerate() {
+            let w = sum_w(&fit[start..start + m]) + gaps(m);
+            start += m;
+            widest = widest.max(w);
+            total += w;
+            off += (k as f64 - centre_row).abs() * w;
+        }
+        let mut start = 0;
+        let mut uneven = 0.0;
+        for &m in rows {
+            uneven += ((widest - sum_w(&fit[start..start + m]) - gaps(m)) / widest).powi(2);
+            start += m;
+        }
+        let key = [
+            shrink,
+            q(spread, 20.0),
+            q(uneven, 1e3),
+            q(off / (total * centre_row.max(1.0)), 1e3),
+        ];
+        let better = best.as_ref().is_none_or(|(_, bk, br)| {
+            key.cmp(bk).then(br.as_slice().cmp(rows)).is_lt() // longer rows first
+        });
+        if better {
+            best = Some((s, key, rows.to_vec()));
+        }
+    };
+    // One buffer for every candidate; cloned only when it becomes the best.
+    let mut rows = Vec::with_capacity(n);
+    if n <= MOSAIC_SEARCH {
+        // Bit i set = a row break after window i.
+        for mask in 0..1u32 << (n - 1) {
+            rows.clear();
+            let mut len = 0;
+            for i in 0..n {
+                len += 1;
+                if i == n - 1 || mask >> i & 1 == 1 {
+                    rows.push(len);
+                    len = 0;
+                }
+            }
+            consider(&rows);
+        }
+    } else {
+        for r in 1..=n {
+            rows.clear();
+            rows.extend((0..r).map(|k| n / r + usize::from(k < n % r)));
+            consider(&rows);
+        }
+    }
+    let Some((s, _, rows)) = best.filter(|b| b.0.min(1.0) >= MOSAIC_MIN_SCALE) else {
+        return grid_layout(area, n, outer, inner);
+    };
+    let mut out = Vec::with_capacity(n);
+    place(&rows, s.min(1.0), &mut out); // never grow
+                                        // A box under a few px (the 1 px floor overflowing it): the grid.
+    let inside = |c: &RECT| {
+        c.left >= area.left + outer
+            && c.top >= area.top + outer
+            && c.right <= area.right - outer
+            && c.bottom <= area.bottom - outer
+    };
+    if out.iter().all(inside) {
+        out
+    } else {
+        grid_layout(area, n, outer, inner)
+    }
+}
+
+/// A mosaic pick or insert must gain more than this share of the inner
+/// box's shorter side over staying (or appending): below it the gain is
+/// rounding or a mirror image, and acting on it would shuffle windows for
+/// nothing. Calibration knob (plan/decisions.md 2026-11-24).
+const MOSAIC_MARGIN: f64 = 0.02;
+
+/// MOSAIC_MARGIN of `area`'s inner box in px.
+fn mosaic_margin(area: RECT, outer: i32) -> f64 {
+    let iw = area.right - area.left - 2 * outer;
+    let ih = area.bottom - area.top - 2 * outer;
+    iw.min(ih).max(0) as f64 * MOSAIC_MARGIN
+}
+
+/// Mosaic drop / Alt+M target (#27): the index `j` whose swap with `k` puts
+/// window k's slot (mosaic_layout of the swapped order) nearest `c`, given
+/// in doubled coordinates (l + r, t + b); `k` = stay. It stays unless the
+/// best slot is nearer than home by more than MOSAIC_MARGIN (ties: the
+/// smaller move), and never takes an order that falls back to the grid
+/// while home does not (one drop would turn the whole mosaic into cells).
+/// n layouts, once per action (never per drag frame).
+pub(crate) fn mosaic_pick(
+    area: RECT,
+    sizes: &[(i32, i32)],
+    outer: i32,
+    inner: i32,
+    k: usize,
+    c: (i32, i32),
+) -> usize {
+    let n = sizes.len();
+    if k >= n {
+        return k;
+    }
+    let grid = grid_layout(area, n, outer, inner);
+    let dist = |r: &RECT| {
+        let (dx, dy) = (r.left + r.right - c.0, r.top + r.bottom - c.1);
+        (dx as f64).hypot(dy as f64) / 2.0
+    };
+    let home = mosaic_layout(area, sizes, outer, inner);
+    let Some(home_d) = home.get(k).map(dist) else {
+        return k;
+    };
+    let home_grid = home == grid;
+    let mut s = sizes.to_vec();
+    let mut best: Option<(f64, usize)> = None;
+    for j in (0..n).filter(|&j| j != k) {
+        s.swap(k, j);
+        let rects = mosaic_layout(area, &s, outer, inner);
+        s.swap(k, j);
+        if !home_grid && rects == grid {
+            continue;
+        }
+        let Some(d) = rects.get(j).map(dist) else {
+            continue;
+        };
+        let better = best.is_none_or(|(bd, bj)| {
+            d.total_cmp(&bd)
+                .then(j.abs_diff(k).cmp(&bj.abs_diff(k)))
+                .is_lt()
+        });
+        if better {
+            best = Some((d, j));
+        }
+    }
+    match best {
+        Some((d, j)) if d < home_d - mosaic_margin(area, outer) => j,
+        _ => k,
+    }
+}
+
+/// Where a new window of size `new` joins the tiled `sizes` of a mosaic
+/// (#27): the index whose layout keeps the most weight nearest the middle
+/// (each window's area times its centre's distance from the area's centre,
+/// averaged), so the biggest window sits in the middle and smaller ones go
+/// around it, as in GNOME's mockups. It appends unless another index gains
+/// more than MOSAIC_MARGIN (a mirror image or a 1 px rounding is no gain);
+/// ties among the rest go to the later index. n + 1 layouts, once per new
+/// window.
+pub(crate) fn mosaic_insert(
+    area: RECT,
+    sizes: &[(i32, i32)],
+    new: (i32, i32),
+    outer: i32,
+    inner: i32,
+) -> usize {
+    let (cx, cy) = (area.left + area.right, area.top + area.bottom);
+    let mut s = sizes.to_vec();
+    let mut cost = |i: usize| {
+        s.insert(i, new);
+        let rects = mosaic_layout(area, &s, outer, inner);
+        s.remove(i);
+        let (mut moment, mut mass) = (0.0, 0.0);
+        for r in &rects {
+            let m = ((r.right - r.left) as f64) * ((r.bottom - r.top) as f64);
+            let (dx, dy) = (
+                (r.left + r.right - cx) as f64,
+                (r.top + r.bottom - cy) as f64,
+            );
+            moment += m * dx.hypot(dy) / 2.0;
+            mass += m;
+        }
+        moment / mass.max(1.0)
+    };
+    let n = sizes.len();
+    let append = cost(n);
+    let mut best = (append, n);
+    for i in (0..n).rev() {
+        let c = cost(i);
+        if c < best.0 {
+            best = (c, i);
+        }
+    }
+    if best.0 < append - mosaic_margin(area, outer) {
+        best.1
+    } else {
+        n
+    }
+}
+
+/// A mosaic window's new natural size after a drag (#27): `nat` scaled per
+/// axis by the dropped size `got` over its slot `slot`, each axis at least
+/// MIN_TILE. A ratio, not the dragged size: in a shrunk block the drop lands
+/// exactly where it was dropped while the shared scale stays the same.
+pub(crate) fn mosaic_resized(nat: (i32, i32), slot: RECT, got: RECT) -> (i32, i32) {
+    let axis = |n: i32, s: i32, g: i32| {
+        ((n as f64 * g as f64 / s.max(1) as f64).round() as i32).max(MIN_TILE)
+    };
+    (
+        axis(nat.0, slot.right - slot.left, got.right - got.left),
+        axis(nat.1, slot.bottom - slot.top, got.bottom - got.top),
+    )
+}
+
 /// The area and the one outer gap to tile `area` with per-edge outer gaps
 /// `g` (top, right, bottom, left; #34): each edge inset by its gap above the
 /// smallest, which every layout then keeps as its uniform `outer`. Equal
@@ -1851,5 +2205,502 @@ mod tests {
         // Above every preset (a dragged width) wraps too.
         assert_eq!(next_preset(&p, 1.2), 0.333);
         assert_eq!(next_preset(&[], 0.42), 0.42);
+    }
+
+    // ---- mosaic (#27) -----------------------------------------------------
+
+    const UHD: RECT = RECT {
+        left: 0,
+        top: 0,
+        right: 3840,
+        bottom: 2088,
+    };
+
+    fn mosaic(area: RECT, sizes: &[(i32, i32)]) -> Vec<(i32, i32, i32, i32)> {
+        mosaic_layout(area, sizes, 8, 8)
+            .iter()
+            .map(|c| (c.left, c.top, c.right, c.bottom))
+            .collect()
+    }
+
+    /// Windows per row, read off the rects (a new row starts lower down).
+    fn row_counts(rects: &[RECT]) -> Vec<usize> {
+        let mut rows: Vec<usize> = Vec::new();
+        let mut bottom = i32::MIN;
+        for c in rects {
+            if c.top >= bottom {
+                rows.push(0);
+            }
+            bottom = bottom.max(c.bottom);
+            *rows.last_mut().unwrap() += 1;
+        }
+        rows
+    }
+
+    /// The worked examples of the spec (plan/decisions.md 2026-11-23, look
+    /// 2026-11-24), cross-checked with an independent reference model.
+    #[test]
+    fn mosaic_examples() {
+        assert_eq!(mosaic(UHD, &[(1200, 800)]), [(1320, 644, 2520, 1444)]);
+        assert_eq!(
+            mosaic(UHD, &[(1600, 1000), (1000, 700)]),
+            [(616, 544, 2216, 1544), (2224, 694, 3224, 1394)]
+        );
+        assert_eq!(
+            mosaic(UHD, &[(1920, 1080), (1200, 900), (800, 600)]),
+            [
+                (356, 200, 2276, 1280),
+                (2284, 380, 3484, 1280),
+                (1520, 1288, 2320, 1888)
+            ]
+        );
+        assert_eq!(
+            mosaic(UHD, &[(1200, 800); 4]),
+            [
+                (716, 240, 1916, 1040),
+                (1924, 240, 3124, 1040),
+                (716, 1048, 1916, 1848),
+                (1924, 1048, 3124, 1848)
+            ]
+        );
+        let five = [
+            (2560, 1440),
+            (1920, 1080),
+            (1280, 800),
+            (1000, 700),
+            (800, 600),
+        ];
+        assert_eq!(
+            mosaic(UHD, &five),
+            [
+                (8, 86, 2188, 1312),
+                (2196, 393, 3831, 1312),
+                (601, 1320, 1691, 2001),
+                (1699, 1320, 2550, 1916),
+                (2558, 1320, 3239, 1831)
+            ]
+        );
+        let four = [five[0], five[2], five[3], five[4]];
+        assert_eq!(
+            mosaic(UHD, &four),
+            [
+                (64, 8, 2533, 1396),
+                (2541, 625, 3775, 1396),
+                (1048, 1404, 2012, 2079),
+                (2020, 1404, 2791, 1982)
+            ]
+        );
+        assert_eq!(
+            mosaic(UHD, &[(1600, 1000); 3]),
+            [
+                (316, 40, 1916, 1040),
+                (1924, 40, 3524, 1040),
+                (1120, 1048, 2720, 2048)
+            ]
+        );
+        let eight = mosaic_layout(UHD, &[(1920, 1080); 8], 8, 8);
+        assert_eq!(row_counts(&eight), [3, 3, 2]);
+        let tail: Vec<_> = eight[6..]
+            .iter()
+            .map(|c| (c.left, c.top, c.right, c.bottom))
+            .collect();
+        assert_eq!(tail, [(698, 1394, 1916, 2079), (1924, 1394, 3142, 2079)]);
+        let thirteen = mosaic(UHD, &[(1600, 1000); 13]);
+        assert_eq!(thirteen[0], (270, 8, 1089, 520));
+        assert_eq!(thirteen[12], (2337, 1568, 3156, 2080));
+        assert_eq!(
+            mosaic(UHD, &[(3840, 2088), (1000, 700)]),
+            [(8, 263, 2881, 1825), (2889, 714, 3831, 1373)]
+        );
+        // Full-height tiles (a last tile size) are capped at 0.8: margins.
+        assert_eq!(
+            mosaic(UHD, &[(1908, 2072); 2]),
+            [(390, 215, 1916, 1872), (1924, 215, 3450, 1872)]
+        );
+        // GNOME's mockup: two over one, the top row on the seam.
+        assert_eq!(
+            mosaic(UHD, &[(1150, 850), (800, 1200), (1600, 800)]),
+            [
+                (941, 390, 2091, 1240),
+                (2099, 40, 2899, 1240),
+                (1120, 1248, 2720, 2048)
+            ]
+        );
+        assert_eq!(
+            mosaic_layout(UHD, &[(1600, 1000); 20], 8, 8),
+            grid_layout(UHD, 20, 8, 8)
+        );
+        let wide = r(0, 0, 3440, 1392);
+        assert_eq!(
+            mosaic(wide, &[(1920, 1080), (1280, 800)]),
+            [(116, 156, 2036, 1236), (2044, 296, 3324, 1096)]
+        );
+        assert_eq!(
+            mosaic(wide, &[(1600, 1000), (1200, 900), (1000, 700)]),
+            [
+                (9, 248, 1443, 1144),
+                (1451, 292, 2527, 1099),
+                (2535, 382, 3431, 1009)
+            ]
+        );
+    }
+
+    #[test]
+    fn mosaic_balances() {
+        // 4 equal: 2+2, not 3+1 (slack breaks the tie of both fitting).
+        assert_eq!(
+            row_counts(&mosaic_layout(UHD, &[(1200, 800); 4], 8, 8)),
+            [2, 2]
+        );
+        // 3 equal: 2+1 and 1+2 scale alike; the fuller top row wins.
+        assert_eq!(
+            row_counts(&mosaic_layout(UHD, &[(1600, 1000); 3], 8, 8)),
+            [2, 1]
+        );
+        // 7 equal: 2/3/2 around the middle, not 3/3/1 (same shrink).
+        assert_eq!(
+            row_counts(&mosaic_layout(UHD, &[(1650, 1050); 7], 8, 8)),
+            [2, 3, 2]
+        );
+    }
+
+    #[test]
+    fn mosaic_never_grows_and_shares_one_scale() {
+        let sets: [&[(i32, i32)]; 4] = [
+            &[
+                (2560, 1440),
+                (1920, 1080),
+                (1280, 800),
+                (1000, 700),
+                (800, 600),
+            ],
+            &[(1920, 1080); 8],
+            &[(800, 600), (1200, 900), (640, 480)],
+            &[
+                (3000, 2000),
+                (1500, 1200),
+                (900, 1400),
+                (1100, 700),
+                (600, 500),
+                (1300, 900),
+            ],
+        ];
+        for (k, sizes) in sets.into_iter().enumerate() {
+            let rects = mosaic_layout(UHD, sizes, 8, 8);
+            assert_ne!(rects, grid_layout(UHD, sizes.len(), 8, 8), "set {k}");
+            let (ww, hh) = (3824.0, 2072.0);
+            let fit: Vec<(f64, f64)> = sizes
+                .iter()
+                .map(|&(w, h)| mosaic_fit(w as f64, h as f64, ww, hh))
+                .collect();
+            // The scale from the widest window, where rounding weighs least.
+            let big = (0..fit.len())
+                .max_by(|&a, &b| fit[a].0.total_cmp(&fit[b].0))
+                .unwrap();
+            let s = (rects[big].right - rects[big].left) as f64 / fit[big].0;
+            assert!(s <= 1.0 + 1e-9, "set {k}: grew, scale {s}");
+            for (c, &(w, h)) in rects.iter().zip(&fit) {
+                let (cw, ch) = ((c.right - c.left) as f64, (c.bottom - c.top) as f64);
+                assert!(cw <= w.round() && ch <= h.round(), "set {k}: grew");
+                assert!(
+                    (cw - s * w).abs() <= 2.0,
+                    "set {k}: width off the shared scale"
+                );
+                assert!((ch - s * h).abs() <= 2.0, "set {k}: shape not kept");
+            }
+        }
+    }
+
+    #[test]
+    fn mosaic_invariants() {
+        // A deterministic LCG: no rand dependency.
+        let mut seed = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = |lo: i32, hi: i32| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            lo + ((seed >> 33) % (hi - lo + 1) as u64) as i32
+        };
+        let mut mosaics = 0;
+        for case in 0..2000 {
+            let n = next(1, 16) as usize;
+            let sizes: Vec<(i32, i32)> = (0..n).map(|_| (next(1, 4000), next(1, 2500))).collect();
+            let (x, y) = (next(-2000, 2000), next(-500, 500));
+            let area = r(x, y, x + next(200, 5200), y + next(200, 3000));
+            let outer = [0, 4, 8, 40][next(0, 3) as usize];
+            let inner = [0, 8, 20][next(0, 2) as usize];
+            let rects = mosaic_layout(area, &sizes, outer, inner);
+            assert_eq!(rects.len(), n, "case {case}");
+            if rects == grid_layout(area, n, outer, inner) {
+                continue;
+            }
+            mosaics += 1;
+            let inset = r(
+                area.left + outer,
+                area.top + outer,
+                area.right - outer,
+                area.bottom - outer,
+            );
+            for c in &rects {
+                assert!(
+                    c.right > c.left && c.bottom > c.top,
+                    "case {case}: empty {c:?}"
+                );
+                assert!(
+                    c.left >= inset.left
+                        && c.top >= inset.top
+                        && c.right <= inset.right
+                        && c.bottom <= inset.bottom,
+                    "case {case}: outside the area {c:?}"
+                );
+            }
+            for i in 0..n {
+                for j in i + 1..n {
+                    assert!(
+                        !intersects(rects[i], rects[j]),
+                        "case {case}: {i} {j} overlap"
+                    );
+                }
+            }
+            let l = rects.iter().map(|c| c.left).min().unwrap();
+            let t = rects.iter().map(|c| c.top).min().unwrap();
+            let rr = rects.iter().map(|c| c.right).max().unwrap();
+            let b = rects.iter().map(|c| c.bottom).max().unwrap();
+            assert!(
+                ((l + rr) - (inset.left + inset.right)).abs() <= 2,
+                "case {case}: off centre"
+            );
+            assert!(
+                ((t + b) - (inset.top + inset.bottom)).abs() <= 2,
+                "case {case}: off centre"
+            );
+        }
+        assert!(mosaics > 500, "the sweep must mostly hit mosaic: {mosaics}");
+    }
+
+    /// The GNOME seam: one row is centred on the midline; with two rows the
+    /// top row shares one bottom edge and the bottom row one top edge, `g`
+    /// apart, whatever the heights.
+    #[test]
+    fn mosaic_hugs_the_seam() {
+        let mid2 = UHD.top + UHD.bottom; // twice the midline
+        let one = mosaic_layout(UHD, &[(1200, 500), (900, 1300)], 8, 8);
+        assert_eq!(row_counts(&one), [2]);
+        assert!(one.iter().all(|c| (c.top + c.bottom - mid2).abs() <= 1));
+        // Unequal rows too (a band taller than the other plus the gap once
+        // put the midline inside it, floating short windows mid-band).
+        let sets: [&[(i32, i32)]; 5] = [
+            &[(1920, 1080), (1200, 900), (800, 600)],
+            &[(1150, 850), (800, 1200), (1600, 800)],
+            &[(2560, 1440), (1280, 800), (1000, 700), (800, 600)],
+            &[(1600, 1500), (900, 500), (2000, 500)],
+            &[(1000, 1600), (1200, 900), (1600, 400)],
+        ];
+        for sizes in sets {
+            for inner in [0, 8, 13] {
+                let v = mosaic_layout(UHD, sizes, 8, inner);
+                let rows = row_counts(&v);
+                assert_eq!(rows.len(), 2, "{sizes:?}");
+                let (top, bottom) = v.split_at(rows[0]);
+                let seam = top[0].bottom;
+                assert!(top.iter().all(|c| c.bottom == seam), "{v:?}");
+                assert!(bottom.iter().all(|c| c.top == seam + inner), "{v:?}");
+            }
+        }
+    }
+
+    /// Whole-pixel placement: gaps are exactly `inner` and sizes never pass
+    /// natural, also on a work area left of or above the primary (negative
+    /// coordinates, where rounding each edge once grew a window 1 px).
+    #[test]
+    fn mosaic_exact_gaps_anywhere() {
+        let v = mosaic_layout(r(-1000, 0, 1000, 1000), &[(500, 400), (501, 400)], 0, 8);
+        assert_eq!(v[1].left - v[0].right, 8);
+        assert_eq!((v[0].right - v[0].left, v[1].right - v[1].left), (500, 501));
+        let v = mosaic_layout(r(-320, -1440, 2240, -48), &[(1100, 900), (1033, 700)], 8, 8);
+        assert_eq!(v[0].right - v[0].left, 1100);
+        assert_eq!(v[1].left - v[0].right, 8);
+        // inner 0 with a .5 seam once overlapped by 1 px.
+        let sizes = [
+            (438, 266),
+            (1223, 533),
+            (1565, 485),
+            (1516, 895),
+            (1192, 1126),
+            (1211, 1215),
+            (1608, 924),
+        ];
+        let v = mosaic_layout(r(0, 0, 3840, 2088), &sizes, 10, 0);
+        for i in 0..v.len() {
+            for j in i + 1..v.len() {
+                assert!(!intersects(v[i], v[j]), "{i} {j} {v:?}");
+            }
+        }
+    }
+
+    /// A drop takes the slot nearest the dropped window's centre: the other
+    /// side of the row, the middle, or home when home is nearest (#27; a drop
+    /// on wallpaper used to glide back). Centres are doubled coordinates.
+    #[test]
+    fn mosaic_pick_lands_nearest() {
+        let area = r(0, 0, 1920, 1032);
+        let sizes = [(1200, 800), (500, 400), (500, 400)];
+        let pick = |k: usize, x: i32, y: i32| mosaic_pick(area, &sizes, 8, 8, k, (2 * x, 2 * y));
+        let home = mosaic_layout(area, &sizes, 8, 8)[0];
+        let (hx, hy) = ((home.left + home.right) / 2, (home.top + home.bottom) / 2);
+        assert_eq!(pick(0, hx + 40, hy), 0, "near home stays");
+        assert_eq!(pick(0, 1800, hy), 2, "far right: the other side");
+        assert_eq!(pick(0, 960, hy), 1, "the middle");
+        assert_eq!(pick(2, 300, 200), 0, "a small one to the far left");
+        // Every slot picks itself from its own centre.
+        let four = [(400, 300); 4];
+        for (k, c) in mosaic_layout(area, &four, 8, 8).iter().enumerate() {
+            let at = (c.left + c.right, c.top + c.bottom);
+            assert_eq!(mosaic_pick(area, &four, 8, 8, k, at), k);
+        }
+        assert_eq!(
+            mosaic_pick(area, &sizes, 8, 8, 7, (0, 0)),
+            7,
+            "k out of range"
+        );
+        assert_eq!(mosaic_pick(RECT::default(), &sizes, 8, 8, 1, (0, 0)), 1);
+    }
+
+    /// A new window goes where the biggest windows stay nearest the middle:
+    /// a small one beside a big one appends (a mirror tie); small ones added
+    /// to a big one leave it the most central; a new big one takes the most
+    /// central place any insert position offers.
+    #[test]
+    fn mosaic_insert_centres_the_biggest() {
+        let (big, small, mid) = ((1200, 800), (500, 400), (900, 600));
+        assert_eq!(mosaic_insert(UHD, &[], big, 8, 8), 0);
+        assert_eq!(mosaic_insert(UHD, &[big], small, 8, 8), 1);
+        let centre = (UHD.left + UHD.right, UHD.top + UHD.bottom);
+        let d = |r: &RECT| {
+            let (dx, dy) = (r.left + r.right - centre.0, r.top + r.bottom - centre.1);
+            (dx as f64).hypot(dy as f64)
+        };
+        let big_at = |sizes: &[(i32, i32)], i: usize| {
+            let mut v = sizes.to_vec();
+            v.insert(i, big);
+            d(&mosaic_layout(UHD, &v, 8, 8)[i])
+        };
+        for sizes in [&[big, small][..], &[small, big, small]] {
+            let mut v = sizes.to_vec();
+            v.insert(mosaic_insert(UHD, sizes, small, 8, 8), small);
+            let rects = mosaic_layout(UHD, &v, 8, 8);
+            let bi = v.iter().position(|&s| s == big).unwrap();
+            assert!(rects.iter().all(|r| d(&rects[bi]) <= d(r)), "{v:?}");
+        }
+        for sizes in [
+            &[small, small][..],
+            &[small, mid, small],
+            &[mid, small, small, small],
+        ] {
+            let i = mosaic_insert(UHD, sizes, big, 8, 8);
+            let best = (0..=sizes.len())
+                .map(|j| big_at(sizes, j))
+                .fold(f64::MAX, f64::min);
+            assert!(big_at(sizes, i) <= best + 1.0, "{sizes:?} at {i}");
+        }
+    }
+
+    /// Review cases (2026-11-24): a 1 px rounding or a mirror image is no
+    /// reason to move (insert appends, Win+M stays, Win+M repeated reaches a
+    /// fixed point), and a drop never trades the mosaic for the grid fallback.
+    #[test]
+    fn mosaic_pick_and_insert_ignore_noise() {
+        let fhd = r(0, 0, 1920, 1032);
+        assert_eq!(mosaic_insert(UHD, &[(1507, 984)], (648, 200), 8, 8), 1);
+        let mid = |a: RECT| (a.left + a.right, a.top + a.bottom);
+        let two = [(2156, 591), (1534, 922)];
+        assert_eq!(mosaic_pick(UHD, &two, 8, 8, 0, mid(UHD)), 0);
+        let three = [(634, 465), (450, 433), (889, 398)];
+        assert_eq!(mosaic_pick(fhd, &three, 8, 8, 0, mid(fhd)), 0);
+        let big = [
+            (1774, 1329),
+            (1700, 542),
+            (1865, 626),
+            (2246, 1650),
+            (2452, 891),
+            (1712, 1435),
+            (2428, 1351),
+            (3038, 684),
+        ];
+        assert_ne!(mosaic_layout(UHD, &big, 8, 8), grid_layout(UHD, 8, 8, 8));
+        let j = mosaic_pick(UHD, &big, 8, 8, 7, (6112, 1132));
+        let mut v = big.to_vec();
+        v.swap(7, j);
+        assert_ne!(mosaic_layout(UHD, &v, 8, 8), grid_layout(UHD, 8, 8, 8));
+        let mut seed = 0x1234_5678_9ABC_DEF1u64;
+        let mut next = |lo: i32, hi: i32| {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            lo + ((seed >> 33) % (hi - lo + 1) as u64) as i32
+        };
+        // Win+M repeats the pick until it stays (PromoteMaster): every step
+        // gains more than the margin, so it ends within n steps.
+        for case in 0..400 {
+            let n = next(2, 7) as usize;
+            let mut v: Vec<(i32, i32)> =
+                (0..n).map(|_| (next(300, 2400), next(200, 1600))).collect();
+            let mut k = next(0, n as i32 - 1) as usize;
+            let d = |v: &[(i32, i32)], k: usize| {
+                let r = mosaic_layout(UHD, v, 8, 8)[k];
+                let (x, y) = (r.left + r.right - 3840, r.top + r.bottom - 2088);
+                (x as f64).hypot(y as f64)
+            };
+            let start = d(&v, k);
+            let mut steps = 0;
+            loop {
+                let j = mosaic_pick(UHD, &v, 8, 8, k, mid(UHD));
+                if j == k {
+                    break;
+                }
+                v.swap(k, j);
+                k = j;
+                steps += 1;
+                assert!(steps <= n, "case {case}: no fixed point {v:?}");
+            }
+            assert!(d(&v, k) <= start, "case {case}: moved away {v:?}");
+        }
+    }
+
+    #[test]
+    fn mosaic_even_rows_above_cap() {
+        let rects = mosaic_layout(UHD, &[(1600, 1000); 13], 8, 8);
+        assert_eq!(row_counts(&rects), [4, 3, 3, 3]);
+    }
+
+    #[test]
+    fn mosaic_degenerate() {
+        assert!(mosaic_layout(UHD, &[], 8, 8).is_empty());
+        assert!(mosaic_layout(r(0, 0, 10, 10), &[(100, 100)], 8, 8).is_empty());
+        assert!(mosaic_layout(r(0, 0, 0, 0), &[(100, 100)], 0, 0).is_empty());
+        // (0, 0) is raised to MIN_TILE.
+        let v = mosaic_layout(r(0, 0, 1000, 1000), &[(0, 0); 2], 0, 0);
+        assert!(v
+            .iter()
+            .all(|c| c.right - c.left == MIN_TILE && c.bottom - c.top == MIN_TILE));
+        // A gap wider than the screen: grid, which clamps it; never inverted.
+        let v = mosaic_layout(r(0, 0, 1920, 1080), &[(800, 600); 3], 8, 5000);
+        assert_eq!(v, grid_layout(r(0, 0, 1920, 1080), 3, 8, 5000));
+        assert!(v.iter().all(|c| c.right > c.left && c.bottom > c.top));
+    }
+
+    #[test]
+    fn mosaic_resized_scales_by_the_drag() {
+        let slot = r(100, 100, 1300, 900);
+        assert_eq!(
+            mosaic_resized((1200, 800), slot, r(100, 100, 1540, 900)),
+            (1440, 800)
+        );
+        // In a block shrunk to half, the ratio still lands on the natural size.
+        assert_eq!(
+            mosaic_resized((2400, 1600), slot, r(0, 0, 1440, 800)),
+            (2880, 1600)
+        );
+        assert_eq!(mosaic_resized((1200, 800), slot, r(0, 0, 10, 10)), (32, 32));
     }
 }

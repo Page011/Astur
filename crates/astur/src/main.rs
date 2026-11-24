@@ -32,9 +32,10 @@ use astur_config as config;
 use config::{config_path, load_config, Config, HotkeyDef, WindowRule};
 use layout::{
     clamp_offset, classify, columns_layout, drag_width, dwindle_layout, edge_inset, grid_layout,
-    master_stack, monocle_layout, next_preset, park_spot, peek_px, resize_dwindle, scroll_to_show,
-    snap_offset, split_ratio, strip_base, strip_layout, strip_layout_v, strip_spans, transpose,
-    Center, StripCol, StripOut, Vis,
+    master_stack, monocle_layout, mosaic_fit, mosaic_insert, mosaic_layout, mosaic_pick,
+    mosaic_resized, next_preset, park_spot, peek_px, resize_dwindle, scroll_to_show, snap_offset,
+    split_ratio, strip_base, strip_layout, strip_layout_v, strip_spans, transpose, Center,
+    StripCol, StripOut, Vis, MOSAIC_MAX,
 };
 
 use windows::core::{w, PCWSTR};
@@ -139,11 +140,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SetWindowsHookExW, ShowWindow, TranslateMessage, UnhookWindowsHookEx, WindowFromPoint, GA_ROOT,
     GA_ROOTOWNER, HC_ACTION, HHOOK, HWND_TOPMOST, KBDLLHOOKSTRUCT, LAYERED_WINDOW_ATTRIBUTES_FLAGS,
     LLKHF_INJECTED, LWA_ALPHA, MSG, MSLLHOOKSTRUCT, SET_WINDOW_POS_FLAGS, SWP_ASYNCWINDOWPOS,
-    SWP_NOACTIVATE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW, SW_HIDE,
-    SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN,
-    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
-    WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSENDCHANGING, SWP_NOSIZE, SWP_NOZORDER, SWP_SHOWWINDOW,
+    SW_HIDE, SW_RESTORE, SW_SHOWNA, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYDOWN, WM_KEYUP,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP, WM_XBUTTONDOWN,
+    WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    WS_POPUP,
 };
 
 // --- tiling additions -----------------------------------------------------
@@ -1498,6 +1500,8 @@ fn bind_cmd(action: config::Action, arg: u16) -> Option<Cmd> {
         A::MoveUp => Cmd::MoveGeo(Dir::Up),
         A::MoveRight => Cmd::MoveGeo(Dir::Right),
         A::MoveDown => Cmd::MoveGeo(Dir::Down),
+        A::NextLayout => Cmd::CycleLayout(1),
+        A::PreviousLayout => Cmd::CycleLayout(-1),
         A::SwitchWorkspace => Cmd::Switch(arg as usize),
         A::MoveToWorkspace => Cmd::MoveToWs(arg as usize),
         A::Extra => Cmd::Extra(arg as usize),
@@ -2651,6 +2655,9 @@ enum Cmd {
     },
     Extra(usize), // compiled extra-hotkey index; strings stay off the hook path
     SetLayout(String),
+    /// Alt+Y / Alt+Shift+Y: this workspace's next (> 0) / previous layout.
+    /// Not SetLayout("next"): that String would allocate on the hook path.
+    CycleLayout(i8),
     ToggleScratchpad,
     /// Config changed; apply live. true = full (an explicit reload redoes
     /// everything), false = only the groups that differ from mgr.cfg.
@@ -2732,6 +2739,7 @@ impl Cmd {
             Cmd::BarAction { .. } => "BarAction",
             Cmd::Extra(_) => "Extra",
             Cmd::SetLayout(_) => "SetLayout",
+            Cmd::CycleLayout(_) => "CycleLayout",
             Cmd::ToggleScratchpad => "ToggleScratchpad",
             Cmd::Reload(..) => "Reload",
             Cmd::BarRefresh => "BarRefresh",
@@ -4601,6 +4609,16 @@ fn step(i: usize, dir: i32, len: usize) -> Option<usize> {
 /// Rewrite the tiled windows of `windows` into `order` (the same windows,
 /// reordered), leaving every other window (floating, minimised, dead) at its
 /// index, so a column op never moves a window it does not act on.
+/// Swap windows `a` and `b` in `windows` by position; nothing when either is
+/// missing.
+fn swap_windows(windows: &mut [isize], a: isize, b: isize) {
+    let ia = windows.iter().position(|&w| w == a);
+    let ib = windows.iter().position(|&w| w == b);
+    if let (Some(ia), Some(ib)) = (ia, ib) {
+        windows.swap(ia, ib);
+    }
+}
+
 fn write_tiled_order(windows: &mut [isize], order: &[isize]) {
     let mut next = order.iter();
     for w in windows.iter_mut() {
@@ -4918,6 +4936,12 @@ struct Manager {
     // HMONITOR a launched terminal/browser should land on (the cursor's monitor at
     // launch time); consumed by the next Add. 0 = none.
     pending_launch_mon: isize,
+    /// Each window's mosaic natural size (#27), visible frame in DIPs: the
+    /// size it opened at (natural_note) or was last given (drag, Alt+H/L,
+    /// unfloat). The window's, not a workspace's, so it travels with it;
+    /// pruned on destroy (Cmd::Remove), kept across a close-to-tray hide.
+    /// Stored fitted to the tile area (natural_store). Not persisted.
+    natural: HashMap<isize, (i32, i32)>,
 }
 
 impl Manager {
@@ -6642,6 +6666,7 @@ unsafe fn ipc_dispatch(line: &str) -> String {
         "toggle_tiling" => push_cmd(Cmd::ToggleTiling),
         "toggle_float" => push_cmd(Cmd::ToggleFloat),
         "close" => push_cmd(Cmd::CloseFocused),
+        "promote_master" => push_cmd(Cmd::PromoteMaster),
         // A name, `next` or `previous`: the active workspace's (#28).
         "layout" if config::layout_step("", &argument).is_some() => {
             push_cmd(Cmd::SetLayout(argument));
@@ -6680,7 +6705,7 @@ unsafe fn ipc_dispatch(line: &str) -> String {
             );
         }
         "help" => {
-            return "ok switch move focus_next focus_prev toggle_tiling toggle_float close layout scratchpad terminal browser launcher system_menu reload launch status focus_column_left focus_column_right move_column_left move_column_right cycle_width cycle_height center_column consume_left consume_right toggle_tabbed maximize_column first_column last_column\n".to_string();
+            return "ok switch move focus_next focus_prev toggle_tiling toggle_float close promote_master layout scratchpad terminal browser launcher system_menu reload launch status focus_column_left focus_column_right move_column_left move_column_right cycle_width cycle_height center_column consume_left consume_right toggle_tabbed maximize_column first_column last_column\n".to_string();
         }
         // The scrolling actions, the same list as extra_hotkeys.
         other => match scroll_action(other) {
@@ -7435,6 +7460,9 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
         "columns" => columns_layout(area, n, outer, inner),
         "grid" => grid_layout(area, n, outer, inner),
         "monocle" => monocle_layout(area, n, outer),
+        "mosaic" => mosaic_layout(area, &mosaic_sizes(mgr, mi, &tiled), outer, inner),
+        // Places nothing; before the `_` arm, which is dwindle.
+        "floating" => Vec::new(),
         l if config::is_strip(l) => {
             let (tile, vertical) = mgr.strip_tile(mi, wi);
             strip_rects(
@@ -7453,6 +7481,138 @@ unsafe fn workspace_layout(mgr: &Manager, mi: usize, wi: usize) -> Vec<(isize, R
         return Vec::new();
     }
     tiled.into_iter().zip(rects).collect()
+}
+
+/// The mosaic sizes of `tiled` on monitor `mi`: what workspace_layout lays
+/// out, shared so a drop's prediction cannot drift from the retile.
+unsafe fn mosaic_sizes(mgr: &Manager, mi: usize, tiled: &[isize]) -> Vec<(i32, i32)> {
+    tiled.iter().map(|&h| natural_px(mgr, mi, h)).collect()
+}
+
+/// The tiled window `h` should swap with so its mosaic slot lands nearest
+/// `c` (doubled coordinates, layout::mosaic_pick) on monitor `mi`'s active
+/// workspace; None = stay. A drop on wallpaper used to glide home (#27).
+unsafe fn mosaic_target(mgr: &Manager, mi: usize, h: isize, c: (i32, i32)) -> Option<isize> {
+    let mon = mgr.monitors.get(mi)?;
+    let tiled = tiled_windows(mon.workspaces.get(mon.active)?);
+    let k = tiled.iter().position(|&w| w == h)?;
+    let (area, outer) = mon.tile_area();
+    let sizes = mosaic_sizes(mgr, mi, &tiled);
+    let j = mosaic_pick(area, &sizes, outer, mgr.cfg.inner_gap, k, c);
+    (j != k).then(|| tiled.get(j).copied()).flatten()
+}
+
+/// `h`'s mosaic natural size (#27) in px at monitor `mi`'s DPI, capped by
+/// layout::mosaic_fit like the layout (so Alt+H/L and a drag's ratio work
+/// on the size it shows at, not on a maximised size above the cap); half
+/// the tile area's inner box when it has none. `mi` must exist.
+unsafe fn natural_px(mgr: &Manager, mi: usize, h: isize) -> (i32, i32) {
+    let mon = &mgr.monitors[mi];
+    let (a, outer) = mon.tile_area();
+    let (ww, bh) = (a.right - a.left - 2 * outer, a.bottom - a.top - 2 * outer);
+    match mgr.natural.get(&h) {
+        Some(&(w, hh)) => {
+            let dpi = monitor_dpi(mon.hmon);
+            let (w, hh) = (dpi_px(w, dpi) as f64, dpi_px(hh, dpi) as f64);
+            let (w, hh) = mosaic_fit(w, hh, ww.max(1) as f64, bh.max(1) as f64);
+            (w.round() as i32, hh.round() as i32)
+        }
+        None => (ww / 2, bh / 2),
+    }
+}
+
+/// Store px size `px` on monitor `mi` as `h`'s natural size, in DIPs, each
+/// axis clamped to the cap mosaic_layout applies (layout::MOSAIC_MAX of the
+/// tile area's inner box) on its own: growing past it would only bank
+/// invisible size that later shrinks have to undo first, and a drag of one
+/// edge past it must not shrink the other axis (as a shape-kept fit would).
+unsafe fn natural_store(mgr: &mut Manager, mi: usize, h: isize, px: (i32, i32)) {
+    let (a, outer) = mgr.monitors[mi].tile_area();
+    let cap = |v: i32, len: i32| (v.max(1) as f64).min(len.max(1) as f64 * MOSAIC_MAX);
+    let w = cap(px.0, a.right - a.left - 2 * outer);
+    let hh = cap(px.1, a.bottom - a.top - 2 * outer);
+    let dpi = monitor_dpi(mgr.monitors[mi].hmon) as f64;
+    let d = |v: f64| (v * DPI_BASE as f64 / dpi).round() as i32;
+    mgr.natural.insert(h, (d(w), d(hh)));
+}
+
+/// The size `h` shows at, in DIPs, as its mosaic natural size (#27): a
+/// maximised or minimised window's restored size (a browser that opens
+/// maximised), else its visible frame. None when no read works.
+unsafe fn natural_dips(h: isize) -> Option<(i32, i32)> {
+    let hwnd = hwnd_from(h);
+    let r = if IsZoomed(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+        // ponytail: rcNormalPosition includes the invisible borders (~1%);
+        // subtract the frame insets if anyone notices.
+        let mut wp = WINDOWPLACEMENT {
+            length: core::mem::size_of::<WINDOWPLACEMENT>() as u32,
+            ..Default::default()
+        };
+        GetWindowPlacement(hwnd, &mut wp).ok()?;
+        wp.rcNormalPosition
+    } else {
+        match frame_bounds(hwnd) {
+            Some(r) => r,
+            None => {
+                let mut r = RECT::default();
+                GetWindowRect(hwnd, &mut r).ok()?;
+                r
+            }
+        }
+    };
+    let dpi = monitor_dpi(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize) as i32;
+    let d = |v: i32| v * DPI_BASE as i32 / dpi;
+    Some((d(r.right - r.left), d(r.bottom - r.top)))
+}
+
+/// Record `h`'s natural size unless it has one: at adoption, on every
+/// layout, so a later switch to mosaic gets the app's own size, not a tile.
+unsafe fn natural_note(mgr: &mut Manager, h: isize) {
+    if let std::collections::hash_map::Entry::Vacant(e) = mgr.natural.entry(h) {
+        if let Some(s) = natural_dips(h) {
+            e.insert(s);
+        }
+    }
+}
+
+/// A `floating` workspace (#28) places nothing, so a window a strip parked
+/// there would stay off screen: bring each back. unpark_tracked moves only
+/// windows off every monitor, so this is idempotent and cheap. The mirror
+/// of ToggleTiling's unpark_all, scoped to one workspace. A window showing
+/// on another monitor (opened there but given this one by the launch
+/// monitor or a monitor rule, Alt+Shift+arrow, MoveToWs) is centred on
+/// this work area, size kept: left there, this monitor's next switch would
+/// hide a window the user is looking at elsewhere.
+unsafe fn unpark_floating(mgr: &Manager, mi: usize, wi: usize) {
+    if mgr.layout(mi, wi) != "floating" {
+        return;
+    }
+    let Some(mon) = mgr.monitors.get(mi) else {
+        return;
+    };
+    let Some(ws) = mon.workspaces.get(wi) else {
+        return;
+    };
+    for &h in &ws.windows {
+        unpark_tracked(h);
+        let hwnd = hwnd_from(h);
+        let mut r = RECT::default();
+        if IsIconic(hwnd).as_bool()
+            || IsZoomed(hwnd).as_bool()
+            || MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize == mon.hmon
+            || GetWindowRect(hwnd, &mut r).is_err()
+        {
+            continue;
+        }
+        let wa = mon.work_area;
+        let w = (r.right - r.left).min(wa.right - wa.left);
+        let hh = (r.bottom - r.top).min(wa.bottom - wa.top);
+        let (x, y) = (
+            wa.left + (wa.right - wa.left - w) / 2,
+            wa.top + (wa.bottom - wa.top - hh) / 2,
+        );
+        commit_rect(h, x, y, w, hh);
+    }
 }
 
 /// Tile a single monitor's active workspace on that monitor's work area,
@@ -7501,6 +7661,7 @@ unsafe fn retile_monitor_opts(mgr: &Manager, mi: usize, force_instant: bool) {
     let wi = mon.active;
     let rects = workspace_layout(mgr, mi, wi);
     if rects.is_empty() {
+        unpark_floating(mgr, mi, wi);
         cancel_glide();
         return;
     }
@@ -7944,6 +8105,7 @@ unsafe fn place_active_instant(mgr: &Manager, mi: usize) {
         return;
     }
     let wi = mgr.monitors.get(mi).map(|m| m.active).unwrap_or(0);
+    unpark_floating(mgr, mi, wi);
     let rects = workspace_layout(mgr, mi, wi);
     // A scrolling workspace's parked windows land parked again.
     let map = PlaceMap::new(mgr, mi, wi);
@@ -8682,6 +8844,7 @@ unsafe fn assign_existing_windows(mgr: &mut Manager) {
         let hwnd = hwnd_from(h);
         let mi = monitor_index_for_window(mgr, hwnd);
         let a = mgr.monitors[mi].active;
+        natural_note(mgr, h);
         mgr.monitors[mi].workspaces[a].windows.push(h);
         if should_float(hwnd, match_window_rule(hwnd)) {
             mgr.monitors[mi].workspaces[a].floating.push(h);
@@ -12817,6 +12980,11 @@ unsafe fn run_action(mgr: &mut Manager, action: &str, argument: &str) {
             .and_then(|n| n.checked_sub(1))
             .map(Cmd::MoveToWs),
         "layout" => Some(Cmd::SetLayout(argument.to_string())),
+        // The focused monitor's next / previous workspace, as the bar wheel.
+        "workspace_next" | "workspace_prev" => mgr
+            .monitors
+            .get(mgr.focused_mon)
+            .map(|m| Cmd::BarCycle(m.hmon, if action == "workspace_next" { 1 } else { -1 })),
         other => scroll_action(other),
     };
     if let Some(cmd) = core {
@@ -12898,9 +13066,14 @@ unsafe fn run_bar_action(mgr: &mut Manager, hmon: isize, wgt: u8, button: u8, su
         // The clicked bar's monitor, leaving focused_mon alone: the bar is
         // NOACTIVATE, so the real focus never moved and the next hotkey must
         // still act on the window the user is typing in.
-        "next_layout" => {
+        "next_layout" | "previous_layout" => {
             if let Some(mi) = mgr.mon_by_hmon(hmon) {
-                set_workspace_layout(mgr, mi, "next");
+                let step = if act == "next_layout" {
+                    "next"
+                } else {
+                    "previous"
+                };
+                set_workspace_layout(mgr, mi, step);
             }
         }
         other => run_action(mgr, other, &arg),
@@ -13169,7 +13342,27 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                         && !scratch
                         && GetForegroundWindow() != hwnd;
                     let prev_focus = mgr.monitors[mi].workspaces[wi].focused;
-                    mgr.insert_window(h, mi, wi, None, floating);
+                    natural_note(mgr, h);
+                    // Mosaic: where it keeps the biggest windows in the middle
+                    // (layout::mosaic_insert); other layouts append.
+                    let at = (!floating && mgr.layout(mi, wi) == "mosaic").then(|| {
+                        let ws = &mgr.monitors[mi].workspaces[wi];
+                        let tiled = tiled_windows(ws);
+                        let (area, outer) = mgr.monitors[mi].tile_area();
+                        let i = mosaic_insert(
+                            area,
+                            &mosaic_sizes(mgr, mi, &tiled),
+                            natural_px(mgr, mi, h),
+                            outer,
+                            mgr.cfg.inner_gap,
+                        );
+                        let idx = tiled
+                            .get(i)
+                            .and_then(|t| ws.windows.iter().position(|w| w == t))
+                            .unwrap_or(ws.windows.len());
+                        DropAt::Index(idx)
+                    });
+                    mgr.insert_window(h, mi, wi, at, floating);
                     // Debug (#31): where a new window went, and why.
                     log_debug!(
                         "add {h:#x} class='{}' rect={:?} -> mon {mi} ws {wi} launch_mon={launch_hmon:#x} rule={} scratch={scratch} floating={floating}",
@@ -13247,7 +13440,13 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 }
             }
         }
-        Cmd::Remove(h) => untrack_window(mgr, h),
+        Cmd::Remove(h) => {
+            untrack_window(mgr, h);
+            // Destroyed: a recycled HWND must not inherit its mosaic size.
+            // Only here, not in untrack_window: a close-to-tray hide keeps
+            // it, or the re-show would note the shrunk slot as natural.
+            mgr.natural.remove(&h);
+        }
         Cmd::RemoveHidden(h) => {
             // An app-driven hide (close-to-tray etc.), queued at event time. The
             // app may have shown the window again before this runs, and that
@@ -13423,6 +13622,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
         // The focused monitor's active workspace only (#28). The extra
         // hotkey `layout` and the IPC verb both arrive here.
         Cmd::SetLayout(layout) => set_workspace_layout(mgr, mgr.focused_mon, &layout),
+        Cmd::CycleLayout(d) => {
+            let step = if d > 0 { "next" } else { "previous" };
+            set_workspace_layout(mgr, mgr.focused_mon, step);
+        }
         Cmd::ToggleScratchpad => toggle_scratchpad(mgr),
         Cmd::BarCycle(hmon, dir) => {
             // Wheel over the bar: previous/next workspace on that monitor (wraps).
@@ -13572,6 +13775,28 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             }
             let mi = mgr.focused_mon;
             let a = mgr.monitors[mi].active;
+            if mgr.layout(mi, a) == "mosaic" {
+                // Mosaic has no master: the window goes to the slot nearest
+                // the middle (#27).
+                // Repeated until it stays (each step gains more than
+                // MOSAIC_MARGIN, so it ends): one press reaches the middle,
+                // a second does nothing.
+                let h = mgr.monitors[mi].workspaces[a].focused;
+                let (r, _) = mgr.monitors[mi].tile_area();
+                let mid = (r.left + r.right, r.top + r.bottom);
+                let mut moved = false;
+                for _ in 0..mgr.monitors[mi].workspaces[a].windows.len() {
+                    let Some(t) = mosaic_target(mgr, mi, h, mid) else {
+                        break;
+                    };
+                    swap_windows(&mut mgr.monitors[mi].workspaces[a].windows, h, t);
+                    moved = true;
+                }
+                if moved {
+                    retile_monitor(mgr, mi);
+                }
+                return;
+            }
             if let Some(idx) = focused_index(&mgr.monitors[mi].workspaces[a]) {
                 if idx != 0 {
                     mgr.monitors[mi].workspaces[a].windows.swap(0, idx);
@@ -13587,6 +13812,16 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             if mgr.active_layout(mi) == "master" {
                 // Master layout: one master width shared by every master monitor.
                 mgr.cfg.master_ratio = (mgr.cfg.master_ratio + delta).clamp(0.15, 0.85);
+            } else if mgr.active_layout(mi) == "mosaic" {
+                // Mosaic: the focused window's own natural size, x1.1 or /1.1.
+                let ws = &mgr.monitors[mi].workspaces[mgr.monitors[mi].active];
+                let f = ws.focused;
+                if f != 0 && !ws.floating.contains(&f) {
+                    let k = if delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
+                    let (w, h) = natural_px(mgr, mi, f);
+                    let s = |v: i32| ((v as f64 * k).round() as i32).max(32);
+                    natural_store(mgr, mi, f, (s(w), s(h)));
+                }
             } else {
                 // Dwindle: grow/shrink the focused window's own split so H/L do
                 // something useful here too (master_ratio is unused by dwindle).
@@ -13726,6 +13961,10 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let ws = &mut mgr.monitors[mi].workspaces[a];
             if let Some(p) = ws.floating.iter().position(|&x| x == h) {
                 ws.floating.remove(p);
+                // The size given while floating becomes its mosaic size.
+                if let Some(s) = natural_dips(h) {
+                    mgr.natural.insert(h, s);
+                }
             } else {
                 ws.floating.push(h);
                 // Floating windows are never placed: a parked tile would float
@@ -13807,6 +14046,23 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 if !unmaximize_to(hwnd_from(h), r) {
                     let _ = ShowWindow(hwnd_from(h), SW_RESTORE);
                 }
+            }
+            // Raised (not activated: the click stays swallowed) so it passes
+            // over its neighbours instead of under them. Z-order only, so
+            // LAST_SENT is untouched.
+            if !IsHungAppWindow(hwnd_from(h)).as_bool() {
+                let _ = SetWindowPos(
+                    hwnd_from(h),
+                    HWND_TOP,
+                    0,
+                    0,
+                    0,
+                    0,
+                    foreign_swp_flags(
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOSENDCHANGING,
+                        ASYNC_WINDOW_POS.load(Ordering::Relaxed),
+                    ),
+                );
             }
         }
         Cmd::DragMoved(h, x, y, r) => {
@@ -13912,14 +14168,17 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 mgr.focused_mon = from_mi;
                 retile_drop(mgr, from_mi);
             } else if to_mi == from_mi {
-                // Reorder within the same monitor: swap with the window dropped onto.
+                // Reorder within the same monitor: swap with the window dropped
+                // onto. Mosaic leaves wallpaper between windows, so there a drop
+                // anywhere swaps into the slot nearest the dropped window's
+                // centre (mosaic_target); the drop glide then moves everyone.
+                let target = if mgr.layout(from_mi, from_a) == "mosaic" {
+                    mosaic_target(mgr, from_mi, h, (r.left + r.right, r.top + r.bottom))
+                } else {
+                    target
+                };
                 if let Some(t) = target {
-                    let ws = &mut mgr.monitors[to_mi].workspaces[from_a];
-                    let ia = ws.windows.iter().position(|&w| w == h);
-                    let ib = ws.windows.iter().position(|&w| w == t);
-                    if let (Some(ia), Some(ib)) = (ia, ib) {
-                        ws.windows.swap(ia, ib);
-                    }
+                    swap_windows(&mut mgr.monitors[to_mi].workspaces[from_a].windows, h, t);
                 }
                 mgr.monitors[from_mi].workspaces[from_a].focused = h;
                 mgr.focused_mon = from_mi;
@@ -13988,6 +14247,19 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     r
                 }
             };
+            // A native move off a floating workspace onto another monitor
+            // re-homes it there (B-06's rule), or the retile below would
+            // centre it back (unpark_floating).
+            if rect.is_none() && mgr.layout(mi, wi) == "floating" {
+                let to_mi = monitor_index_for_window(mgr, hwnd_from(h));
+                let to_a = mgr.monitors[to_mi].active;
+                if to_mi != mi && mgr.move_window(h, to_mi, to_a, None) {
+                    mgr.focused_mon = to_mi;
+                    retile_monitor_opts(mgr, mi, true);
+                    retile_drop(mgr, to_mi);
+                    return;
+                }
+            }
             let (wa, outer) = mgr.monitors[mi].tile_area();
             if config::is_strip(mgr.layout(mi, wi)) {
                 // A horizontal edge sets the column width, a vertical one the
@@ -14044,6 +14316,49 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 retile_drop(mgr, mi);
                 return;
             }
+            if mgr.layout(mi, wi) == "mosaic" {
+                // The natural size scales by dropped over slot size
+                // (layout::mosaic_resized), both visible frames. Not after an
+                // Aero-snap maximise or a native move onto another monitor
+                // (rescaled by its DPI): neither is a resize, it just retiles.
+                let hwnd = hwnd_from(h);
+                let resized = !IsZoomed(hwnd).as_bool()
+                    && MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize
+                        == mgr.monitors[mi].hmon;
+                if let Some((slot, _)) = resized.then(|| tile_slot(mgr, h)).flatten() {
+                    let got = match rect {
+                        // The hook's rect has the invisible borders: take
+                        // off the insets the slot was placed with.
+                        Some(r) => {
+                            let a = adjust_for_border(hwnd_from(h), slot);
+                            RECT {
+                                left: r.left + slot.left - a.left,
+                                top: r.top + slot.top - a.top,
+                                right: r.right - (a.right - slot.right),
+                                bottom: r.bottom - (a.bottom - slot.bottom),
+                            }
+                        }
+                        // A native drag already landed.
+                        None => frame_bounds(hwnd_from(h)).unwrap_or(r),
+                    };
+                    // A plain move (title-bar drag) keeps the size: storing
+                    // the shown, capped size would lose the window's own.
+                    let size = |r: RECT| (r.right - r.left, r.bottom - r.top);
+                    let ((sw, sh), (gw, gh)) = (size(slot), size(got));
+                    if (sw - gw).abs() > 2 || (sh - gh).abs() > 2 {
+                        let nat = mosaic_resized(natural_px(mgr, mi, h), slot, got);
+                        natural_store(mgr, mi, h, nat);
+                    } else if rect.is_none() {
+                        // A title-bar move: the same nearest-slot drop as Win+drag.
+                        let c = (got.left + got.right, got.top + got.bottom);
+                        if let Some(t) = mosaic_target(mgr, mi, h, c) {
+                            swap_windows(&mut mgr.monitors[mi].workspaces[wi].windows, h, t);
+                        }
+                    }
+                }
+                retile_drop(mgr, mi);
+                return;
+            }
             // Tiled order must match what retile_monitor / dwindle_layout use.
             let tiled: Vec<isize> = mgr.monitors[mi].workspaces[wi]
                 .windows
@@ -14062,8 +14377,13 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     let mw = (r.right - r.left).max(1);
                     mgr.cfg.master_ratio = (mw as f32 / total as f32).clamp(0.15, 0.85);
                 }
-            } else if let Some(idx) = tiled.iter().position(|&w| w == h) {
+            } else if let Some(idx) = (mgr.layout(mi, wi) == "dwindle")
+                .then(|| tiled.iter().position(|&w| w == h))
+                .flatten()
+            {
                 // Dwindle: edit the split ratio so neighbours reflow to fill.
+                // Dwindle only: grid, columns, monocle and floating keep
+                // their tiles, so a drag there snaps back.
                 resize_dwindle(
                     &mut mgr.monitors[mi].workspaces[wi].splits,
                     wa,
@@ -19287,6 +19607,7 @@ fn manager_loop(cfg: Config) {
             tiling: cfg.start_tiled,
             cfg,
             pending_launch_mon: 0,
+            natural: HashMap::new(),
         };
         log_monitors(&m);
         assign_existing_windows(&mut m);
@@ -27477,6 +27798,7 @@ mod tests {
             tiling: true,
             cfg: Config::defaults(),
             pending_launch_mon: 0,
+            natural: HashMap::new(),
         }
     }
 
@@ -28495,6 +28817,159 @@ mod tests {
             ws.layout = None;
         }
         assert_eq!(mgr.layout(0, 1), "scrolling");
+        // The two appended layouts (#27, #28), then the wrap both ways.
+        unsafe { set_workspace_layout(&mut mgr, 0, "scrolling_vertical") };
+        for want in ["mosaic", "floating", "dwindle"] {
+            unsafe { process(&mut mgr, Cmd::CycleLayout(1)) };
+            assert_eq!(mgr.active_layout(0), want);
+        }
+        unsafe { process(&mut mgr, Cmd::CycleLayout(-1)) };
+        assert_eq!(mgr.active_layout(0), "floating");
+    }
+
+    /// #27: a mosaic drop takes the slot nearest the dropped window's centre
+    /// (not only a window under the cursor: wallpaper used to send it home),
+    /// home stays home, and Alt+M aims at the middle. Model only; hidden,
+    /// never-shown windows of our own.
+    #[test]
+    fn a_mosaic_drop_takes_the_nearest_slot() {
+        let real = || unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .0 as isize
+        };
+        let (a, b, c) = (real(), real(), real());
+        let mut mgr = test_manager(1, 1);
+        mgr.monitors[0].workspaces[0].windows = vec![a, b, c];
+        mgr.monitors[0].workspaces[0].layout = Some("mosaic");
+        mgr.natural.insert(a, (1200, 800));
+        mgr.natural.insert(b, (500, 400));
+        mgr.natural.insert(c, (500, 400));
+        let slot = |mgr: &Manager, h: isize| {
+            let v = unsafe { workspace_layout(mgr, 0, 0) };
+            let r = v.iter().find(|(w, _)| *w == h).unwrap().1;
+            (r.left + r.right, r.top + r.bottom)
+        };
+        let home = slot(&mgr, a);
+        assert_eq!(unsafe { mosaic_target(&mgr, 0, a, home) }, None);
+        // Dropped far right, on wallpaper: it swaps there, no slide back.
+        let (area, outer) = mgr.monitors[0].tile_area();
+        let right = (2 * (area.right - outer), home.1);
+        let t = unsafe { mosaic_target(&mgr, 0, a, right) }.expect("a slot on the right");
+        swap_windows(&mut mgr.monitors[0].workspaces[0].windows, a, t);
+        assert!(slot(&mgr, a).0 > home.0);
+        assert_model_sound(&mgr, &[a, b, c]);
+        // Alt+M's aim: the middle never ends further from the centre.
+        let mid = (area.left + area.right, area.top + area.bottom);
+        let dist = |p: (i32, i32)| ((p.0 - mid.0) as i64).pow(2) + ((p.1 - mid.1) as i64).pow(2);
+        let before = dist(slot(&mgr, a));
+        if let Some(t) = unsafe { mosaic_target(&mgr, 0, a, mid) } {
+            swap_windows(&mut mgr.monitors[0].workspaces[0].windows, a, t);
+        }
+        assert!(dist(slot(&mgr, a)) <= before);
+        assert_model_sound(&mgr, &[a, b, c]);
+    }
+
+    /// #27: mosaic tiles each window at its natural size (half the inner
+    /// box without one); #28: floating places nothing. Hidden, never-shown
+    /// windows of our own: workspace_layout only, nothing is placed.
+    #[test]
+    fn mosaic_uses_natural_sizes_and_floating_places_nothing() {
+        let real = || unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                100,
+                100,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .0 as isize
+        };
+        let (a, b) = (real(), real());
+        let mut mgr = test_manager(1, 1);
+        mgr.monitors[0].workspaces[0].windows = vec![a, b];
+        mgr.natural.insert(a, (800, 600));
+        mgr.monitors[0].workspaces[0].layout = Some("mosaic");
+        let (area, outer) = mgr.monitors[0].tile_area();
+        let inner = mgr.cfg.inner_gap;
+        let half = (
+            (area.right - area.left - 2 * outer) / 2,
+            (area.bottom - area.top - 2 * outer) / 2,
+        );
+        let want = mosaic_layout(area, &[(800, 600), half], outer, inner);
+        assert_eq!(
+            unsafe { workspace_layout(&mgr, 0, 0) },
+            vec![(a, want[0]), (b, want[1])]
+        );
+        mgr.monitors[0].workspaces[0].layout = Some("floating");
+        assert!(unsafe { workspace_layout(&mgr, 0, 0) }.is_empty());
+        mgr.monitors[0].workspaces[0].layout = Some("dwindle");
+        assert_eq!(unsafe { workspace_layout(&mgr, 0, 0) }.len(), 2);
+        // A hide (close-to-tray) keeps the size; a destroy forgets it, so
+        // a recycled HWND starts afresh. Tiling off: the retile places
+        // nothing (no motion in a test).
+        mgr.tiling = false;
+        unsafe { untrack_window(&mut mgr, a) };
+        assert!(mgr.natural.contains_key(&a));
+        unsafe { process(&mut mgr, Cmd::Remove(a)) };
+        assert!(!mgr.natural.contains_key(&a));
+        // A stored size is capped like the layout's (0.8 of the inner box):
+        // Alt+L held cannot bank invisible size (or overflow).
+        unsafe { natural_store(&mut mgr, 0, b, (1_000_000, 500_000)) };
+        let (bw, bh) = mgr.natural[&b];
+        assert!(
+            bw * 5 <= (area.right - area.left - 2 * outer) * 4 + 5
+                && bh * 5 <= (area.bottom - area.top - 2 * outer) * 4 + 5
+        );
+        // Each axis on its own: dragging one edge past the cap does not
+        // shrink the other, and it reads back unchanged (natural_px).
+        unsafe { natural_store(&mut mgr, 0, b, (300, 500_000)) };
+        let (pw, ph) = unsafe { natural_px(&mgr, 0, b) };
+        assert!((pw - 300).abs() <= 1, "{pw}");
+        assert!(
+            (ph * 5 - (area.bottom - area.top - 2 * outer) * 4).abs() <= 10,
+            "{ph}"
+        );
+        // Floating: a window showing on another monitor (the real one; the
+        // test monitor's hmon is fake) is centred on its owner, size kept.
+        mgr.monitors[0].workspaces[0].layout = Some("floating");
+        unsafe { unpark_floating(&mgr, 0, 0) };
+        let wa = mgr.monitors[0].work_area;
+        let (x, y) = ((wa.left + wa.right) / 2 - 50, (wa.top + wa.bottom) / 2 - 50);
+        assert_eq!(
+            unsafe { window_rect_of(b) },
+            RECT {
+                left: x,
+                top: y,
+                right: x + 100,
+                bottom: y + 100
+            }
+        );
+        unsafe {
+            let _ = DestroyWindow(hwnd_from(a));
+            let _ = DestroyWindow(hwnd_from(b));
+        }
     }
 
     /// The custom widget's timeout stops the program cmd started, not just
@@ -29883,6 +30358,7 @@ mod tests {
             Cmd::Switch(i) | Cmd::MoveToWs(i) | Cmd::Extra(i) => format!("{} {i}", c.name()),
             Cmd::FocusGeo(d) | Cmd::MoveGeo(d) => format!("{} {}", c.name(), *d as u8),
             Cmd::ColumnEdge { last, carry } => format!("{} {last} {carry}", c.name()),
+            Cmd::CycleLayout(d) => format!("{} {d}", c.name()),
             c => c.name().to_string(),
         }
     }
@@ -29974,8 +30450,11 @@ mod tests {
             0x28 => return pick(Cmd::FocusGeo(Dir::Down), Cmd::MoveGeo(Dir::Down)),
             _ => {}
         }
-        let i = c.workspace_keys.iter().position(|&k| k == vk)?;
-        pick(Cmd::Switch(i), Cmd::MoveToWs(i))
+        if let Some(i) = c.workspace_keys.iter().position(|&k| k == vk) {
+            return pick(Cmd::Switch(i), Cmd::MoveToWs(i));
+        }
+        // New in 2.5.0, compiled after the workspace keys.
+        (vk == c.key_cycle_layout).then(|| pick(Cmd::CycleLayout(1), Cmd::CycleLayout(-1)))?
     }
 
     #[test]
@@ -30043,6 +30522,9 @@ mod tests {
         let edge = |last, carry| sig(Cmd::ColumnEdge { last, carry });
         assert_eq!(alt(0x24), edge(false, false));
         assert_eq!(alt_shift(0x23), edge(true, true));
+        // Alt+Y / Alt+Shift+Y: a Copy command, no String on the hook path.
+        assert_eq!(alt(0x59), sig(Cmd::CycleLayout(1)));
+        assert_eq!(alt_shift(0x59), sig(Cmd::CycleLayout(-1)));
     }
 
     #[test]

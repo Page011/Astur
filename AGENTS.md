@@ -14,7 +14,9 @@ single Rust `.exe` with no installer and no required config. Core hooks:
   `monocle`, or Niri-style `scrolling` (column strip, off-screen columns
   parked outside the virtual screen, tabbed columns; `plan/scrolling.md`)
   and `scrolling_vertical` (the same strip of rows, transposed;
-  `config::is_strip` / `strip_vertical` are the checks).
+  `config::is_strip` / `strip_vertical` are the checks), `mosaic` (each
+  window at its natural size, `Manager.natural`, `layout::mosaic_layout`)
+  and `floating` (places nothing). Alt+Y / Alt+Shift+Y cycle them.
   Layout is per workspace (`Manager::layout`: runtime switch, else
   `workspace_layouts`, else the monitor's `monitor_layouts` / `layout`).
 - **Up to 20 virtual workspaces** (`MAX_WORKSPACES`), shared or per-monitor.
