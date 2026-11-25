@@ -10,7 +10,7 @@ Hold Left Alt and drag to move or resize a window. Windows tile themselves in on
 [![Built with Rust](https://img.shields.io/badge/built%20with-Rust-orange.svg)](https://www.rust-lang.org)
 [![Platform: Windows 10/11](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-0078D6.svg)](https://github.com/Page011/Astur/releases/latest)
 
-![Astur tiling windows with a status bar on a live Windows desktop](https://astur.app/in-use-screenshot-1.png)
+![Astur tiling windows with a status bar on a live Windows desktop](https://astur.app/astur-showcase-poster.webp)
 
 > See it in motion: [watch the demo clip](https://astur.app/#showcase) on the website.
 
