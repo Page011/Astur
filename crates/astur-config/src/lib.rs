@@ -2895,9 +2895,15 @@ pub fn pinned_by(from: &Path, var: impl Fn(&str) -> Option<String>) -> Option<&'
 
 /// `path` re-based from the Astur folder not in use (`other`) onto `dir`,
 /// the one in use: a wallpaper picked inside the folder before a move
-/// follows it. None when it is not inside `other`.
+/// follows it. None when it is not inside `other`. Case-insensitive, as
+/// Windows paths are (pinned_by's rule); the rest keeps its own case.
 fn moved_path(path: &str, other: &Path, dir: &Path) -> Option<String> {
-    let rest = Path::new(path).strip_prefix(other).ok()?;
+    let low = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    let p = Path::new(path);
+    if !low(p).starts_with(low(other)) {
+        return None;
+    }
+    let rest: PathBuf = p.components().skip(other.components().count()).collect();
     Some(dir.join(rest).to_string_lossy().into_owned())
 }
 
@@ -6014,6 +6020,12 @@ floating = true"
             Some(r"C:\U\R\Astur\wallpapers\a.jpg")
         );
         assert_eq!(moved_path(r"D:\pics\a.jpg", &old, &new), None);
+        // Typed by hand in another case (review 3): still follows.
+        assert_eq!(
+            moved_path(r"c:\u\.ASTUR\Wallpapers\A.jpg", &old, &new).as_deref(),
+            Some(r"C:\U\R\Astur\Wallpapers\A.jpg")
+        );
+        assert_eq!(moved_path(r"C:\U\.asturx\a.jpg", &old, &new), None);
     }
 
     #[test]

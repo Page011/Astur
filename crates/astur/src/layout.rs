@@ -191,6 +191,19 @@ fn grid_cells(area: RECT, n: usize, cols: usize, outer: i32, inner: i32) -> Vec<
         return out;
     }
     let rows = n.div_ceil(cols);
+    // Under 1 px a cell (outer gaps eating the area): stack them on the
+    // inner box, as dwindle's tail does, rather than emit 0-wide cells.
+    if width < cols.min(n) as i32 || height < rows as i32 {
+        return vec![
+            RECT {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            };
+            n
+        ];
+    }
     let row_gap = fitted_gap(height, rows, inner);
     let row_h = (height - row_gap * (rows.saturating_sub(1) as i32)) / rows as i32;
     for row in 0..rows {
@@ -782,7 +795,6 @@ pub(crate) fn strip_base(
     let lo = len - 2 * p;
     let sum = widths.iter().sum::<f32>().max(1.0);
     let fill = ((len - 2 * outer + inner) as f32 / sum).round() as i32 + 2 * outer - inner;
-    let mut base = fill.clamp(lo, len);
     // Per-column rounding can leave the spans a px or two past `len`, which
     // would make a strip that fits scroll by 1 px on every focus change.
     let total = |b| {
@@ -790,9 +802,27 @@ pub(crate) fn strip_base(
             .last()
             .map_or(0, |s| s.1 + outer)
     };
-    while base > lo && total(base) > len {
-        base -= 1;
-    }
+    let descend = |mut b: i32, floor: i32| {
+        while b > floor && total(b) > len {
+            b -= 1;
+        }
+        b
+    };
+    let base = descend(fill.clamp(lo, len), lo);
+    // A strip that fits may go below `lo` for it (peek 0: lo is len), by at
+    // most a px a column, but only when that makes it fit: real overflow (a
+    // col_px floor beside a wide gap) stays at `lo`, so the base stays
+    // continuous across the fit line.
+    let base = if fill >= len && total(base) > len {
+        let b = descend(base, lo.min(len - widths.len() as i32));
+        if total(b) <= len {
+            b
+        } else {
+            base
+        }
+    } else {
+        base
+    };
     (base, p)
 }
 
@@ -821,14 +851,35 @@ pub(crate) fn drag_width(
     let lo = (lo_len - 2 * outer + inner).max(1) as f32;
     let fits = col_width(len, px, outer, inner);
     let over = col_width(lo_len, px, outer, inner);
-    if others + fits <= 1.0 {
+    let w = if others + fits <= 1.0 {
         fits
     } else if full / (others + over) <= lo {
         over
     } else {
         // Fills `len`: span / w = full / (others + w).
         span * others / (full - span).max(1.0)
+    };
+    // The solve assumes linear shares; col_px's 1 px floor (a narrow column
+    // beside a wide inner gap) breaks that and the base shrinks. Check it on
+    // the forward model and bisect when it misses (end of a drag only).
+    let land = |w: f32| {
+        let mut ws = widths.to_vec();
+        ws[ci] = w;
+        col_px(strip_base(len, &ws, peek, outer, inner).0, w, outer, inner)
+    };
+    if ci >= widths.len() || (land(w) - px).abs() <= 1 {
+        return w;
     }
+    let (mut a, mut b) = (0.0f32, 1.0f32);
+    for _ in 0..24 {
+        let m = (a + b) / 2.0;
+        if land(m) < px {
+            a = m
+        } else {
+            b = m
+        }
+    }
+    b
 }
 
 /// Strip-space `(left, right)` of every column.
@@ -2018,6 +2069,45 @@ mod tests {
         let w = drag_width(3840, &[0.7, 0.5], 0, 1000, 8, 8, 48);
         assert_eq!(strip_base(3840, &[w, 0.5], 48, 8, 8).0, 3840);
         assert_eq!(col_px(3840, w, 8, 8), 1000);
+    }
+
+    /// Review 3: a 1 px floored column beside a wide inner gap broke the
+    /// linear solve; the drag landed 31 px short.
+    #[test]
+    fn drag_width_lands_past_a_floored_column() {
+        let w = drag_width(1000, &[0.1, 0.3, 0.2], 1, 649, 8, 150, 32);
+        let ws = [0.1, w, 0.2];
+        let s = strip_spans(strip_base(1000, &ws, 32, 8, 150).0, &ws, 8, 150);
+        assert!((s[1].1 - s[1].0 - 649).abs() <= 1, "{s:?}");
+    }
+
+    /// Review 3: peek 0 left the rounding fix-up no room (lo == len), so a
+    /// strip that fits by rounding scrolled 1 px on every focus change.
+    #[test]
+    fn a_fitting_strip_at_peek_0_never_scrolls() {
+        let (b, p) = strip_base(1001, &[0.5; 2], 0, 8, 8);
+        let s = strip_spans(b, &[0.5; 2], 8, 8);
+        let show = |f| scroll_to_show(1001, &s, 8, p, f, 0, Center::Never, true);
+        assert_eq!((show(1), show(0)), (0, 0));
+        // Real overflow still stops at lo.
+        assert_eq!(strip_base(3840, &[0.5; 3], 0, 8, 8), (3840, 0));
+        // Review: a strip that overflows anyway (1 px columns beside a wide
+        // gap) keeps base lo, so a column never jumps at the fit line.
+        assert_eq!(strip_base(800, &[0.7, 0.1, 0.1, 0.1], 0, 8, 100).0, 800);
+        for px in 510..=524 {
+            let w = drag_width(800, &[0.1; 4], 0, px, 8, 100, 0);
+            let ws = [w, 0.1, 0.1, 0.1];
+            let s = strip_spans(strip_base(800, &ws, 0, 8, 100).0, &ws, 8, 100);
+            assert!((s[0].1 - s[0].0 - px).abs() <= 1, "{px}: {s:?}");
+        }
+    }
+
+    /// Review 3: outer gaps eating the area left grid cells 0 px wide.
+    #[test]
+    fn a_sub_pixel_grid_stacks_instead_of_emitting_empty_cells() {
+        assert!(grid_layout(r(0, 0, 1, 480), 2, 0, 500)
+            .iter()
+            .all(|c| c.right > c.left && c.bottom > c.top));
     }
 
     /// (left gap, right gap) of a strip of `widths` at offset 0 after the

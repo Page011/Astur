@@ -7073,13 +7073,14 @@ unsafe fn unpark_window(h: isize, sent: Option<RECT>, reveal: bool) -> bool {
     if GetWindowRect(hwnd, &mut live).is_err() {
         return false;
     }
-    // A reveal also brings in a strip sliver (scroll_peek) Astur left mostly
-    // off its monitor: after the quit nothing scrolls it back, and a top or
-    // left sliver shows no title bar to drag. Only a rect Astur sent, so a
-    // window the user put half off screen stays put.
-    let sliver = |r: &RECT| {
-        reveal && nearest_monitor_info(r).is_some_and(|mi| mostly_outside(r, &mi.rcMonitor))
-    };
+    // A strip sliver (scroll_peek) Astur left mostly off its monitor comes in
+    // too: every caller is a path where nothing places the window any more
+    // (quit, a floating workspace, tiling off, float, untrack), so nothing
+    // scrolls it back, and a top or left sliver shows no title bar to drag.
+    // Only a rect Astur sent, so a window the user put half off screen stays
+    // put (a user move forgets LAST_SENT).
+    let sliver =
+        |r: &RECT| nearest_monitor_info(r).is_some_and(|mi| mostly_outside(r, &mi.rcMonitor));
     let from = match sent {
         Some(s) if off(&s) || sliver(&s) => s,
         _ if off(&live) => live,
@@ -7578,7 +7579,8 @@ unsafe fn natural_note(mgr: &mut Manager, h: isize) {
 
 /// A `floating` workspace (#28) places nothing, so a window a strip parked
 /// there would stay off screen: bring each back. unpark_tracked moves only
-/// windows off every monitor, so this is idempotent and cheap. The mirror
+/// windows off every monitor or left as a sliver Astur sent (the sliver
+/// rect is forgotten once moved), so this is idempotent and cheap. The mirror
 /// of ToggleTiling's unpark_all, scoped to one workspace. A window showing
 /// on another monitor (opened there but given this one by the launch
 /// monitor or a monitor rule, Alt+Shift+arrow, MoveToWs) is centred on
@@ -14215,7 +14217,13 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             // The user (or this drag) just placed it: the rect Astur last
             // sent no longer describes it, so Quit's sliver restore must not
             // pull it back there (tiled windows are re-placed below anyway).
-            last_sent_forget(h);
+            // Not when an Aero-snap maximise ended the drag maximised: its
+            // entry is what app_keeps reads to keep a tile the user
+            // maximised (#32), and unpark_window never reads `sent` for a
+            // zoomed window.
+            if !IsZoomed(hwnd_from(h)).as_bool() {
+                last_sent_forget(h);
+            }
             // Tiled resize: apply its final slot once. Floating/unmanaged
             // windows keep the exact release rect; native drags already landed.
             if let Some(r) = rect {
@@ -14229,9 +14237,35 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
             let Some((mi, wi)) = mgr.locate(h) else {
                 return;
             };
-            if mgr.monitors[mi].workspaces[wi].floating.contains(&h)
-                || wi != mgr.monitors[mi].active
-            {
+            // Hidden mid-switch: re-homing it would put a hidden window into
+            // a visible workspace (DragMoved's rule).
+            if wi != mgr.monitors[mi].active {
+                return;
+            }
+            let float = mgr.monitors[mi].workspaces[wi].floating.contains(&h);
+            // A native move of a float, or off a floating workspace, onto
+            // another monitor re-homes it there (B-06's rule, as Alt-drag),
+            // or the old monitor's next switch hides it and a floating
+            // workspace's retile centres it back (unpark_floating).
+            if rect.is_none() && (float || mgr.layout(mi, wi) == "floating") {
+                let to_mi = monitor_index_for_window(mgr, hwnd_from(h));
+                let to_a = mgr.monitors[to_mi].active;
+                if to_mi != mi && mgr.move_window(h, to_mi, to_a, None) {
+                    mgr.focused_mon = to_mi;
+                    retile_monitor_opts(mgr, mi, true);
+                    retile_drop(mgr, to_mi);
+                    return;
+                }
+            }
+            if float {
+                return;
+            }
+            // Ended maximised (an Aero-snap maximise by the title bar): not a
+            // resize. Its maximised rect would rewrite the master ratio, a
+            // dwindle split or a column width behind the kept maximise
+            // (app_keeps), lost on restore; the rest just retile.
+            if IsZoomed(hwnd_from(h)).as_bool() {
+                retile_drop(mgr, mi);
                 return;
             }
             // Dragged to another size: a slot it keeps (a stack tile, a grid
@@ -14248,19 +14282,6 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     r
                 }
             };
-            // A native move off a floating workspace onto another monitor
-            // re-homes it there (B-06's rule), or the retile below would
-            // centre it back (unpark_floating).
-            if rect.is_none() && mgr.layout(mi, wi) == "floating" {
-                let to_mi = monitor_index_for_window(mgr, hwnd_from(h));
-                let to_a = mgr.monitors[to_mi].active;
-                if to_mi != mi && mgr.move_window(h, to_mi, to_a, None) {
-                    mgr.focused_mon = to_mi;
-                    retile_monitor_opts(mgr, mi, true);
-                    retile_drop(mgr, to_mi);
-                    return;
-                }
-            }
             let (wa, outer) = mgr.monitors[mi].tile_area();
             if config::is_strip(mgr.layout(mi, wi)) {
                 // A horizontal edge sets the column width, a vertical one the
@@ -24588,10 +24609,20 @@ unsafe fn sysmenu_exec(act: SysAct) {
                         restore_all_windows();
                         std::process::exit(0);
                     }
-                    Err(e) => log_error!(
-                        "restart: could not start {}: {e}; still running",
-                        exe.display()
-                    ),
+                    Err(e) => {
+                        log_error!(
+                            "restart: could not start {}: {e}; still running",
+                            exe.display()
+                        );
+                        // Settings closed on the click, so say so. Its own
+                        // thread: the caller is a UI-thread wndproc, where a
+                        // modal loop must not run.
+                        let text = format!(
+                            "Astur could not restart ({e}) and is still running.\n\n\
+                             A changed config folder is saved; it moves the next time Astur starts."
+                        );
+                        spawn_named("restart-failed", move || unsafe { message_box(&text) });
+                    }
                 }
             }
         }
@@ -27408,6 +27439,162 @@ mod tests {
             .unwrap()
             .as_ref()
             .is_none_or(|s| !s.contains_key(&h)));
+    }
+
+    /// A hidden, never-shown window of our own, for tests that need a real
+    /// HWND.
+    fn test_window(w: i32, h: i32) -> HWND {
+        unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                w!(""),
+                WS_POPUP,
+                0,
+                0,
+                w,
+                h,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        }
+    }
+
+    /// Review 3: an Aero-snap maximise ends the native drag maximised; its
+    /// LAST_SENT entry stays, so app_keeps keeps the maximise (#32).
+    #[test]
+    fn a_snap_maximised_drag_end_keeps_the_rect_astur_last_sent() {
+        unsafe {
+            let w = test_window(100, 100);
+            let style = GetWindowLongW(w, GWL_STYLE) as u32;
+            SetWindowLongW(
+                w,
+                GWL_STYLE,
+                (style | windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZE.0) as i32,
+            );
+            assert!(IsZoomed(w).as_bool(), "precondition: maximised");
+            let h = w.0 as isize;
+            let mut m = test_manager(1, 1);
+            m.tiling = false;
+            LAST_SENT
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(h, rc(-900, 0, 100, 500));
+            process(&mut m, Cmd::DragResized(h, None));
+            assert!(LAST_SENT
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_some_and(|s| s.contains_key(&h)));
+            last_sent_forget(h);
+            let _ = DestroyWindow(w);
+        }
+    }
+
+    /// Review: an Aero-snap maximise ends the drag maximised; it is not a
+    /// resize, so the master ratio (or a split, a column width) is untouched.
+    #[test]
+    fn a_snap_maximise_leaves_the_layout_alone() {
+        unsafe {
+            let w = test_window(100, 100);
+            let style = GetWindowLongW(w, GWL_STYLE) as u32;
+            SetWindowLongW(
+                w,
+                GWL_STYLE,
+                (style | windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZE.0) as i32,
+            );
+            let h = w.0 as isize;
+            let mut m = test_manager(1, 1);
+            m.monitors[0].workspaces[0].layout = Some("master");
+            m.monitors[0].workspaces[0].windows = vec![h];
+            m.monitors[0].workspaces[0].focused = h;
+            let ratio = m.cfg.master_ratio;
+            process(&mut m, Cmd::DragResized(h, None));
+            assert_eq!(m.cfg.master_ratio, ratio);
+            assert_model_sound(&m, &[h]);
+            last_sent_forget(h);
+            let _ = DestroyWindow(w);
+        }
+    }
+
+    /// Review 3: a strip sliver Astur sent comes back on screen once nothing
+    /// places the window any more (a floating workspace, tiling off, a
+    /// float); one Astur did not send (the user's) stays put.
+    #[test]
+    fn unpark_tracked_brings_in_an_astur_sent_sliver() {
+        unsafe {
+            let mi = nearest_monitor_info(&rc(0, 0, 1, 1)).expect("a primary monitor");
+            let (mon, wa) = (mi.rcMonitor, mi.rcWork);
+            let (a, b) = (test_window(100, 963), test_window(100, 963));
+            for w in [a, b] {
+                SetWindowPos(
+                    w,
+                    None,
+                    mon.left + 8,
+                    mon.top - 873,
+                    100,
+                    963,
+                    SWP_NOACTIVATE | SWP_NOZORDER,
+                )
+                .unwrap();
+            }
+            let (ha, hb) = (a.0 as isize, b.0 as isize);
+            let sliver = window_rect_of(ha);
+            assert!(
+                mostly_outside(&sliver, &mon),
+                "precondition: a sliver {sliver:?}"
+            );
+            LAST_SENT
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(ha, sliver);
+            assert!(unpark_tracked(ha));
+            let r = window_rect_of(ha);
+            assert!(
+                r.left >= wa.left
+                    && r.top >= wa.top
+                    && r.right <= wa.right
+                    && r.bottom <= wa.bottom,
+                "{r:?} in {wa:?}"
+            );
+            assert!(LAST_SENT
+                .lock()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|s| !s.contains_key(&ha)));
+            assert!(!unpark_tracked(hb), "not sent by Astur: stays put");
+            assert_eq!(window_rect_of(hb), sliver);
+            let _ = DestroyWindow(a);
+            let _ = DestroyWindow(b);
+        }
+    }
+
+    /// Review 3: a native title-bar drag of an explicit float onto another
+    /// monitor re-homes it (B-06), on a floating workspace (else its retile
+    /// centres it back) and on a tiled one (else the old monitor's next
+    /// switch hides it).
+    #[test]
+    fn native_drag_rehomes_an_explicit_float_off_a_floating_workspace() {
+        for layout in [Some("floating"), None] {
+            unsafe {
+                let w = test_window(100, 100);
+                let h = w.0 as isize;
+                let mut m = test_manager(2, 1);
+                m.monitors[1].hmon = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST).0 as isize;
+                m.monitors[0].workspaces[0].layout = layout;
+                add(&mut m, 0, 0, h, true);
+                process(&mut m, Cmd::DragResized(h, None));
+                assert_eq!(m.locate(h), Some((1, 0)), "{layout:?}");
+                assert!(m.monitors[1].workspaces[0].floating.contains(&h));
+                assert_model_sound(&m, &[h]);
+                let _ = DestroyWindow(w);
+            }
+        }
     }
 
     #[test]
@@ -30337,10 +30524,17 @@ mod tests {
         assert!(!ws.strip.col_of.contains_key(&A));
         assert!(!ws.strip.weights.contains_key(&A));
         assert_ne!(ws.focused, A);
-        // Moved into another scrolling workspace: a column of its own there.
+        // Moved into another scrolling workspace: a column of its own there,
+        // appended by the strip branch (Index(0) would put it first).
+        {
+            let ws1 = &mut mgr.monitors[0].workspaces[1];
+            ws1.layout = Some("scrolling");
+            ws1.windows = vec![D];
+            ws1.focused = D;
+        }
         assert!(mgr.move_window(B, 0, 1, Some(DropAt::Index(0))));
         let dst = &mgr.monitors[0].workspaces[1];
-        assert_eq!((dst.windows.clone(), dst.focused), (vec![B], B));
+        assert_eq!((dst.windows.clone(), dst.focused), (vec![D, B], B));
         assert!(!dst.strip.col_of.contains_key(&B));
         assert!(!mgr.monitors[0].workspaces[0].strip.col_of.contains_key(&B));
     }

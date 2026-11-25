@@ -3840,7 +3840,7 @@ fn bar_style_row(
 
 /// Home's window gaps: one size for the edges and between windows.
 fn gaps_row(ui: &mut Ui, f: &mut Find, c: &mut Config, d: &Config) {
-    let now = gap_preset(c.outer_gap, c.inner_gap);
+    let now = gap_preset(c);
     let mut sel = now.to_string();
     let opts: Vec<(&str, &str)> = GAPS.iter().map(|g| (g.0, g.1)).collect();
     let meta = (
@@ -3853,7 +3853,7 @@ fn gaps_row(ui: &mut Ui, f: &mut Find, c: &mut Config, d: &Config) {
         f,
         meta,
         &mut sel,
-        &gap_preset(d.outer_gap, d.inner_gap).to_string(),
+        &gap_preset(d).to_string(),
         |ui, v| {
             seg(ui, v, &opts);
             if v == "custom" {
@@ -3862,7 +3862,7 @@ fn gaps_row(ui: &mut Ui, f: &mut Find, c: &mut Config, d: &Config) {
         },
     );
     if let Some(g) = GAPS.iter().find(|g| g.0 == sel && sel != now) {
-        (c.outer_gap, c.inner_gap) = (g.2, g.2);
+        (c.outer_gap, c.inner_gap, c.outer_gap_extra) = (g.2, g.2, [0; 4]);
     }
 }
 
@@ -8936,10 +8936,11 @@ const GAPS: [(&str, &str, i32); 4] = [
     ("large", "Large", 16),
 ];
 
-/// The gap size `outer` and `inner` make, or "custom".
-fn gap_preset(outer: i32, inner: i32) -> &'static str {
+/// The gap size the outer and inner gaps make, or "custom" (so is any
+/// per-edge extra from the Layout page: not one size).
+fn gap_preset(c: &Config) -> &'static str {
     GAPS.iter()
-        .find(|g| outer == g.2 && inner == g.2)
+        .find(|g| c.outer_gap == g.2 && c.inner_gap == g.2 && c.outer_gap_extra == [0; 4])
         .map_or("custom", |g| g.0)
 }
 
@@ -11368,12 +11369,18 @@ key_close_window = F4
             "Custom: https://x.y/?s={query}"
         );
         // Gaps: the shipped 8 px is Medium; each size reads back.
-        let d = Config::defaults();
-        assert_eq!(gap_preset(d.outer_gap, d.inner_gap), "medium");
+        let mut c = Config::defaults();
+        assert_eq!(gap_preset(&c), "medium");
         for g in GAPS {
-            assert_eq!(gap_preset(g.2, g.2), g.0);
+            (c.outer_gap, c.inner_gap) = (g.2, g.2);
+            assert_eq!(gap_preset(&c), g.0);
         }
-        assert_eq!(gap_preset(8, 4), "custom");
+        c.inner_gap = 4;
+        assert_eq!(gap_preset(&c), "custom");
+        // A per-edge extra is not one size (review 3).
+        let mut c = Config::defaults();
+        c.outer_gap_extra[1] = 30;
+        assert_eq!(gap_preset(&c), "custom");
     }
 
     #[test]
