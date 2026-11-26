@@ -15,8 +15,9 @@ A start writes whichever of these is missing, and never touches one that is
 there: a short, commented `bar.toml`, an empty `style.css` (comments only), an
 empty `widgets\` folder and the editor files described in
 [Editor setup](#editor-setup-vs-code-and-luau-lsp). With no files at all you get the
-`default` bar: workspaces and the window title on the left, the clock in the
-middle, media, network, volume, battery, CPU, memory and the date on the right.
+`default` bar: chevron-shaped segments hanging from the top edge, workspaces and
+media on the left, memory, CPU, a button, the clock and the date in the middle,
+status, battery, tray and a record button on the right.
 
 ## 1. bar.toml
 
@@ -31,21 +32,22 @@ change.
 
 ```toml
 config_version = 1          # must be 1 when present
-preset = "default"          # default | astur-classic | glass
+preset = "default"          # default | fluent | astur-classic | glass
 
 [[bar]]                     # zero or more; none written = the preset's bars
 name = "main"               # a-z 0-9 _ -, at most 32; also the name for: rsb toggle main
 monitors = "*"              # "*", "primary", 0, "DISPLAY2", or a list of these
 position = "top"            # top | bottom
-height = 32                 # logical px, 16 to 128
+height = 36                 # logical px, 16 to 128
 floating = false            # true: a rounded bar kept away from the screen edge
 margin = 8                  # floating only, 0 to 64
 radius = 0                  # 0 to 64; 10 when floating; a CSS border-radius wins
 reserve = true              # keep maximised windows clear of the bar
 fullscreen = "below"        # below | hide | stay, what to do over a fullscreen app
-left = ["workspaces", "title"]
-center = ["clock"]
-right = ["media", "network", "volume", "battery", "cpu", "memory", "date"]
+left = ["workspaces", "media"]
+center = ["memory", "cpu", "dashboard", "clock", "date"]
+center_on = "dashboard"     # this widget of `center` sits in the middle of the bar
+right = ["status", "battery", "tray", "record"]
 
 [widget.clock]              # options for every "clock"
 format = "HH:mm"
@@ -75,6 +77,7 @@ longitude = 151.67
 | `reserve` | bar | register as an appbar so maximised windows stay clear |
 | `fullscreen` | bar | `below` drops under a fullscreen window, `hide` hides, `stay` stays on top |
 | `left`, `center`, `right` | bar | widget refs in each zone |
+| `center_on` | bar | a widget ref of `center` whose middle is the middle of the bar; the zone is laid out around it and moved only as far as the left and right zones need. Not in `center`: a warning, and the zone is centred as a whole |
 
 **Widget refs.** `clock` is the built-in or a file `widgets\clock.luau` (your
 file wins). `clock#utc` is a second instance of `clock`: the plain
@@ -105,16 +108,21 @@ battery shows a plug on a PC without a battery.
 
 | Widget | Options (default) | Behaviour |
 |---|---|---|
-| `workspaces` | `monitor = "own"`, `hide_empty = false`, `label = "display_name"`, `wheel = true` | one pill per workspace from Astur, GlazeWM or komorebi; a click focuses, the wheel steps; `own` shows the bar's monitor (matched by handle, then device name, then position; no match shows all), `all` shows every monitor; `label` is `display_name` or `name`. Needs `control = workspaces` |
+| `workspaces` | `monitor = "own"`, `hide_empty = false`, `label = "display_name"`, `wheel = true`, `style = "pills"`, `active_format = "{label}"` | one pill per workspace from Astur, GlazeWM or komorebi; a click focuses, the wheel steps; `own` shows the bar's monitor (matched by handle, then device name, then position; no match shows all), `all` shows every monitor; `label` is `display_name` or `name`; `style = "text"` draws plain labels (the root gets the class `plain`), and `active_format` is how the focused label reads (`"-{label}-"` gives `-8-`). Needs `control = workspaces` |
 | `title` | `max_width = 360`, `show_process = false` | the focused window's title with an ellipsis; empty on the desktop. Needs `read = window` |
-| `clock` | `format = "HH:mm"`, `alt_format = "ddd d MMM HH:mm:ss"`, `timezone = "local"` | a click swaps to `alt_format` (set it to `""` to turn that off); ticks on the boundary of the format's finest unit, and at once after sleep or a clock change |
-| `date` | `format = "ddd d MMM"`, `timezone = "local"` | ticks once an hour |
-| `cpu` | `format = "{value}%"`, `icon = "cpu"`, `label = ""`, `every = "2s"`, `warn = 80` | class `warn` from `warn` percent up; a non-empty `label` replaces the icon |
-| `memory` | `format = "{value}%"` (`{value}` `{used}` `{total}`), `icon = "memory"`, `label = ""`, `every = "2s"`, `warn = 85` | as `cpu` |
-| `battery` | `format = "{value}%"`, `label = ""`, `absent = "icon"` | icon by level; classes `charging`, `low` (15% or less on battery), `saver`, `absent`; `absent` is `icon`, `text` or `hide` |
-| `volume` | `format = "{value}%"`, `muted_format = ""`, `label = ""`, `step = 2` | the wheel changes the volume by `step` percent per notch, a click toggles mute; `muted_format` (say `"MUTE"`) replaces `format` while muted; classes `muted`, `absent` (no output device). Needs `control = audio` |
-| `network` | `format = ""` (`{ssid}` `{down}` `{up}` `{kind}`), `every = "2s"` | an icon by connection kind and Wi-Fi strength; add a `format` for text; classes `offline`, `no-internet`. Rates are only read when the format uses them. Needs `read = network` |
-| `media` | `format = "{artist} - {title}"` (`{album}` too), `max_width = 280`, `hide = "idle"` | an icon for what the player is doing now and the track; a click plays or pauses, a right click skips; `hide` is `idle` (hidden with no session) or `never`; a paused track still shows. Needs `control = media`, `read = media` |
+| `clock` | `format = "HH:mm"`, `alt_format = "ddd d MMM HH:mm:ss"`, `hover_format = ""`, `timezone = "local"` | a click swaps to `alt_format` (set it to `""` to turn that off); `hover_format` is what the clock shows while the pointer is over it (`"HH:mm:ss"`), and the seconds only tick while it does; ticks on the boundary of the format's finest unit, and at once after sleep or a clock change |
+| `date` | `format = "ddd d MMM"`, `hover_format = ""`, `timezone = "local"`, `popup = false` | `hover_format` is the long form shown while hovered (`"dddd d MMMM, yyyy"`); ticks once an hour. `popup = true` makes a click open a month calendar (the popup named `calendar`: today in the accent colour, the wheel and the arrow buttons change the month) |
+| `cpu` | `format = "{value}%"`, `icon = "cpu"`, `icons = "font"`, `label = ""`, `every = "2s"`, `warn = 80` | class `warn` from `warn` percent up; a non-empty `label` replaces the icon; `icons = "svg"` draws the bundled SVG icon named by `icon` instead of the icon font |
+| `memory` | `format = "{value}%"` (`{value}` `{used}` `{total}`), `icon = "memory"`, `icons = "font"`, `label = ""`, `every = "2s"`, `warn = 85` | as `cpu` |
+| `battery` | `format = "{value}%"` (`{value}` `{time}`), `hover_format = ""`, `unknown = "--:--"`, `icons = "font"`, `label = ""`, `absent = "icon"` | icon by level; classes `charging`, `low` (15% or less on battery), `saver`, `absent`; `absent` is `icon`, `text` or `hide`; `{time}` is the time left as `h:mm`, or `unknown` when Windows reports none (charging, full); `hover_format` replaces `format` while hovered (`"{time}"`); `icons = "svg"` uses the bundled battery icons |
+| `volume` | `format = "{value}%"`, `muted_format = ""`, `label = ""`, `step = 2`, `popup = false` | the wheel changes the volume by `step` percent per notch, a click toggles mute; `popup = true` makes the click open the mixer instead (the popup named `volume`: a master slider, then one slider row per output device, scrolling after six); `muted_format` (say `"MUTE"`) replaces `format` while muted; classes `muted`, `absent` (no output device). Needs `control = audio` |
+| `network` | `format = ""` (`{ssid}` `{down}` `{up}` `{kind}`), `every = "2s"`, `popup = false` | an icon by connection kind and Wi-Fi strength; add a `format` for text; classes `offline`, `no-internet`. Rates are only read when the format uses them. `popup = true` makes a click open the Wi-Fi list (the popup named `network`: networks in range with their signal and a lock mark, a scan button; a click on a saved network connects and on the connected one disconnects). While Windows keeps network names from desktop apps (location is off for them) the list says so and offers a button to Windows' location settings. Needs `read = network`, `read = wifi`, `control = wifi` |
+| `media` | `format = "{artist} - {title}"` (`{album}` too), `max_width = 280`, `hide = "idle"`, `progress = false`, `icon = "glyph"`, `popup = false` | an icon for what the player is doing now and the track; a click plays or pauses (with `popup = true` it opens the player instead, the popup named `media`: cover, title, artist, a seek slider and previous / play-pause / next buttons), a right click skips; `hide` is `idle` (hidden with no session) or `never`; a paused track still shows. `progress = true` draws a line along the bottom, as long as the played part of the track (it moves once a second while playing). `icon = "app"` leads with the player's own icon (the `music` icon when Windows has none) and draws the glyph of the click, pause while playing. Needs `control = media`, `read = media` |
+| `status` | `mic = true`, `bluetooth = true` | a microphone icon, a Bluetooth icon and the battery of the first connected Bluetooth device that reports one. Both icons are buttons: the mic toggles the mute of the default recording device, the Bluetooth icon turns the radio on or off (each from a click only). A muted mic and a radio that is off are drawn dim (class `off`), a mic an app records from has the class `live`. The segment is a narrow sliver until the pointer is over its group. Needs `control = bluetooth`, `control = microphone`, `read = bluetooth` |
+| `tray` | none | an empty segment the width of a sliver that never grows while it holds no icons; RSB has no tray icons yet |
+| `record` | `command` (none) | a round button. With no `command` it opens Windows' own screen recorder; `command = ["obs64", "--startrecording"]` (a list, or a string split by the Windows argument rules) runs that program instead and grants only it. Needs `control = apps` |
+| `dashboard` | `record_command` (none) | the button in the middle of the bar: an accent hexagon with the RSB mark; a click opens or closes the panel (the popup named `dashboard`; the name `launcher` opens the same panel on the apps page with the search focused). The panel has six tiles (power mode, Bluetooth, audio output, apps, record the screen, power menu) and a page for each: the Windows power schemes; paired Bluetooth devices with connect, disconnect and forget; every output as a volume slider (drag along a row to set its level, click it to make it the default output); and the app launcher (type to search, typos forgiven; Up and Down move, Enter starts the app). Escape goes back to the tiles from a page (the tile it came from has the focus) and closes the panel from the tiles and from the apps page. The record tile opens Windows' screen recorder, or runs `record_command` (a list or a string, like the `record` widget's `command`) and grants only that program. Needs `control = power, bluetooth, audio, apps` and `read = bluetooth, apps` |
+| `power` | none | the power menu, a popup named `power` that covers the monitor: power off, restart, sleep and lock as four chevron buttons, Lock focused at the start. List it in a zone of `bar.toml` (it draws nothing there) and open it from the dashboard or with `rsb popup power`. Lock fades to a dark curtain and then asks Windows to lock the PC; RSB never draws a lock screen of its own. If Windows refuses an action the reason shows under the buttons. Needs `control = power, session` and `overlay = true` |
 | `text` | `text = ""`, `exec` (none), `every = "30s"`, `format = "{output}"`, `click` (none), `class = ""` | your own widget from `bar.toml` alone: fixed text, or the first line a command prints |
 
 Examples:
@@ -153,16 +161,25 @@ a typo shows. Time formats are described under `rsb.time.format`.
 
 | Preset | What it is |
 |---|---|
-| `default` | full width, translucent, dark or light with Windows, Segoe UI 13 px, Fluent icons, accent pills for workspaces |
+| `default` | chevron segments hanging from the top edge in three colour steps and an accent, JetBrains Mono 14 px, SVG icons, plain workspace labels, the button in the middle centred on the bar (`center_on`), dark or light with Windows. The window is 36 px tall and draws nothing itself: the segments start 10 px down, so the wallpaper shows above them |
+| `fluent` | full width, translucent, dark or light with Windows, Segoe UI 13 px, Fluent icons, accent pills for workspaces: the first default look, kept under its own name |
 | `astur-classic` | Astur's own bar: height 28, Segoe UI at 14 px, Astur's dark (`#C0CAF5` on `#1A1B26`, accent `#66AAFF`) and light (`#1B1E24` on `#ECEEF2`, accent `#336382`) colours, semibold text, workspaces left, title in the middle, `cpu memory volume battery clock` right, text labels `CPU`, `RAM`, `VOL`, `BAT` instead of icons (`VOL MUTE` while muted), square 34 px workspace pills with no gap and no outline, 16 px between widgets, 8 px at the edges. Differences that remain: the dark palette is the base and the light one follows the Windows theme (Astur's own default is dark unless its theme setting says otherwise); the title is centred on the bar, not in the space left between the zones; Astur's layout indicator has no RSB widget and is left out. Astur's "inactive" colour is below 4.5:1 contrast, so empty workspace labels use a lighter or darker shade |
 | `glass` | floating (margin 8, radius 12), acrylic backdrop with a translucent fallback colour, each zone a pill, no shadow on the bar (the window edge would cut it) |
 
 Every preset keeps text at 4.5:1 contrast or better against what is behind it,
 dark and light, over a black or a white wallpaper.
 
-A preset sets custom properties on `:root` (`--bg`, `--fg`, `--muted`, `--warn`,
-`--error`, `--pill`, `--hover`, `--press`, `--accent`, `--accent-fg`). Change a
-colour in your `style.css` by setting the property there.
+`fluent`, `astur-classic` and `glass` set custom properties on `:root` (`--bg`,
+`--fg`, `--muted`, `--warn`, `--error`, `--pill`, `--hover`, `--press`,
+`--accent`, `--accent-fg`). `default` sets the colours of its three segment steps
+(`--seg0`, `--seg1`, `--seg2`, each with `-hover` and `-press` shades), the
+accent (`--accent`, `--accent-fg`, `--accent-text` for text on a tinted row,
+`--accent-line` for thin marks), the text colours (`--fg`, `--muted`, `--mem`,
+`--dim` for an off state, `--placeholder`), and the colours popups use
+(`--panel`, `--card`, `--input`, `--row`, `--row-selected`, `--row-hover`,
+`--tile-hover`, `--scrollbar-thumb`, the power overlay's fills and dim), each
+once for dark and once for light, and `--d`, the depth of a chevron point
+(13 px). Change a colour in your `style.css` by setting the property there.
 
 ## 4. style.css
 
@@ -180,16 +197,38 @@ with `/` written as `-`; id = the name plus `-instance`, so `clock#utc` is
 ```text
 selector-list := complex ("," complex)*
 complex       := compound ((" " | ">") compound)*
-compound      := ("*" | type | ":root")? ("." class | "#" id | ":hover" | ":active")*
+compound      := ("*" | type | ":root")? ("." class | "#" id | pseudo-class)* pseudo-element?
 type          := bar | zone | widget | box | text | icon | image | plate
+              | popup | menu | menuitem | tooltip | input | slider | scroll
+pseudo-class  := ":hover" | ":active" | ":focus" | ":focus-visible" | ":focus-within"
+              | ":disabled" | ":checked" | ":open" | ":first-child" | ":last-child"
+              | ":nth-child(" (an+b | odd | even) ")"
+pseudo-element := "::placeholder" | "::selection"   (last in the selector, input only)
 ```
 
 `:root` is another name for `bar`. Specificity is (ids, classes plus pseudo
 classes, types); later rules win ties. Not supported, each reported with its
-line and what to use instead: `!important`, `:focus` and other pseudo classes,
-attribute selectors, `+` and `~`, `@keyframes` (animation of keyframes comes in
-a later version), `calc()`, `transform`, `text-shadow`, `inset` shadows, units
-`pt` and `rem`.
+line and what to use instead: `!important`, `:not()` and other pseudo classes,
+attribute selectors, `+` and `~`, `calc()` outside `polygon()`, `rotate()`,
+`skew()` and `matrix()`, `z-index` (later siblings draw on top: reorder the
+elements), `text-shadow`, `inset` shadows, units `pt` and `rem`.
+
+`:first-child`, `:last-child` and `:nth-child()` count only the siblings that
+take part in layout: a widget that draws nothing (no tree, or a root with
+`visible = false`) takes no space and is not counted. That is how a preset gives
+the ends of a group their shape whatever is in it:
+`zone#left > widget:first-child` is the first widget that shows.
+`:open` matches the element a popup is anchored to while the popup is open.
+
+A pseudo-element rule (`input::placeholder`) takes `color`,
+`background-color`, `opacity` and `font-style` only.
+
+`@keyframes name { from { ... } 50% { ... } to { ... } }` defines an
+animation (only animatable properties are read; each block may set
+`animation-timing-function`), and the `animation` property runs it:
+`animation: pulse 1s ease-in-out 3`. Durations are limited to 10 s and counts
+to 1000. A widget can run one from Luau with the `animate` prop
+(`rsb.animate`).
 
 Classes the engine and the widgets provide: `bar.<name>`, `bar.floating`,
 `bar.fullscreen` (a fullscreen app is in front and the bar `stay`s), `widget.stopped`
@@ -307,7 +346,28 @@ the whole chain.
 | `letter-spacing` | `normal \| <length>` | yes | yes |
 | `text-align` | `start \| center \| end \| left \| right` | yes | no |
 | `text-overflow` | `clip \| ellipsis` | no | no |
-| `overflow` | `visible \| hidden` | no | no |
+| `overflow` | `visible \| hidden \| auto \| scroll` (one value, or x then y) | no | no |
+| `overflow-x`, `overflow-y` | `visible \| hidden \| auto \| scroll` | no | no |
+| `corner-shape` | `round \| bevel`, one to four values (a bevel needs a radius) | no | no |
+| `clip-path` | `none \| polygon([nonzero \| evenodd,] <x> <y>, ...)`, each coordinate a length, a percentage or `calc(<percentage> +/- <length>)`; 3 to 64 points | no | yes (same point count) |
+| `transform` | `none \| translate(), translateX(), translateY(), scale(), scaleX(), scaleY()` in a list | no | yes |
+| `transform-origin` | one or two of a length, a percentage, `left`, `center`, `right`, `top`, `bottom` | no | yes |
+| `animation` | `<name> <time> [<easing>] [<time>] [<count> \| infinite] [<direction>] [<fill>] [<state>]`, a list | no | no |
+| `animation-name` | `none \| <ident>#` | no | no |
+| `animation-duration` | `<time>#` | no | no |
+| `animation-timing-function` | `<easing>#` | no | no |
+| `animation-delay` | `<time>#` (negative allowed) | no | no |
+| `animation-iteration-count` | `<number> \| infinite`# | no | no |
+| `animation-direction` | `normal \| reverse \| alternate \| alternate-reverse`# | no | no |
+| `animation-fill-mode` | `none \| forwards \| backwards \| both`# | no | no |
+| `animation-play-state` | `running \| paused`# | no | no |
+| `scrollbar-width` | `auto \| thin \| none` | yes | no |
+| `scrollbar-color` | `auto \| <color> <color>` (thumb, track) | yes | yes |
+| `caret-color` | `auto \| <color>` | yes | yes |
+| `accent-color` | `auto \| <color>` (the filled part of a slider) | yes | yes |
+| `outline` | `<length> \|\| solid \| none \|\| <color>`, drawn outside the border box, following the corners (not for a `clip-path` box) | no | width, colour |
+| `outline-offset` | `<length>` | no | yes |
+| `pointer-events` | `auto \| none` (`none`: the element and what is inside it are skipped by the pointer) | yes | no |
 | `box-shadow` | `none \| [<length>{2,4} <color>]#` | no | yes |
 | `display` | `flex \| none` | no | no |
 | `visibility` | `visible \| hidden` | yes | no |
@@ -316,20 +376,45 @@ the whole chain.
 | `transition-duration` | `<time>#` | no | no |
 | `transition-delay` | `<time>#` | no | no |
 | `transition-timing-function` | `<easing>#` | no | no |
-| `cursor` | `default \| pointer` | yes | no |
+| `cursor` | `default \| pointer \| text` | yes | no |
 | `backdrop` | `none \| acrylic \| mica` | no | no |
 
 `transition` takes `property duration [easing] [delay]`, a list is allowed
-(`transition: background-color 120ms ease-out, color 120ms`). `backdrop` works
+(`transition: background-color 120ms ease-out, color 120ms`). A size can also move to and from `auto`: with `.item { transition: width 200ms ease-out; }` a box that grows to fit new text, or opens a hidden part, slides to its new width instead of jumping. `backdrop` works
 on the bar only; `acrylic` and `mica` need Windows 11 and show the bar's own
 translucent background where Windows draws a flat colour. A box has one border
 colour: two sides with different colours warn and the last one wins. Text that
 does not fit a box with `text-overflow: ellipsis` is cut with `...`.
+A `clip-path` polygon follows its fill rule both where it clips and where a pointer
+hits it: with `evenodd` a polygon that crosses itself leaves its middle out.
 
 Fonts: `font-family` takes quoted or bare names, `sans-serif`, `monospace` and
 `icons` (Segoe Fluent Icons, or Segoe MDL2 Assets on Windows 10). A family that
 is not installed is a warning on the bar and Segoe UI is used instead. A bar's
 box shadow is cut off by its window and warns.
+
+`"JetBrains Mono"` is built in: RSB registers it at start, so a rule can name
+it without installing it. To use a font file of your own, put it in the `fonts\`
+folder of the config folder and name it in `@font-face`:
+
+```css
+@font-face { font-family: "Mine"; src: url("fonts/mine.ttf"); font-weight: 400; }
+bar { font-family: "Mine", monospace; }
+```
+
+`src` takes one `url()`, relative to the config folder and inside `fonts\`
+(`"mine.ttf"` means the same), with an optional `format("truetype")` or
+`format("opentype")`; `font-weight` is a number or a range for a variable font,
+`font-style` is `normal` or `italic`. Files are `.ttf`, `.otf` or `.ttc`, at
+most 16 MiB each and 16 files. A missing file, a file outside `fonts\`, one
+that is too big or not a font is a warning at the rule, never a silent
+fallback. Saving a file under `fonts\` loads it at once.
+
+Icons: `rsb.icon { svg = ... }` draws an SVG icon in the text colour. The
+bundled ones are named in [Icon names](#icon-names); a path to your own `.svg`
+file needs a `file` permission for it (`permissions = { file = { "C:/icons/a.svg" } }`),
+at most 1 MB, and it follows `color` like a bundled one. `rsb.image { src = ... }`
+draws an `.svg` in its own colours.
 
 ## 5. Widgets in Luau
 
@@ -438,12 +523,190 @@ Durations are seconds (`2`, `0.5`) or strings with a unit: `"500ms"`, `"2s"`,
 
 ### Names for later
 
-`rsb.popup`, `rsb.menu`, `rsb.tooltip`, `rsb.animate`, `rsb.settings`, `rsb.tray`,
-`rsb.slider`, `rsb.input`, `rsb.graph`, `rsb.open` and `rsb.ipc` are reserved and
-raise `rsb.popup is not available in this version`; so do the element props
-`tooltip`, `popup`, `menu`, `animate`, `on_scroll`, `on_key` and `draggable`. A
-few names people try raise a pointer: `rsb.sleep does not exist; use
-rsb.task.sleep`. Any other misspelling gets a did-you-mean.
+`rsb.settings`, `rsb.tray`, `rsb.graph`, `rsb.open` and `rsb.ipc` are reserved
+and raise `rsb.settings is not available in this version`, as does the element
+prop `draggable`. A few names people try raise a pointer: `rsb.sleep does not
+exist; use rsb.task.sleep`. Any other misspelling gets a did-you-mean.
+
+### Popups, menus, inputs and focus
+
+`rsb.popup { open = shown, ... }` as a child of an element opens a popup next to
+it; its content is built only while it is open, and everything it started
+(timers, service reads, tasks) is released when it closes. `open` is a
+`rsb.state(false)` the runtime also writes `false` to when the user closes the
+popup. `name = "launcher"` (or a list) lets `rsb popup launcher` and
+`rsb.popups.toggle("launcher")` reach it; the names `dashboard`, `launcher`,
+`power`, `calendar`, `media`, `volume` and `network` belong to the built-in
+widgets (a copy made with `rsb eject` keeps the names of its own widget). `placement` is `auto`, `below`, `above`, `left`, `right` or `screen`
+(a popup that covers the monitor; the widget needs `overlay = true` in its
+permissions and it only opens from a click or a key). `rsb.menu`, the `menu`
+prop (a right-click menu), the `tooltip` prop, `rsb.input` (one line of editable
+text with `value`, `placeholder`, `on_change`, `on_submit`), `rsb.slider`
+(`value`, `min`, `max`, `step`, `on_change`) and `rsb.scroll` (a column that
+scrolls; give it a `height` or `max-height`) are the other parts. Keys reach
+`on_key`; `focusable`, `autofocus`, `nav`, `disabled`, `checked` and `reveal`
+control focus and selection. `rsb.fuzzy(query, items, { key = ..., limit = 50 })`
+ranks items best first and forgives typos; `rsb.fuzzy_match(query, text)` gives
+the character positions to highlight. A click, a key press or `rsb popup` is a
+*gesture*: commands that change the system (`power:sleep()`,
+`bluetooth:set_enabled()`, `apps:launch()`, and the others listed under
+permissions) only work inside one, so a timer can never power the PC off.
+
+### Writing a popup
+
+A popup is a child of the element it hangs from. This one opens under a bar
+button and closes with Escape or a click outside it:
+
+```lua
+local rsb = require("@rsb")
+
+return rsb.widget {
+	setup = function(props, ctx)
+		local shown = rsb.state(false)
+		return rsb.row {
+			class = "item hello button",
+			rsb.text { text = "Hello" },
+			on_click = function()
+				shown.value = not shown.value
+			end,
+			rsb.popup {
+				open = shown,
+				name = "hello",
+				class = "panel",
+				placement = "below",
+				align = "center",
+				function(): { any }
+					return { rsb.text { class = "note", text = "Hi there" } }
+				end,
+			},
+		}
+	end,
+}
+```
+
+- **Open state.** `open` is a `rsb.state(false)`. The runtime writes `false`
+  into it when the user closes the popup, so the button needs no extra code.
+  The function child runs when the popup opens and again when what it reads
+  changes; timers, service reads and tasks started inside it end with the popup.
+- **Names.** `name = "hello"` (or `{ "hello", "other" }`) lets `rsb popup hello`
+  and `rsb.popups.toggle("hello")` open it. `on_open = function(name) ... end`
+  says which name opened it, as the dashboard uses to land on the apps page for
+  `launcher`.
+- **Where it goes.** `placement` is `below` (under the anchor; `align = "center"`
+  centres it), `above`, `left`, `right`, `auto` (the side with room) or `screen`
+  (covers the monitor: an overlay; the widget needs `overlay = true` in its
+  permissions and it opens only from a click or a key). `attach = true` joins
+  the popup to the bar's lower edge at the anchor's width, as the dashboard
+  does under the centre button. A popup is moved to stay on its monitor. The
+  popup of a widget without `overlay = true` is at most 900 px each way (at 100 %
+  scale), 60 % of the work area wide and 90 % tall, so it can never pass for a
+  full-screen prompt; the built-in panels are not limited this way.
+- **Looks.** The class `panel` gives the dark panel with a square top and a
+  round bottom; inside it use `card`, `row`, `note`, `icon-btn` and `search`.
+  They take their colours from the preset and follow dark and light. `:open`
+  matches the anchor while its popup is open.
+- **Focus and keys.** A popup takes the keyboard only when a click, a key press
+  or `rsb popup` opened it and its content holds something to focus (an input,
+  a slider, a menu item or an element with `focusable = true`); `focus = "none"`
+  or `"always"` overrides that. `autofocus = true` picks the element that gets
+  it first. Tab walks the focusable elements; `nav = "vertical"`,
+  `"horizontal"` or `"grid"` makes the arrow keys move among the focusable
+  children of an element. Keys nothing used reach `on_key = function(e) ... end`
+  on the popup (`e.key` is `"Enter"`, `"Escape"`, `"ArrowDown"`, `"a"`, ...).
+  `dismiss = { escape = false }` keeps Escape for your own `on_key`. A popup
+  that opens on its own (a timer, a service update: no click or key) can always
+  be dismissed, whatever `dismiss` says, and when the user closes it it stays
+  closed for ten seconds unless a click or a key opens it. Alt+F4 on a focused
+  popup closes it like Escape does.
+
+A line to type into, a list that scrolls and a row to click:
+
+```lua
+local rsb = require("@rsb")
+
+return rsb.widget {
+	setup = function(props, ctx)
+		local shown = rsb.state(false)
+		local query = rsb.state("")
+		local names = { "Alder", "Birch", "Cedar", "Maple", "Oak", "Willow" }
+		local found = rsb.computed(function(): { string }
+			if query.value == "" then
+				return names
+			end
+			return rsb.fuzzy(query.value, names)
+		end)
+		local rows = rsb.each(found, function(name: string): any
+			return rsb.row {
+				class = "row",
+				focusable = true,
+				tooltip = "Pick " .. name,
+				rsb.text { text = name },
+				on_click = function()
+					shown.value = false
+				end,
+			}
+		end)
+		return rsb.row {
+			class = "item picker button",
+			rsb.text { text = "Pick" },
+			on_click = function()
+				shown.value = not shown.value
+			end,
+			rsb.popup {
+				open = shown,
+				class = "panel",
+				placement = "below",
+				function(): { any }
+					return {
+						rsb.input { class = "search", value = query, placeholder = "Search", autofocus = true },
+						rsb.scroll { class = "card list", style = { max_height = 200 }, rows },
+					}
+				end,
+			},
+		}
+	end,
+}
+```
+
+- **Input.** `rsb.input { value = state, placeholder, max_length, on_change,
+  on_submit }` is one line of editable text. With a state as `value` the box
+  and the state stay equal both ways; setting the state fills or clears the
+  box. `on_submit(text)` runs on Enter. Home, End, Ctrl+A and Ctrl+Backspace
+  work as in any text box; the caret shows only while the input has the focus.
+- **Slider.** `rsb.slider { value = state, min, max, step, on_change }`. The
+  callback gets the new value and `done` (true on the last report of a drag).
+  A focused slider takes the arrow keys, Page Up and Down, Home and End, and
+  shows a ring. It is at least 80 px wide, so give it a `width` of your own for
+  more; its track is the `--row` colour and its fill the accent line colour (set
+  `accent-color`, `background` and `border-radius` to change them). A press on
+  the track moves the value there at once; `jump = false` makes a press only
+  start a gesture instead: the value follows the pointer once it has moved more
+  than 4 px, and a press and release without that is a click (`on_click` runs and
+  the value stays). The audio rows use it, so a click on a row picks the output
+  and a drag sets its level.
+- **Scroll.** `rsb.scroll` is a column that scrolls when its content is taller
+  than its `height` or `max_height`. The wheel, the scrollbar and the keys move
+  it, focus moving into it scrolls the focused element into view, and
+  `reveal = value` scrolls an element into view whenever `value` changes.
+- **Menus and tooltips.** `menu = { { label = "Reload", on_click = reload },
+  { separator = true } }` on any element opens a menu at a right click;
+  `rsb.menu { open = state, items = { ... } }` as a child opens one from code.
+  `tooltip = "text"` (or an element) shows when the pointer rests on the
+  element.
+- **Gestures.** A click or a key press is a *gesture*. Commands that change the
+  system (`apps:launch`, `power:sleep`, `bluetooth:connect`, `wifi:connect`,
+  `audio:set_default` and the others under permissions) raise "only works
+  inside a click or key handler" anywhere else, so a timer or a service
+  callback can never do them. The popup of your own widget opens from
+  anywhere; an overlay, and a popup that belongs to another widget, need one.
+- **From the command line.** `rsb popup <name>` opens a popup by name on the
+  monitor under the pointer (`rsb popup <name> close` closes it). It counts as
+  a gesture, so a keyboard shortcut in your window manager can run
+  `rsb popup launcher`.
+
+The built-in popups follow the same rules and can be copied with `rsb eject`:
+`dashboard` (also called `launcher`), `power`, `calendar`, `media`, `volume`
+and `network`. `docs\examples\todo.luau` is a small complete popup widget.
 
 ## 6. API reference
 
@@ -528,6 +791,130 @@ A PNG image (needs file permission outside the widget folder)
 
 ```lua
 rsb.image { src = "logo.png", width = 16 }
+```
+
+#### `rsb.popup`
+
+`(props: PopupProps) -> Element`
+
+A popup anchored to the element it is a child of; its content is built only while it is open
+
+```lua
+rsb.popup { open = shown, function() return rsb.text "hi" end }
+```
+
+#### `rsb.menu`
+
+`(props: MenuProps) -> Element`
+
+A menu (as a child: anchored; the menu prop of any element opens one at a right click)
+
+```lua
+rsb.menu { open = m, items = { { label = "Reload", on_click = reload } } }
+```
+
+Choosing an item runs its `on_click` and closes the whole menu chain. A
+menu's `on_close` hears `"picked"` once for a pick in the menu or in any
+submenu below it, so a submenu needs no `on_close` of its own.
+
+#### `rsb.input`
+
+`(props: InputProps) -> Element`
+
+One line of editable text
+
+```lua
+rsb.input { value = query, placeholder = "Search", autofocus = true }
+```
+
+#### `rsb.slider`
+
+`(props: SliderProps) -> Element`
+
+A value on a track
+
+```lua
+rsb.slider { value = vol, on_change = function(v) audio:set_device_volume(id, v) end }
+```
+
+#### `rsb.scroll`
+
+`(props: BoxProps) -> Element`
+
+A column that scrolls
+
+```lua
+rsb.scroll { class = "list", rsb.each(items, row) }
+```
+
+#### `rsb.popups.open`
+
+`(name: string) -> ()`
+
+Opens the named popup on this widget's monitor (from a user widget only inside a click or key handler, unless it is the widget's own popup)
+
+```lua
+on_click = function() rsb.popups.open("launcher") end
+```
+
+#### `rsb.popups.close`
+
+`(name: string) -> ()`
+
+Closes the named popup on this widget's monitor
+
+```lua
+rsb.popups.close("launcher")
+```
+
+#### `rsb.popups.toggle`
+
+`(name: string) -> ()`
+
+Opens the named popup, or closes it when it is open
+
+```lua
+on_click = function() rsb.popups.toggle("launcher") end
+```
+
+#### `rsb.popups.is_open`
+
+`(name: string) -> boolean`
+
+Whether the named popup is open on this widget's monitor; read inside a function prop it updates
+
+```lua
+class = function() return rsb.popups.is_open("power") and "on" or "" end
+```
+
+#### `rsb.animate`
+
+`(name: string, options: AnimateOptions?) -> Animate`
+
+An animate prop value: runs @keyframes name, again from the start when options.restart changes
+
+```lua
+animate = function() return rsb.animate("flash", { duration = "300ms", restart = count.value }) end
+```
+
+#### `rsb.fuzzy`
+
+`<T>(query: string, items: { T }, options: { key: ((T) -> string)?, limit: number? }?) -> { T }`
+
+The items that match query, best first, typo tolerant
+
+```lua
+rsb.fuzzy(q.value, apps.apps, { key = function(a) return a.name end, limit = 50 })
+```
+
+#### `rsb.fuzzy_match`
+
+`(query: string, text: string) -> { number }?`
+
+The 1-based character positions of text that matched query, for highlighting; nil when it does not match
+
+```lua
+local hit = rsb.fuzzy_match(q.value, app.name)
 ```
 
 #### `rsb.each`
@@ -768,6 +1155,56 @@ Window manager workspaces
 
 ```lua
 rsb.services.workspaces:focus("2")
+```
+
+#### `rsb.services.microphone`
+
+`MicrophoneService`
+
+The default recording device, and whether any app is using a microphone
+
+```lua
+rsb.services.microphone:toggle_mute()
+```
+
+#### `rsb.services.bluetooth`
+
+`BluetoothService`
+
+The Bluetooth radio and paired devices
+
+```lua
+rsb.services.bluetooth:set_enabled(false)
+```
+
+#### `rsb.services.apps`
+
+`AppsService`
+
+Apps in the Start menu, for a launcher
+
+```lua
+rsb.services.apps:open_uri("ms-settings:bluetooth")
+```
+
+#### `rsb.services.power`
+
+`PowerService`
+
+Power mode and the lock, sleep, restart, shut down and sign out actions
+
+```lua
+rsb.services.power:lock()
+```
+
+#### `rsb.services.wifi`
+
+`WifiService`
+
+Wi-Fi networks in range
+
+```lua
+rsb.services.wifi:scan()
 ```
 
 #### `rsb.exec.run`
@@ -1023,10 +1460,16 @@ Default output device volume
 - `available` (boolean?): an output device exists
 - `volume` (number?): 0-100
 - `muted` (boolean?): muted
+- `devices` ({AudioDevice}?): output devices, the default first; each has `id` (Windows' endpoint id), `name` (never logged), `kind`, `default`, `volume` (0-100), `muted` and `bluetooth`
+- `inputs` ({AudioDevice}?): input (recording) devices, the default first
+- `switch_available` (boolean?): `set_default` works here (it uses an interface Windows does not document)
 - `:set_volume(percent: number)`: set the volume, 0-100
 - `:change_volume(delta: number)`: add delta (may be negative) to the volume
 - `:set_muted(muted: boolean)`: mute or unmute
 - `:toggle_mute()`: flip mute
+- `:set_default(id: string)`: make this output the default
+- `:set_device_volume(id: string, percent: number)`: set one device's volume, 0-100
+- `:set_device_muted(id: string, muted: boolean)`: mute or unmute one device
 
 #### `rsb.services.network`
 
@@ -1054,11 +1497,18 @@ The current media session (Windows media controls)
 - `can_play_pause` (boolean?): play/pause is allowed
 - `can_next` (boolean?): next is allowed
 - `can_previous` (boolean?): previous is allowed
+- `position` (number?): seconds into the track when `position_at` was read
+- `position_at` (number?): when `position` was read, ms since 1970 (add the time since while a track plays)
+- `length` (number?): track length in seconds
+- `can_seek` (boolean?): seek is allowed
+- `art` (string?): image key of the cover for `rsb.image { src = media.art }` (kept in memory only)
+- `app_icon` (string?): image key of the player app's own icon, when Windows has one for it
 - `:play_pause()`: toggle play and pause
 - `:play()`: play
 - `:pause()`: pause
 - `:next()`: next track
 - `:previous()`: previous track
+- `:seek(seconds: number)`: jump to this position in the track
 
 #### `rsb.services.window`
 
@@ -1079,12 +1529,80 @@ Workspaces from a running window manager (GlazeWM-compatible WebSocket, e.g. Ast
 - `:focus_next(monitor: number?)`: next workspace on a monitor (default: the focused one)
 - `:focus_previous(monitor: number?)`: previous workspace on a monitor
 
+#### `rsb.services.microphone`
+
+The default recording device, and whether any app is using a microphone
+
+- `available` (boolean?): a recording device exists
+- `muted` (boolean?): the default recording device is muted
+- `volume` (number?): its level, 0-100
+- `in_use` (boolean?): an app is recording from a microphone now
+- `:set_muted(muted: boolean)`: mute or unmute the default recording device
+- `:toggle_mute()`: flip its mute
+
+#### `rsb.services.bluetooth`
+
+The Bluetooth radio and paired devices. Device names are private: reading needs `read = { "bluetooth" }`
+
+- `available` (boolean?): this PC has a Bluetooth radio
+- `enabled` (boolean?): the radio is on
+- `can_toggle` (boolean?): RSB may turn the radio on and off
+- `devices` ({BluetoothDevice}?): paired devices, connected first (`id`, `name`, `kind`, `connected`, `battery`, `can_connect`)
+- `:set_enabled(on: boolean)`: turn the radio on or off
+- `:connect(id: string)`, `:disconnect(id: string)`: a paired audio device
+- `:forget(id: string)`: remove a pairing
+- `:open_settings()`: open Windows' Bluetooth page
+- `:rescan()`: read the paired devices and their state again
+
+#### `rsb.services.apps`
+
+The Start menu apps, for a launcher. Reading the list needs `read = { "apps" }`
+
+- `ready` (boolean?): the list has been read
+- `apps` ({App}?): every app, sorted by name (`id`, `name`, `icon`)
+- `:launch(id: string)`: start an app from the list
+- `:open_uri(uri: string)`: open a Windows page: `ms-settings:` or `ms-screenclip:` addresses only
+
+#### `rsb.services.power`
+
+- `mode` (PowerMode?): "efficiency", "balanced", "performance" or "unknown"
+- `mode_available` (boolean?): `set_mode` works here
+- `can_sleep` (boolean?): this PC can sleep
+- `:set_mode(mode: PowerMode)`, `:lock()`, `:sleep()`, `:restart()`, `:shut_down()`, `:sign_out()`
+
+A failed action shows as the service's error, not as an error of the call.
+
+#### `rsb.services.wifi`
+
+Wi-Fi networks in range. Network names reveal where the PC is: reading needs `read = { "wifi" }`
+
+- `available` (boolean?): this PC has a Wi-Fi adapter
+- `scanning` (boolean?): a scan is running
+- `networks` ({WifiNetwork}?): networks in range, strongest first
+- `access` (WifiAccess?): "needs_location" when Windows keeps network lists from desktop apps until location is on for them
+- `:scan()`, `:connect(ssid: string)` (a network with a saved profile), `:disconnect()`
+
 ### Icon names
 
 `rsb.icon "<name>"` takes one of these (drawn in Segoe Fluent Icons or Segoe
 MDL2 Assets), or `rsb.icon { glyph = "..." }` for any text in the icon font:
 
 `volume_mute`, `volume_0`, `volume_1`, `volume_2`, `volume_3`, `wifi_0`, `wifi_1`, `wifi_2`, `wifi_3`, `wifi_4`, `wifi_off`, `ethernet`, `network_off`, `battery_0`, `battery_1`, `battery_2`, `battery_3`, `battery_4`, `battery_5`, `battery_6`, `battery_7`, `battery_8`, `battery_9`, `battery_10`, `battery_charging`, `battery_saver`, `battery_none`, `cpu`, `memory`, `clock`, `calendar`, `play`, `pause`, `next`, `previous`, `music`, `window`, `desktop`, `cloud`, `sun`, `moon`, `rain`, `snow`, `settings`, `power`, `search`, `bell`, `globe`, `download`, `upload`, `warning`, `error`, `info`
+
+### SVG icons
+
+`rsb.icon { svg = "<name>" }` draws one of the bundled SVG icons in the text
+colour at the size of `font-size`: `logo`, `power`, `restart`, `sleep`, `lock`,
+`sign-out`, `bolt`, `leaf`, `balance`, `rocket`, `bluetooth`, `bluetooth-off`,
+`bluetooth-connected`, `speaker`, `volume`, `volume-low`, `volume-mute`,
+`headphones`, `mic`, `mic-off`, `apps`, `search`, `refresh`, `trash`, `shield`,
+`check`, `close`, `video`, `record`, `battery-0`, `battery-1`, `battery-2`,
+`battery-3`, `battery-4`, `battery-charging`, `plug`, `memory`, `cpu`, `wifi-0`,
+`wifi-1`, `wifi-2`, `wifi-3`, `wifi-off`, `ethernet`, `play`, `pause`, `next`,
+`previous`, `chevron-left`, `chevron-right`, `chevron-up`, `chevron-down`,
+`calendar`, `music`. A path to your own `.svg` file works too (it needs a `file`
+permission). The icons are from Tabler Icons (MIT), apart from `logo`; their
+licence is in `assets\icons\LICENSE`.
 
 ### Time format
 
@@ -1158,10 +1676,22 @@ permissions = {
   link is another name for the same file and is not caught). Relative paths (and
   `cwd`, `image.src`) are relative to the widget's own folder; a path that starts
   with `/` or `\` is refused.
-- **control**: `audio`, `media`, `workspaces` (the commands of those services).
+- **control**: `audio`, `media`, `workspaces`, `microphone`, `bluetooth`, `apps`,
+  `power`, `wifi` (the commands of those services) and `session` (restart, shut
+  down and sign out, apart from `power`, which locks, sleeps and changes the
+  power mode, so a lock button never also holds shutdown). Restart, shut down,
+  sign out, sleep, Bluetooth `set_enabled`, `connect`, `disconnect`, `forget`,
+  `open_settings` and `rescan`, audio `set_default`, apps `launch` and `open_uri` and Wi-Fi
+  `connect` and `disconnect` only work inside a click or key handler.
 - **read**: `window`, `media`, `network` (values that name what you are doing).
   Widget files in your config folder get these three without asking; packages
-  would have to.
+  would have to. `bluetooth` (device names), `apps` (every installed app) and
+  `wifi` (network names) must be declared; the grant line in the log shows them.
+- **overlay**: `overlay = true` lets a popup with `placement = "screen"` cover
+  the whole monitor.
+- **popups**: `popups = { "name" }` lets the widget open or close another
+  widget's popup by name (`rsb.popups.toggle("name")`); the built-in popups and
+  a widget's own need nothing.
 - `rsb.open_url(url)` needs `https` and `net` permission for the host. It works
   only while a click is being handled (not from `setup`, a timer or a task that
   waited), opens at most one address every 2 seconds, and refuses an address
@@ -1252,6 +1782,7 @@ rsb                       run the bar (or say it is already running)
 rsb reload                re-read every config, style and widget file
 rsb quit                  stop the bar and restore the work area
 rsb toggle [bar]          hide or show every bar, or one by name
+rsb popup <name> [open|close|toggle]  open a popup by name on the monitor under the pointer (counts as a click)
 rsb status [--json]       widgets (state, calls, errors, memory), services, bars, memory as a table; --json is one line for scripts
 rsb trigger <event> [json]  send an event to rsb.events.on(<event>)
 rsb eject <widget>        copy a built-in widget into widgets\ to change it

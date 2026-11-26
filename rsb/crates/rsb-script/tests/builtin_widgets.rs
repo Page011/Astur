@@ -178,6 +178,36 @@ fn media(available: bool, playing: bool, artist: &str, title: &str) -> Value {
         ("can_play_pause", b(available)),
         ("can_next", b(available)),
         ("can_previous", b(available)),
+        ("length", num(240.0)),
+        ("position", num(60.0)),
+        ("position_at", Value::Int(start_time().to_epoch_ms())),
+    ])
+}
+
+fn microphone(available: bool, muted: bool, in_use: bool) -> Value {
+    map(&[("available", b(available)), ("muted", b(muted)), ("volume", num(70.0)), ("in_use", b(in_use))])
+}
+
+fn bt_device(connected: bool, battery: Option<f64>) -> Value {
+    let mut pairs = vec![
+        ("id", s("dev-1")),
+        ("name", s("Made-up headset")),
+        ("kind", s("audio")),
+        ("connected", b(connected)),
+        ("can_connect", b(true)),
+    ];
+    if let Some(p) = battery {
+        pairs.push(("battery", num(p)));
+    }
+    map(&pairs)
+}
+
+fn bluetooth(available: bool, enabled: bool, devices: Vec<Value>) -> Value {
+    map(&[
+        ("available", b(available)),
+        ("enabled", b(enabled)),
+        ("can_toggle", b(available)),
+        ("devices", Value::List(devices)),
     ])
 }
 
@@ -265,6 +295,8 @@ impl Scenario {
                 ok(ServiceId::Media, media(true, true, "Aurora Quartet", "Slow Harbour")),
                 ok(ServiceId::Window, window(true, "Quarterly plan - Notes", "Notes.exe")),
                 ok(ServiceId::Workspaces, workspaces_value()),
+                ok(ServiceId::Microphone, microphone(true, false, false)),
+                ok(ServiceId::Bluetooth, bluetooth(true, true, vec![bt_device(true, Some(27.0))])),
             ],
             Scenario::Alert => vec![
                 ok(ServiceId::System, system(95.0, 92.0)),
@@ -277,6 +309,8 @@ impl Scenario {
                     window(true, "A very long window title that has to be cut with an ellipsis somewhere", "Code.exe"),
                 ),
                 ok(ServiceId::Workspaces, workspaces_value()),
+                ok(ServiceId::Microphone, microphone(true, true, true)),
+                ok(ServiceId::Bluetooth, bluetooth(true, false, vec![bt_device(true, Some(27.0))])),
             ],
             Scenario::Stale => vec![
                 ok(ServiceId::System, system(23.4, 41.0)),
@@ -293,6 +327,10 @@ impl Scenario {
                 stale(ServiceId::Media),
                 stale(ServiceId::Window),
                 stale(ServiceId::Workspaces),
+                ok(ServiceId::Microphone, microphone(true, false, false)),
+                ok(ServiceId::Bluetooth, bluetooth(true, true, vec![bt_device(true, Some(27.0))])),
+                stale(ServiceId::Microphone),
+                stale(ServiceId::Bluetooth),
             ],
             Scenario::Empty => vec![
                 ok(ServiceId::System, system(0.0, 0.0)),
@@ -302,6 +340,8 @@ impl Scenario {
                 ok(ServiceId::Media, media(false, false, "", "")),
                 ok(ServiceId::Window, window(false, "", "")),
                 ok(ServiceId::Workspaces, no_workspaces()),
+                ok(ServiceId::Microphone, microphone(false, false, false)),
+                ok(ServiceId::Bluetooth, bluetooth(false, false, vec![])),
             ],
         }
     }
@@ -329,10 +369,11 @@ fn show(e: &Element) -> String {
         ElementKind::Icon => match &e.icon {
             Some(IconRef::Named(n)) => out.push_str(&format!(":{n}")),
             Some(IconRef::Glyph(g)) => out.push_str(&format!(":glyph({g})")),
+            Some(IconRef::Svg(s)) => out.push_str(&format!(":svg({s})")),
             None => out.push_str(":none"),
         },
         _ => {
-            let kids: Vec<String> = e.children.iter().map(show).collect();
+            let kids: Vec<String> = e.children.iter().filter(|c| c.kind != ElementKind::Tooltip).map(show).collect();
             out.push('(');
             out.push_str(&kids.join(" "));
             out.push(')');
@@ -390,6 +431,7 @@ fn wheel(h: &mut Harness, id: u32, delta: f32) {
         kind: InputKind::Wheel(delta),
         x: 1.0,
         y: 1.0,
+        gesture: 0,
     }));
 }
 
@@ -402,6 +444,7 @@ fn right_click(h: &mut Harness, id: u32) {
         kind: InputKind::Click(Button::Right),
         x: 1.0,
         y: 1.0,
+        gesture: 0,
     }));
 }
 
@@ -1021,8 +1064,24 @@ fn text_without_a_user_set_command_is_denied_any_program() {
 
 // ---------------------------------------------------------------- permissions, errors, hygiene
 
-const BUILTINS: [&str; 11] =
-    ["workspaces", "title", "clock", "date", "cpu", "memory", "battery", "volume", "network", "media", "text"];
+const BUILTINS: [&str; 16] = [
+    "workspaces",
+    "title",
+    "clock",
+    "date",
+    "cpu",
+    "memory",
+    "battery",
+    "volume",
+    "network",
+    "media",
+    "text",
+    "status",
+    "tray",
+    "record",
+    "dashboard",
+    "power",
+];
 
 #[test]
 fn every_builtin_declares_exactly_the_permissions_it_uses() {
@@ -1034,11 +1093,44 @@ fn every_builtin_declares_exactly_the_permissions_it_uses() {
         ("cpu", "nothing"),
         ("memory", "nothing"),
         ("battery", "nothing"),
-        ("volume", "control:audio"),
-        ("network", "read:network"),
+        ("volume", "control:audio (can change volume, mute and the default output device)"),
+        (
+            "network",
+            concat!(
+                "control:wifi, control:apps (can start any app in the Start menu), read:network, ",
+                "read:wifi (network names reveal where this PC is)"
+            ),
+        ),
         ("media", "control:media, read:media"),
         // `text` asks for the programs the user names in bar.toml and nothing else
         ("text", "nothing"),
+        (
+            "status",
+            concat!(
+                "control:bluetooth (can turn Bluetooth off and remove pairings), control:microphone, ",
+                "read:bluetooth (names of paired devices)"
+            ),
+        ),
+        ("tray", "nothing"),
+        // `record` runs a program only when bar.toml names one
+        ("record", "control:apps (can start any app in the Start menu)"),
+        (
+            "dashboard",
+            concat!(
+                "control:power (can lock or sleep this PC and change its power mode), ",
+                "control:bluetooth (can turn Bluetooth off and remove pairings), ",
+                "control:audio (can change volume, mute and the default output device), ",
+                "control:apps (can start any app in the Start menu), ",
+                "read:bluetooth (names of paired devices), read:apps (every installed app)"
+            ),
+        ),
+        (
+            "power",
+            concat!(
+                "control:power (can lock or sleep this PC and change its power mode), ",
+                "control:session (can restart, shut down or sign out this PC), overlay (can cover the whole screen)"
+            ),
+        ),
     ];
     assert_eq!(want.len(), BUILTINS.len());
     for (name, grant) in want {
@@ -1247,7 +1339,7 @@ fn the_luau_command_splitter_agrees_with_the_one_that_grants_the_program() {
 
 // ---------------------------------------------------------------- presets and templates
 
-const PRESETS: [&str; 3] = ["default", "astur-classic", "glass"];
+const PRESETS: [&str; 4] = ["default", "fluent", "astur-classic", "glass"];
 
 fn asset_text(rel: &str) -> String {
     std::fs::read_to_string(assets().join(rel)).unwrap_or_else(|e| panic!("{rel}: {e}"))
@@ -1306,7 +1398,7 @@ fn presets_templates_and_base_parse_with_no_diagnostics() {
     };
     assert_eq!(
         plain(load.config.unwrap().bars),
-        plain(config::default_config().bars),
+        plain(load_preset("default").bars),
         "the template changes nothing until a line is uncommented"
     );
     let (sheet, diags) = Stylesheet::parse(&asset_text("config/style.css"), "style.css");
@@ -1337,8 +1429,8 @@ fn presets_templates_and_base_parse_with_no_diagnostics() {
 
 #[test]
 fn preset_zones_and_bars_follow_the_design() {
-    let default = load_preset("default");
-    let bar = &default.bars[0];
+    let fluent = load_preset("fluent");
+    let bar = &fluent.bars[0];
     let names = |items: &[config::ZoneItem]| items.iter().map(|i| i.widget.to_string()).collect::<Vec<_>>();
     assert_eq!(names(&bar.left), ["workspaces", "title"]);
     assert_eq!(names(&bar.center), ["clock"]);
@@ -1468,6 +1560,19 @@ struct Drawn {
 
 /// Runs a rig through a scene: stylesheet, slots, trees, plates, one frame.
 fn draw(rig: &Rig, sheet: &Arc<Stylesheet>, dark: bool, renderer: &mut Renderer, width: u32, scale: f32) -> Drawn {
+    draw_with(rig, sheet, dark, renderer, width, scale, &|_, _| {})
+}
+
+/// `draw`, with a hook that runs after the trees are in and before the first frame.
+fn draw_with(
+    rig: &Rig,
+    sheet: &Arc<Stylesheet>,
+    dark: bool,
+    renderer: &mut Renderer,
+    width: u32,
+    scale: f32,
+    prep: &dyn Fn(&mut Scene, &mut Renderer),
+) -> Drawn {
     let bar = &rig.bar;
     let pad = if bar.floating { 2 * bar.margin } else { 0 };
     let height = ((bar.height + pad) as f32 * scale).round() as u32;
@@ -1483,24 +1588,47 @@ fn draw(rig: &Rig, sheet: &Arc<Stylesheet>, dark: bool, renderer: &mut Renderer,
             scene.set_widget_plate(*id, Some(p.clone()));
         }
     }
+    prep(&mut scene, renderer);
     let out = scene.frame(Instant::now(), renderer);
+    ensure_icons(renderer, &out.draw);
     Drawn { draw: out.draw, scene }
 }
 
+/// A renderer with the bundled font, the way the binary starts one.
 fn renderer() -> Renderer {
-    Renderer::new(FontConfig::default())
+    let mut r = Renderer::new(FontConfig::default());
+    let font = std::fs::read(assets().join("fonts").join("JetBrainsMono-wght.ttf")).expect("the bundled font");
+    r.register_font(Arc::from(font), None).expect("the bundled font registers");
+    r
 }
 
-/// Text contrast of one draw list: every text item (icons included) against
-/// the fills drawn under it, with translucent fills composited over black and
-/// over white; the worse of the two counts. Restricted to items inside `within`.
-fn contrast_of(draw: &DrawList, within: Option<RectF>) -> Vec<(String, f32)> {
+/// Parses every bundled icon the draw list asks for, once.
+fn ensure_icons(renderer: &mut Renderer, list: &DrawList) {
+    for item in &list.items {
+        let DrawCmd::Svg { key, .. } = &item.cmd else { continue };
+        if rsb_core::icons::is_svg_icon_name(key) && !renderer.has_svg(key) {
+            let bytes = std::fs::read(assets().join("icons").join(format!("{key}.svg"))).expect("a bundled icon");
+            renderer.set_svg(Arc::clone(key), &bytes).expect("the bundled icon parses");
+        }
+    }
+}
+
+/// Contrast of one draw list: every text item against the fills drawn under
+/// it (needs 4.5:1) and every icon drawn from the SVG set (needs 3:1), with
+/// translucent fills composited over black and over white; the worse of the
+/// two counts. Items in a group that is fully transparent are not on screen
+/// and are skipped; a group half way is refused (the caller settles first).
+/// Restricted to items inside `within`. Returns (what, ratio, needed ratio).
+fn contrast_of(draw: &DrawList, within: Option<RectF>) -> Vec<(String, f32, f32)> {
     let mut out = Vec::new();
     for (i, item) in draw.items.iter().enumerate() {
-        let DrawCmd::Text { rect, text, color, .. } = &item.cmd else { continue };
-        if text.trim().is_empty() {
-            continue;
-        }
+        let (rect, label, color, need) = match &item.cmd {
+            DrawCmd::Text { rect, text, color, .. } if !text.trim().is_empty() => {
+                (*rect, text.to_string(), *color, 4.5)
+            }
+            DrawCmd::Svg { rect, key, tint: Some(color) } => (*rect, format!("icon {key}"), *color, 3.0),
+            _ => continue,
+        };
         if let Some(w) = within
             && !(rect.x >= w.x - 0.5
                 && rect.right() <= w.right() + 0.5
@@ -1509,23 +1637,43 @@ fn contrast_of(draw: &DrawList, within: Option<RectF>) -> Vec<(String, f32)> {
         {
             continue;
         }
+        let mut open = Vec::new();
+        for prev in &draw.items[..=i] {
+            match &prev.cmd {
+                DrawCmd::PushOpacity(a) => open.push(*a),
+                DrawCmd::PopOpacity => {
+                    open.pop();
+                }
+                _ => {}
+            }
+        }
+        if open.iter().any(|a| *a <= 0.001) {
+            continue;
+        }
+        assert!(open.iter().all(|a| *a >= 0.999), "{label}: group opacity half way, contrast is not measured");
         let centre = PointF { x: rect.x + rect.w / 2.0, y: rect.y + rect.h / 2.0 };
         let mut worst = f32::MAX;
         for base in [Color::BLACK, Color::WHITE] {
             let mut bg = base;
             for prev in &draw.items[..i] {
-                match &prev.cmd {
-                    DrawCmd::Fill { rect, fill, .. } if rect.contains(centre) => match fill {
+                if let DrawCmd::Fill { rect, fill, .. } = &prev.cmd
+                    && rect.contains(centre)
+                {
+                    match fill {
                         Fill::Solid(c) => bg = c.over(bg),
                         Fill::Linear { .. } => panic!("a gradient behind text: contrast is not measured"),
-                    },
-                    DrawCmd::PushOpacity(_) => panic!("group opacity over text: contrast is not measured"),
-                    _ => {}
+                    }
                 }
             }
             worst = worst.min(Color::contrast_ratio(color.over(bg), bg));
         }
-        out.push((text.to_string(), worst));
+        // The off state (`--dim`) only has to reach 3:1.
+        let need = if [0x6d7477u32, 0x6b7378].iter().any(|h| color == Color::parse(&format!("#{h:06x}")).unwrap()) {
+            3.0
+        } else {
+            need
+        };
+        out.push((label, worst, need));
     }
     out
 }
@@ -1548,8 +1696,9 @@ fn text_contrast_is_at_least_4_5_to_1_in_every_preset_theme_and_state() {
                     let diags = d.scene.take_diagnostics();
                     assert!(diags.is_empty(), "{preset} {theme} {} {kind}: {diags:?}", scenario.name());
                     assert!(rig.harness.plates.values().all(|p| p.is_none()), "{preset} {scenario:?}");
-                    for (text, ratio) in contrast_of(&d.draw, None) {
+                    for (text, ratio, need) in contrast_of(&d.draw, None) {
                         count += 1;
+                        let ratio = ratio * 4.5 / need;
                         lines.push(format!("{preset} {theme} {} {kind} {text:?} {ratio:.2}", scenario.name()));
                         if ratio < worst.0 {
                             worst = (ratio, format!("{} {kind} {text:?}", scenario.name()));
@@ -1563,8 +1712,9 @@ fn text_contrast_is_at_least_4_5_to_1_in_every_preset_theme_and_state() {
                             let (x, y) = (n.rect.x + n.rect.w / 2.0, n.rect.y + n.rect.h / 2.0);
                             d.scene.pointer(PointerEvent { kind: PointerKind::Move, x, y }, t0);
                             let out = d.scene.frame(t0 + Duration::from_millis(500), &mut r);
-                            for (text, ratio) in contrast_of(&out.draw, Some(n.rect)) {
+                            for (text, ratio, need) in contrast_of(&out.draw, Some(n.rect)) {
                                 count += 1;
+                                let ratio = ratio * 4.5 / need;
                                 lines.push(format!(
                                     "{preset} {theme} {} {kind} hover {text:?} {ratio:.2}",
                                     scenario.name()
@@ -1591,8 +1741,8 @@ fn text_contrast_is_at_least_4_5_to_1_in_every_preset_theme_and_state() {
 #[test]
 fn the_default_bar_leaves_the_same_gap_at_both_edges() {
     let mut r = renderer();
-    let config = load_preset("default");
-    let sheet = preset_sheet("default");
+    let config = load_preset("fluent");
+    let sheet = preset_sheet("fluent");
     let rig = native(&config, Scenario::Normal);
     let d = draw(&rig, &sheet, true, &mut r, 1920, 1.0);
     let nodes = d.scene.nodes();
@@ -1772,7 +1922,8 @@ fn every_builtin_and_every_preset_renders_to_a_picture() {
                 };
                 let d = draw(&rig, &sheet, dark, &mut r, 640, 2.0);
                 let canvas = render_offscreen(&mut r, &d.draw).unwrap();
-                if scenario == Scenario::Normal {
+                // The status and tray segments are slivers of one dark fill at rest; the power menu's anchor draws nothing.
+                if scenario == Scenario::Normal && !["status", "tray", "power"].contains(&name) {
                     assert!(ink(&canvas) > 40, "{name} draws nothing in its normal state");
                 }
                 rows.push(canvas);
@@ -1828,8 +1979,8 @@ fn plates_are_drawn_and_readable() {
             "{texts:?}"
         );
         assert!(texts.iter().any(|t| t == "30%"), "the other widget keeps drawing: {texts:?}");
-        for (text, ratio) in contrast_of(&out.draw, None) {
-            assert!(ratio >= 4.5, "{text:?} {ratio:.2}");
+        for (text, ratio, need) in contrast_of(&out.draw, None) {
+            assert!(ratio >= need, "{text:?} {ratio:.2}");
         }
         let canvas = render_offscreen(&mut r, &out.draw).unwrap();
         save(&stack(&[canvas], dark), &format!("plates-{}.png", if dark { "dark" } else { "light" }));
@@ -1979,6 +2130,7 @@ fn the_examples_are_strict_and_name_the_bar_toml_lines_that_turn_them_on() {
         ("weather.luau", "right = [\"my/weather\""),
         ("git-status.luau", "right = [\"git-status\""),
         ("counter.luau", "right = [\"counter\""),
+        ("todo.luau", "right = [\"todo\""),
     ] {
         let src = example(file);
         assert!(src.starts_with("--!strict\n"), "{file}");
@@ -2145,6 +2297,11 @@ fn authoring_md_names_every_property_api_path_bar_toml_key_and_built_in() {
             missing.push(format!("icon {icon}"));
         }
     }
+    for icon in rsb_core::icons::SVG_ICON_NAMES {
+        if !doc.contains(&format!("`{icon}`")) {
+            missing.push(format!("svg icon {icon}"));
+        }
+    }
     for name in rsb_script::api::RESERVED {
         if !doc.contains(&format!("rsb.{name}")) {
             missing.push(format!("reserved {name}"));
@@ -2164,6 +2321,11 @@ fn authoring_md_names_every_property_api_path_bar_toml_key_and_built_in() {
         "--!strict",
         "$option:",
         "read =",
+        "@font-face",
+        "fonts\\",
+        "svg = ",
+        "center_on",
+        "rsb.scroll",
     ] {
         if !doc.contains(needle) {
             missing.push(format!("topic {needle}"));
@@ -2175,4 +2337,947 @@ fn authoring_md_names_every_property_api_path_bar_toml_key_and_built_in() {
         doc.is_ascii() || doc.chars().all(|c| c.is_ascii() || c == '\u{b0}'),
         "non-ASCII characters in authoring.md"
     );
+}
+
+// ---------------------------------------------------------------- the default look
+
+fn pinned_now() -> rsb_core::time::LocalTime {
+    rsb_core::time::LocalTime {
+        year: 2026,
+        month: 11,
+        day: 25,
+        weekday: 3,
+        hour: 11,
+        minute: 10,
+        second: 0,
+        millis: 0,
+        utc_offset_min: 600,
+    }
+}
+
+/// Four workspaces that hold windows, the focused one being 8.
+fn workspaces_pinned() -> Value {
+    let list = vec![
+        ws_entry("1", false, false, 1),
+        ws_entry("4", false, false, 1),
+        ws_entry("8", true, true, 2),
+        ws_entry("10", false, false, 1),
+    ];
+    map(&[
+        ("provider", s("glazewm")),
+        ("connected", b(true)),
+        (
+            "monitors",
+            Value::List(vec![map(&[
+                ("index", Value::Int(0)),
+                ("name", s("m0")),
+                ("handle", Value::Int(1)),
+                ("device", s(r"\\.\DISPLAY1")),
+                ("workspaces", Value::List(list)),
+            ])]),
+        ),
+    ])
+}
+
+/// A fixed set of service values: media playing a made-up track
+/// of 35 characters at 17 %, memory 51 %, cpu 2 %, battery 100 %, the
+/// microphone on and a headset with 27 %.
+fn pinned_events(radio_on: bool, mic_muted: bool) -> Vec<ScriptIn> {
+    let now = pinned_now().to_epoch_ms();
+    let track = map(&[
+        ("available", b(true)),
+        ("playing", b(true)),
+        ("title", s("Slow Harbour Light")),
+        ("artist", s("Aurora Quartet")),
+        ("album", s("")),
+        ("source", s("player")),
+        ("can_play_pause", b(true)),
+        ("can_next", b(true)),
+        ("can_previous", b(true)),
+        ("length", num(200.0)),
+        ("position", num(34.0)),
+        ("position_at", Value::Int(now)),
+        ("app_icon", s("rsb-image:media/app-pinned")),
+    ]);
+    vec![
+        ok(ServiceId::System, system(2.0, 51.0)),
+        ok(ServiceId::Battery, battery(Some(100.0), false, true, false)),
+        ok(ServiceId::Media, track),
+        ok(ServiceId::Workspaces, workspaces_pinned()),
+        ok(ServiceId::Microphone, microphone(true, mic_muted, false)),
+        ok(ServiceId::Bluetooth, bluetooth(true, radio_on, vec![bt_device(true, Some(27.0))])),
+    ]
+}
+
+/// A rig on the pinned wall clock.
+fn pinned_rig(config: &Config, events: Vec<ScriptIn>) -> Rig {
+    let bar = &config.bars[0];
+    let mut h = bench();
+    h.clock.set_wall(pinned_now());
+    let mut specs = Vec::new();
+    let mut slots = ZoneSlots::default();
+    let mut next = 1u32;
+    for (zone, items) in [(0, &bar.left), (1, &bar.center), (2, &bar.right)] {
+        for item in items {
+            let id = InstanceId(next);
+            next += 1;
+            specs.push(InstanceSpec {
+                instance: id,
+                widget: item.widget.clone(),
+                options: options_for(config, &item.widget, &[]),
+                bar: bar.name.clone(),
+                monitor: monitor_ref(),
+                pos: None,
+            });
+            let slot = SlotSpec { instance: id, class: item.widget.css_class(), id: item.widget.css_id() };
+            match zone {
+                0 => slots.left.push(slot),
+                1 => slots.center.push(slot),
+                _ => slots.right.push(slot),
+            }
+        }
+    }
+    h.start_specs(specs);
+    send_all(&mut h, events);
+    Rig { harness: h, bar: bar.clone(), slots }
+}
+
+/// A made-up player icon: a blue disc, 32 px, premultiplied.
+fn made_up_app_icon() -> rsb_render::Image {
+    let mut data = vec![0u8; 32 * 32 * 4];
+    for y in 0..32i32 {
+        for x in 0..32i32 {
+            let (dx, dy) = (x - 16, y - 16);
+            if dx * dx + dy * dy <= 14 * 14 {
+                let i = (y as usize * 32 + x as usize) * 4;
+                data[i..i + 4].copy_from_slice(&[0x4a, 0x78, 0xe0, 0xff]);
+            }
+        }
+    }
+    rsb_render::Image { width: 32, height: 32, data }
+}
+
+/// Draws the pinned default bar, with the player icon in place.
+fn draw_pinned(rig: &Rig, sheet: &Arc<Stylesheet>, dark: bool, r: &mut Renderer, scale: f32) -> Drawn {
+    let prep = |scene: &mut Scene, r: &mut Renderer| {
+        r.set_image(Arc::from("rsb-image:media/app-pinned"), made_up_app_icon());
+        scene.set_image_size("rsb-image:media/app-pinned", 32, 32);
+    };
+    draw_with(rig, sheet, dark, r, (1920.0 * scale) as u32, scale, &prep)
+}
+
+fn has_class(n: &rsb_core::scene::NodeInfo, class: &str) -> bool {
+    n.classes.iter().any(|c| &**c == class)
+}
+
+/// The border box of the widget wrapper or the segment inside it, by class.
+fn rect_of(nodes: &[rsb_core::scene::NodeInfo], kind: ElementKind, class: &str) -> RectF {
+    nodes
+        .iter()
+        .find(|n| n.kind == kind && has_class(n, class))
+        .unwrap_or_else(|| panic!("no {kind:?} with class {class}"))
+        .rect
+}
+
+#[test]
+fn the_default_bar_renders_its_pinned_states() {
+    let mut r = renderer();
+    let config = load_preset("default");
+    let sheet = preset_sheet("default");
+    for (dark, theme) in [(true, "dark"), (false, "light")] {
+        let rig = pinned_rig(&config, pinned_events(true, false));
+        assert!(rig.harness.plates.values().all(|p| p.is_none()), "no plates: {:?}", rig.harness.plates);
+        let mut d = draw_pinned(&rig, &sheet, dark, &mut r, 1.0);
+        let diags = d.scene.take_diagnostics();
+        assert!(diags.is_empty(), "{theme}: {diags:?}");
+        let canvas = render_offscreen(&mut r, &d.draw).unwrap();
+        save(&canvas, &format!("default-bar-{theme}.png"));
+        // Node rectangles, for the measuring scripts: classes and boxes only.
+        let mut json = String::from("[\n");
+        for n in d.scene.nodes() {
+            json.push_str(&format!(
+                "  {{\"kind\": \"{:?}\", \"classes\": {:?}, \"x\": {}, \"y\": {}, \"w\": {}, \"h\": {}}},\n",
+                n.kind,
+                n.classes.iter().map(|c| c.to_string()).collect::<Vec<_>>(),
+                n.rect.x,
+                n.rect.y,
+                n.rect.w,
+                n.rect.h
+            ));
+        }
+        json.push_str("  {}\n]\n");
+        std::fs::write(png_dir().join(format!("default-bar-{theme}-nodes.json")), json).unwrap();
+    }
+}
+
+// ---------------------------------------------------------------- the default bar, driven
+
+/// A scene on the default bar with a pointer, so hover reveals can be watched
+/// frame by frame; the script side answers the handler calls.
+struct Live {
+    rig: Rig,
+    scene: Scene,
+    r: Renderer,
+    t0: Instant,
+    t: u64,
+    batches: usize,
+}
+
+impl Live {
+    fn new(events: Vec<ScriptIn>, dark: bool) -> Live {
+        let config = load_preset("default");
+        let sheet = preset_sheet("default");
+        let rig = pinned_rig(&config, events);
+        let r = renderer();
+        let env = SceneEnv { media: MediaEnv { dark }, icon_font: r.icon_font(), fullscreen: false };
+        let bar = rig.bar.clone();
+        let geometry = BarGeometry { width_px: 1920, height_px: bar.height, scale: 1.0 };
+        let mut scene = Scene::new(&bar, geometry, env);
+        scene.set_stylesheet(sheet);
+        scene.set_slots(rig.slots.clone());
+        let mut live = Live { rig, scene, r, t0: Instant::now(), t: 0, batches: usize::MAX };
+        live.advance(0);
+        live
+    }
+
+    fn sync(&mut self) {
+        if self.batches == self.rig.harness.tree_batches {
+            return;
+        }
+        self.batches = self.rig.harness.tree_batches;
+        for tree in self.rig.harness.latest.values() {
+            self.scene.set_tree(tree.clone());
+        }
+        for (id, plate) in &self.rig.harness.plates {
+            if let Some(p) = plate {
+                self.scene.set_widget_plate(*id, Some(p.clone()));
+            }
+        }
+    }
+
+    fn advance(&mut self, ms: u64) {
+        self.t += ms;
+        self.sync();
+        let out = self.scene.frame(self.t0 + Duration::from_millis(self.t), &mut self.r);
+        ensure_icons(&mut self.r, &out.draw);
+    }
+
+    fn pointer(&mut self, kind: PointerKind, x: f32, y: f32) {
+        let now = self.t0 + Duration::from_millis(self.t);
+        let result = self.scene.pointer(PointerEvent { kind, x, y }, now);
+        for call in result.calls {
+            self.rig.harness.send(ScriptIn::Input(call));
+        }
+        self.sync();
+    }
+
+    /// Runs frames of 16 ms until `ms` have passed.
+    fn run(&mut self, ms: u64) {
+        for _ in 0..(ms / 16) {
+            self.advance(16);
+        }
+    }
+
+    fn rect(&self, kind: ElementKind, class: &str) -> RectF {
+        rect_of(&self.scene.nodes(), kind, class)
+    }
+
+    /// Every text the widgets of the bar show now.
+    fn texts(&self) -> Vec<String> {
+        (1..=11).flat_map(|i| self.rig.harness.texts(i)).collect()
+    }
+}
+
+fn mid(r: RectF) -> (f32, f32) {
+    (r.x + r.w / 2.0, r.y + r.h / 2.0)
+}
+
+#[test]
+fn the_date_and_clock_widen_on_hover_and_the_date_moves_with_the_clock() {
+    let mut l = Live::new(pinned_events(true, false), true);
+    let (clock0, date0) = (l.rect(ElementKind::Box, "clock"), l.rect(ElementKind::Box, "date"));
+    assert!(l.texts().contains(&"11:10".to_string()), "clock text at rest: {:?}", l.texts());
+    let (x, y) = mid(clock0);
+    l.pointer(PointerKind::Move, x, y);
+    l.run(600);
+    let (clock1, date1) = (l.rect(ElementKind::Box, "clock"), l.rect(ElementKind::Box, "date"));
+    // 11:10 -> 11:10:00 is three more characters of 8.4 px; the box grows by 25.
+    assert!((clock1.w - clock0.w - 25.2).abs() <= 3.0, "{} -> {}", clock0.w, clock1.w);
+    assert!((date1.x - date0.x - 25.2).abs() <= 3.0, "the date follows: {} -> {}", date0.x, date1.x);
+    assert!(l.texts().contains(&"11:10:00".to_string()), "seconds while hovered: {:?}", l.texts());
+    l.pointer(PointerKind::Leave, 0.0, 0.0);
+    l.run(600);
+    let clock2 = l.rect(ElementKind::Box, "clock");
+    assert!((clock2.w - clock0.w).abs() < 0.6, "back to {} px, got {}", clock0.w, clock2.w);
+    assert!(l.texts().contains(&"11:10".to_string()));
+
+    // The date: 11-25 -> Wednesday 25 November, 2026.
+    let (x, y) = mid(date0);
+    l.pointer(PointerKind::Move, x, y);
+    l.run(600);
+    let date2 = l.rect(ElementKind::Box, "date");
+    assert!((date2.w - 262.0).abs() <= 3.0, "the long date is 262 px wide, got {}", date2.w);
+    assert!(l.texts().contains(&"Wednesday 25 November, 2026".to_string()), "{:?}", l.texts());
+    l.pointer(PointerKind::Leave, 0.0, 0.0);
+    l.run(600);
+    assert!((l.rect(ElementKind::Box, "date").w - date0.w).abs() < 0.6);
+}
+
+#[test]
+fn the_date_grows_along_the_spec_curve_when_hovered() {
+    let mut l = Live::new(pinned_events(true, false), true);
+    let date0 = l.rect(ElementKind::Box, "date");
+    let (x, y) = mid(date0);
+    l.pointer(PointerKind::Move, x, y);
+    l.run(112);
+    let w100 = l.rect(ElementKind::Box, "date").w;
+    l.run(500);
+    let full = l.rect(ElementKind::Box, "date").w;
+    let progress = (w100 - date0.w) / (full - date0.w);
+    // 48 % +/- 15 at the first frame after the hover (about 100 ms).
+    assert!(progress > 0.33 && progress < 0.85, "{progress:.2} of the way after 112 ms");
+}
+
+#[test]
+fn the_status_segment_opens_with_its_group_and_never_loses_the_pointer_that_opened_it() {
+    let mut l = Live::new(pinned_events(true, false), true);
+    let rest = l.rect(ElementKind::Box, "status");
+    assert_eq!(rest.w, 26.0, "a sliver at rest");
+    // Park the pointer at the right edge of the status segment, next to the one that stays put.
+    let (x, y) = (rest.x + rest.w - 3.0, rest.y + rest.h / 2.0);
+    l.pointer(PointerKind::Move, x, y);
+    l.run(112);
+    let w100 = l.rect(ElementKind::Box, "status").w;
+    let open = l.rect(ElementKind::Box, "status-content").w;
+    l.run(900);
+    let full = l.rect(ElementKind::Box, "status").w;
+    assert!(l.scene.is_settled(), "frames settle within a second");
+    assert!((full - open).abs() < 0.6, "the segment is as wide as its content: {full} vs {open}");
+    // Padding 21 on the left and 18 on the right, two 16 px icons, a 27% label, 6 px gaps.
+    assert!((open - (21.0 + 16.0 + 6.0 + 16.0 + 6.0 + 25.2 + 18.0)).abs() <= 2.0, "content box {open}");
+    let progress = (w100 - rest.w) / (full - rest.w);
+    assert!((progress - 0.73).abs() <= 0.3, "{progress:.2} of the way after about 100 ms");
+    // Nothing is lost 600 ms later: the hover held, so the width is the same.
+    l.run(600);
+    assert!((l.rect(ElementKind::Box, "status").w - full).abs() < 0.6, "the pointer stayed in the group");
+    // The tray sliver stays 26 px while it holds no icons.
+    assert_eq!(l.rect(ElementKind::Box, "tray").w, 26.0);
+    // Out of the group: it stays open for 300 ms, then closes.
+    l.pointer(PointerKind::Leave, 0.0, 0.0);
+    l.run(160);
+    assert!((l.rect(ElementKind::Box, "status").w - full).abs() < 0.6, "still open 160 ms after leaving");
+    l.run(800);
+    assert_eq!(l.rect(ElementKind::Box, "status").w, 26.0, "closed again");
+    assert!(l.scene.is_settled());
+}
+
+#[test]
+fn the_battery_swaps_to_the_time_left_while_hovered() {
+    let mut l = Live::new(pinned_events(true, false), true);
+    let b = l.rect(ElementKind::Box, "battery");
+    let (x, y) = mid(b);
+    l.pointer(PointerKind::Move, x, y);
+    l.run(300);
+    assert!(l.texts().iter().any(|t| t == "--:--"), "no time left known: {:?}", l.texts());
+    l.rig.harness.send(ok(
+        ServiceId::Battery,
+        map(&[
+            ("present", Value::Bool(true)),
+            ("percent", num(80.0)),
+            ("charging", Value::Bool(false)),
+            ("plugged", Value::Bool(false)),
+            ("saver", Value::Bool(false)),
+            ("seconds_left", num(5100.0)),
+        ]),
+    ));
+    l.run(160);
+    assert!(l.texts().iter().any(|t| t == "1:25"), "{:?}", l.texts());
+    l.pointer(PointerKind::Leave, 0.0, 0.0);
+    l.run(300);
+    assert!(l.texts().iter().any(|t| t == "80%"), "{:?}", l.texts());
+}
+
+#[test]
+fn the_default_bar_follows_the_numeric_spec() {
+    let config = load_preset("default");
+    let sheet = preset_sheet("default");
+    let mut r = renderer();
+    let rig = pinned_rig(&config, pinned_events(true, false));
+    let d = draw_pinned(&rig, &sheet, true, &mut r, 1.0);
+    let nodes = d.scene.nodes();
+    let near =
+        |got: f32, want: f32, tol: f32, what: &str| assert!((got - want).abs() <= tol, "{what}: {got} vs {want}");
+    let bar = &nodes[0];
+    assert_eq!(bar.rect.h, 36.0, "the bar window is 36 px tall");
+    assert!(
+        matches!(&bar.style.background, rsb_core::style::Background::Color(c) if c.a == 0.0),
+        "and draws nothing itself: {:?}",
+        bar.style.background
+    );
+    assert_eq!((bar.style.padding.top, bar.style.padding.left, bar.style.padding.right), (10.0, 10.0, 7.0));
+    assert_eq!(bar.style.font_family[0].as_ref(), "JetBrains Mono");
+    assert_eq!((bar.style.font_size, bar.style.font_weight), (14.0, 400));
+    let seg = |class: &str| rect_of(&nodes, ElementKind::Box, class);
+    let names =
+        ["workspaces", "media", "memory", "cpu", "dashboard", "clock", "date", "status", "battery", "tray", "record"];
+    for class in names {
+        let r = seg(class);
+        assert_eq!((r.y, r.h), (10.0, 26.0), "{class}: segments hang from y 10 and are 26 px tall");
+    }
+    // Groups: the left one starts 10 px in, the right one ends 7 px before the edge.
+    near(seg("workspaces").x, 10.0, 1.0, "workspaces left");
+    near(seg("workspaces").x + seg("workspaces").w, 178.0, 1.0, "workspaces right (box 10..178)");
+    near(seg("record").x + seg("record").w, 1913.0, 0.0, "the record circle ends at x 1913");
+    // Overlap of 13 inside a group, none between groups.
+    let right = |c: &str| seg(c).x + seg(c).w;
+    near(seg("cpu").x, right("memory") - 11.0, 1.0, "memory|cpu interlock (this pair overlaps by 11)");
+    near(seg("battery").x, right("status") - 13.0, 1.0, "status|battery interlock");
+    near(seg("tray").x, right("battery") - 13.0, 1.0, "battery|tray interlock");
+    near(seg("date").x, right("clock") - 13.0 - 1.5, 1.0, "clock|date interlock (the 1.5 px the clock runs under)");
+    near(seg("media").x, right("workspaces") - 13.0 - 1.5, 1.0, "workspaces|media interlock");
+    near(seg("dashboard").x, right("cpu"), 1.0, "cpu|dashboard are edge to edge");
+    near(seg("clock").x, right("dashboard"), 1.0, "dashboard|clock are edge to edge");
+    near(seg("record").x - right("tray"), 3.0, 1.0, "3 px between the tray and the record circle");
+    // The centre button: 54 tip to tip, centred on the bar.
+    near(seg("dashboard").w, 54.0, 2.0, "centre button width");
+    near(seg("dashboard").x + seg("dashboard").w / 2.0, 960.0, 1.0, "centre button on the bar's middle");
+    // Widths at rest.
+    near(seg("clock").w, 77.0, 3.0, "clock box 77");
+    near(seg("date").w, 77.0, 3.0, "date box 77");
+    near(seg("battery").w, 93.0, 2.0, "battery box 93");
+    near(seg("status").w, 26.0, 0.0, "status sliver");
+    near(seg("tray").w, 26.0, 0.0, "tray sliver");
+    near(seg("record").w, 26.0, 0.0, "record circle");
+    // Workspace labels: centres 37 / 66.5 / 106.5 / 147.
+    let labels: Vec<RectF> = nodes.iter().filter(|n| has_class(n, "ws")).map(|n| n.rect).collect();
+    assert_eq!(labels.len(), 4);
+    for (l, want) in labels.iter().zip([37.0, 66.5, 106.5, 147.0]) {
+        near(l.x + l.w / 2.0, want, 2.0, "label centre");
+    }
+    // Media: the content starts 21 px from the box edge; the progress line is 3 px tall on the bottom edge,
+    // 17 % of the content.
+    let media = seg("media");
+    let main = seg("media-main");
+    near(main.x - media.x, 21.0, 2.0, "media content start");
+    let line = rect_of(&nodes, ElementKind::Box, "progress");
+    assert_eq!((line.h, line.y + line.h), (3.0, 36.0), "the line touches the bottom of the segment");
+    near(line.x - main.x, 2.0, 0.5, "the line starts 2 px in from the content, as measured on the reference");
+    near(line.w / main.w, 0.17, 0.01, "17 % of the content");
+    // Icons are 16 px (the app icon 14, the centre button's and the record button's 18, the battery's 21: its
+    // glyph is small in its box and measures 16 x 10 on the reference), text 14 px.
+    let icons: Vec<f32> =
+        nodes.iter().filter(|n| n.kind == ElementKind::Icon && !has_class(n, "app-icon")).map(|n| n.rect.h).collect();
+    for h in &icons {
+        assert!([16.0, 18.0, 21.0].contains(h), "icon size {h}");
+    }
+    assert_eq!(icons.iter().filter(|h| **h == 21.0).count(), 1, "only the battery icon is 21 px: {icons:?}");
+    // Fills: the palette, to the digit.
+    let fill = |class: &str| match &nodes
+        .iter()
+        .find(|n| n.kind == ElementKind::Box && has_class(n, class))
+        .unwrap()
+        .style
+        .background
+    {
+        rsb_core::style::Background::Color(c) => *c,
+        other => panic!("{class}: {other:?}"),
+    };
+    let hex = |h: &str| Color::parse(h).unwrap();
+    assert_eq!(fill("media"), hex("#090f12"));
+    assert_eq!(fill("memory"), hex("#1b1f22"));
+    assert_eq!(fill("cpu"), hex("#2f3639"));
+    assert_eq!(fill("dashboard"), hex("#81cbea"));
+    assert_eq!(fill("clock"), hex("#2f3639"));
+    assert_eq!(fill("date"), hex("#1b1f22"));
+    assert_eq!(fill("status"), hex("#090f12"));
+    assert_eq!(fill("battery"), hex("#1b1f22"));
+    assert_eq!(fill("tray"), hex("#2f3639"));
+    assert_eq!(fill("record"), hex("#2f3639"));
+}
+
+#[test]
+fn shapes_follow_the_position_in_the_left_group_and_a_missing_widget_leaves_no_hole() {
+    let config = load_preset("default");
+    let sheet = preset_sheet("default");
+    let mut r = renderer();
+    let shape = |rig: &Rig, r: &mut Renderer, class: &str| -> (usize, String) {
+        let d = draw_pinned(rig, &sheet, true, r, 1.0);
+        let n = d.scene.nodes().into_iter().find(|n| n.kind == ElementKind::Box && has_class(n, class)).unwrap();
+        let clip = n.style.clip_path.clone().expect("a clip-path");
+        (clip.points.len(), format!("{:?}", clip.points[0].0))
+    };
+    // Both there: workspaces is a hexagon, media has a notch on its left.
+    let both = pinned_rig(&config, pinned_events(true, false));
+    let (n, first) = shape(&both, &mut r, "workspaces");
+    assert_eq!(n, 6);
+    assert!(first.contains("13"), "a point on the left: {first}");
+    let (n, first) = shape(&both, &mut r, "media");
+    assert_eq!(n, 6);
+    assert!(!first.contains("13"), "a notch on the left: {first}");
+    // No window manager: media is first and last child, so it is a hexagon in the workspaces' place.
+    let mut events = pinned_events(true, false);
+    events.push(ok(ServiceId::Workspaces, no_workspaces()));
+    let no_ws = pinned_rig(&config, events);
+    let (n, first) = shape(&no_ws, &mut r, "media");
+    assert_eq!(n, 6);
+    assert!(first.contains("13"), "media alone has a point on its left: {first}");
+    let d = draw_pinned(&no_ws, &sheet, true, &mut r, 1.0);
+    assert_eq!(rect_of(&d.scene.nodes(), ElementKind::Box, "media").x, 10.0);
+    save(&render_offscreen(&mut r, &d.draw).unwrap(), "default-bar-no-workspaces.png");
+    // No media session and no window manager: the left zone is empty and the bar still draws.
+    let mut events = pinned_events(true, false);
+    events.push(ok(ServiceId::Workspaces, no_workspaces()));
+    events.push(ok(ServiceId::Media, media(false, false, "", "")));
+    let bare = pinned_rig(&config, events);
+    let d = draw_pinned(&bare, &sheet, true, &mut r, 1.0);
+    let nodes = d.scene.nodes();
+    assert!(nodes.iter().all(|n| !(n.kind == ElementKind::Box && has_class(n, "media") && n.rect.w > 0.0)));
+    assert!(bare.harness.plates.values().all(|p| p.is_none()));
+    save(&render_offscreen(&mut r, &d.draw).unwrap(), "default-bar-no-left.png");
+    // No battery: status runs under the tray's point.
+    let mut events = pinned_events(true, false);
+    events.push(ok(ServiceId::Battery, battery(None, false, true, false)));
+    let mut config_hide = config.clone();
+    config_hide.widgets.get_mut("battery").unwrap().values.insert(
+        "absent".into(),
+        rsb_core::config::Spanned { value: s("hide"), pos: rsb_core::diag::SourcePos::new("bar.toml", 1, 1) },
+    );
+    let nobat = pinned_rig(&config_hide, events);
+    let d = draw_pinned(&nobat, &sheet, true, &mut r, 1.0);
+    let nodes = d.scene.nodes();
+    let status = rect_of(&nodes, ElementKind::Box, "status");
+    let tray = rect_of(&nodes, ElementKind::Box, "tray");
+    assert_eq!(status.w, 26.0);
+    assert_eq!(tray.x, status.x + status.w - 13.0, "the tray's point covers the status segment's end");
+    save(&render_offscreen(&mut r, &d.draw).unwrap(), "default-bar-no-battery.png");
+}
+
+#[test]
+fn the_default_sheet_has_no_endless_animation_and_a_resting_bar_is_settled() {
+    let sheet_text = asset_text("presets/default.css") + &asset_text("themes/base.css");
+    assert!(!sheet_text.contains("infinite"), "no infinite animation");
+    assert!(!sheet_text.contains("animation"), "the default look uses transitions only");
+    let mut l = Live::new(pinned_events(true, false), true);
+    l.run(2000);
+    assert!(l.scene.is_settled(), "nothing runs at rest");
+}
+
+#[test]
+fn every_bundled_icon_has_a_file_that_parses_and_draws_ink_at_16_px() {
+    let mut r = renderer();
+    let dir = assets().join("icons");
+    for name in rsb_core::icons::SVG_ICON_NAMES {
+        let bytes = std::fs::read(dir.join(format!("{name}.svg"))).unwrap_or_else(|e| panic!("{name}: {e}"));
+        r.set_svg(Arc::from(*name), &bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let rect = RectF { x: 0.0, y: 0.0, w: 16.0, h: 16.0 };
+        let item = rsb_core::draw::DrawItem {
+            node: rsb_core::element::NodeKey(1),
+            bounds: rect,
+            cmd: DrawCmd::Svg { rect, key: Arc::from(*name), tint: Some(Color::WHITE) },
+        };
+        let list = DrawList { width: 16, height: 16, items: vec![item] };
+        let canvas = render_offscreen(&mut r, &list).unwrap();
+        let mut inked = 0;
+        for y in 0..16 {
+            for x in 0..16 {
+                if canvas.rgba_at(x, y)[3] > 40 {
+                    inked += 1;
+                }
+            }
+        }
+        // wifi-0 is a single dot (no signal).
+        assert!(inked >= 4, "{name} draws {inked} px of ink at 16 px");
+    }
+    let files = std::fs::read_dir(&dir)
+        .unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension().is_some_and(|x| x == "svg"))
+        .count();
+    assert_eq!(files, rsb_core::icons::SVG_ICON_NAMES.len(), "no icon file without a name");
+}
+
+#[test]
+fn the_revealed_status_group_is_readable_in_every_state_dark_and_light() {
+    for dark in [true, false] {
+        for (radio, muted) in [(true, false), (false, true)] {
+            let mut l = Live::new(pinned_events(radio, muted), dark);
+            let rest = l.rect(ElementKind::Box, "status");
+            l.pointer(PointerKind::Move, rest.x + 20.0, rest.y + 13.0);
+            l.run(800);
+            let out = l.scene.frame(l.t0 + Duration::from_millis(l.t + 16), &mut l.r);
+            let rows = contrast_of(&out.draw, None);
+            assert!(rows.iter().any(|(t, _, _)| t == "27%"), "the device battery shows: {rows:?}");
+            for (what, ratio, need) in rows {
+                assert!(ratio >= need, "dark={dark} radio={radio}: {what} {ratio:.2} < {need}");
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- status, tray, record, dashboard
+
+fn click_on(h: &mut Harness, id: u32, class: &str) {
+    let handler = find_handler(h.root(id).unwrap(), &|e| {
+        if e.classes.iter().any(|c| &**c == class) { e.handlers.click.map(|c| c.0) } else { None }
+    })
+    .unwrap_or_else(|| panic!("a click handler on .{class}"));
+    h.click(id, handler);
+}
+
+#[test]
+fn status_draws_the_mic_the_radio_and_the_device_battery_in_every_state() {
+    let mut h = bench();
+    start(&mut h, "status", &[]);
+    // Before any reading: the sliver, with both buttons hidden.
+    assert_eq!(
+        shown(&h, 1),
+        "box.item.status(box.status-content(box.status-btn.mic.button~(icon:svg(mic)) \
+         box.status-btn.bt.button~(icon:svg(bluetooth)) text.value.status-level~=\"\"))"
+    );
+    // Normal: mic on, radio on, a headset with 27 %.
+    send_all(
+        &mut h,
+        vec![
+            ok(ServiceId::Microphone, microphone(true, false, false)),
+            ok(ServiceId::Bluetooth, bluetooth(true, true, vec![bt_device(true, Some(27.0))])),
+        ],
+    );
+    assert_eq!(
+        shown(&h, 1),
+        "box.item.status(box.status-content(box.status-btn.mic.button(icon:svg(mic)) \
+         box.status-btn.bt.button(icon:svg(bluetooth-connected)) text.value.status-level=\"27%\"))"
+    );
+    // An app records from the mic: the class `live`.
+    h.send(ok(ServiceId::Microphone, microphone(true, false, true)));
+    assert!(shown(&h, 1).contains("box.status-btn.mic.button.live"), "{}", shown(&h, 1));
+    // Muted mic and radio off: the off icons, the classes the theme dims.
+    send_all(
+        &mut h,
+        vec![
+            ok(ServiceId::Microphone, microphone(true, true, false)),
+            ok(ServiceId::Bluetooth, bluetooth(true, false, vec![bt_device(true, Some(27.0))])),
+        ],
+    );
+    assert_eq!(
+        shown(&h, 1),
+        "box.item.status(box.status-content(box.status-btn.mic.button.off(icon:svg(mic-off)) \
+         box.status-btn.bt.button.off(icon:svg(bluetooth-off)) text.value.status-level.off=\"27%\"))"
+    );
+    // No device battery: no number.
+    h.send(ok(ServiceId::Bluetooth, bluetooth(true, true, vec![bt_device(true, None)])));
+    assert!(shown(&h, 1).contains("text.value.status-level~=\"\""), "{}", shown(&h, 1));
+    // Empty: no microphone, no radio. The sliver stays.
+    send_all(
+        &mut h,
+        vec![
+            ok(ServiceId::Microphone, microphone(false, false, false)),
+            ok(ServiceId::Bluetooth, bluetooth(false, false, vec![])),
+        ],
+    );
+    let t = shown(&h, 1);
+    assert!(t.starts_with("box.item.status(") && t.matches('~').count() == 3, "{t}");
+    // Stale: the buttons stay, marked, with the plain icons.
+    send_all(
+        &mut h,
+        vec![
+            ok(ServiceId::Microphone, microphone(true, true, false)),
+            ok(ServiceId::Bluetooth, bluetooth(true, false, vec![])),
+            stale(ServiceId::Microphone),
+            stale(ServiceId::Bluetooth),
+        ],
+    );
+    let t = shown(&h, 1);
+    assert!(t.contains("box.status-btn.mic.button.stale(icon:svg(mic))"), "{t}");
+    assert!(t.contains("box.status-btn.bt.button.stale(icon:svg(bluetooth))"), "{t}");
+    // Error: a value the schema does not allow is logged, the widget keeps running and shows its last frame.
+    h.send(ok(ServiceId::Bluetooth, map(&[("available", b(true)), ("devices", num(3.0))])));
+    assert_eq!(h.state_of(1), WidgetState::Running);
+    assert!(h.root(1).unwrap().classes.iter().any(|c| &**c == "error"), "{:?}", h.root(1).unwrap().classes);
+    assert!(h.plate(1).is_none());
+    // The options leave a half out.
+    let mut h = bench();
+    start(&mut h, "status", &[("mic", b(false))]);
+    assert_eq!(shown(&h, 1).matches("status-btn").count(), 1, "{}", shown(&h, 1));
+    let mut h = bench();
+    start(&mut h, "status", &[("bluetooth", b(false))]);
+    assert_eq!(shown(&h, 1).matches("status-btn").count(), 1, "{}", shown(&h, 1));
+}
+
+#[test]
+fn status_buttons_toggle_the_radio_and_the_mic_from_a_click_only() {
+    let mut h = bench();
+    start(&mut h, "status", &[]);
+    send_all(
+        &mut h,
+        vec![
+            ok(ServiceId::Microphone, microphone(true, false, false)),
+            ok(ServiceId::Bluetooth, bluetooth(true, true, vec![])),
+        ],
+    );
+    h.take_requests();
+    click_on(&mut h, 1, "mic");
+    click_on(&mut h, 1, "bt");
+    assert_eq!(
+        commands(&h),
+        vec![
+            ServiceCommand::Microphone(rsb_core::services::MicrophoneCommand::ToggleMute),
+            ServiceCommand::Bluetooth(rsb_core::services::BluetoothCommand::SetEnabled(false)),
+        ]
+    );
+    // Radio off: the next click turns it on.
+    h.send(ok(ServiceId::Bluetooth, bluetooth(true, false, vec![])));
+    h.take_requests();
+    h.advance(2500);
+    click_on(&mut h, 1, "bt");
+    assert_eq!(commands(&h), vec![ServiceCommand::Bluetooth(rsb_core::services::BluetoothCommand::SetEnabled(true))]);
+    // Not from a handler that waited: the runtime refuses `set_enabled` outside a click.
+    assert!(h.plate(1).is_none());
+}
+
+#[test]
+fn the_tray_is_an_empty_segment_in_every_state() {
+    let mut h = bench();
+    start(&mut h, "tray", &[]);
+    assert_eq!(shown(&h, 1), "box.item.tray()");
+    for scenario in Scenario::ALL {
+        send_all(&mut h, scenario.events());
+        assert_eq!(shown(&h, 1), "box.item.tray()", "{}", scenario.name());
+    }
+    assert!(h.root(1).unwrap().handlers.click.is_none());
+}
+
+#[test]
+fn record_opens_the_system_recorder_or_runs_the_users_command() {
+    let mut h = bench();
+    start(&mut h, "record", &[]);
+    assert_eq!(shown(&h, 1), "box.item.record.button(icon:svg(video))");
+    h.take_requests();
+    let click = click_handler(h.root(1).unwrap());
+    h.click(1, click);
+    assert_eq!(
+        commands(&h),
+        vec![ServiceCommand::Apps(rsb_core::services::AppsCommand::OpenUri(
+            "ms-screenclip://capture/video?enabledModes=RecordAllModes&user-agent=rsb".into()
+        ))]
+    );
+    assert!(exec_requests(&h).is_empty());
+    // With a command: that program runs, and the recorder does not open.
+    let mut h = bench();
+    start(&mut h, "record", &[("command", Value::List(vec![s("obs64"), s("--startrecording")]))]);
+    h.take_requests();
+    let click = click_handler(h.root(1).unwrap());
+    h.click(1, click);
+    let run = exec_requests(&h);
+    assert_eq!(run.len(), 1);
+    assert_eq!(run[0].1.program, rsb_core::io::ProgramRef::Name("obs64".into()));
+    assert_eq!(run[0].1.args, vec!["--startrecording"]);
+    assert!(commands(&h).is_empty());
+    assert!(
+        log_lines("granted record:").iter().any(|l| l.contains("exec:obs64")),
+        "{:?}",
+        log_lines("granted record:")
+    );
+    assert!(h.plate(1).is_none());
+}
+
+#[test]
+fn the_centre_button_is_the_logo_and_toggles_the_dashboard_popup() {
+    let mut h = bench();
+    start(&mut h, "dashboard", &[]);
+    assert_eq!(shown(&h, 1), "box.item.dashboard.button(icon:svg(logo) ?.panel.dashboard())");
+    let click = click_handler(h.root(1).unwrap());
+    h.click(1, click);
+    assert!(h.plate(1).is_none(), "the popup is its own: the click opens it and nothing fails");
+    assert_eq!(h.state_of(1), WidgetState::Running);
+}
+
+// ---------------------------------------------------------------- new options of the bar widgets
+
+#[test]
+fn media_progress_and_the_player_icon_are_options_and_the_old_look_is_the_default() {
+    let mut h = bench();
+    h.start_specs(vec![
+        Harness::spec(1, "media"),
+        Harness::spec_with(2, "media#new", &[("progress", b(true)), ("icon", s("app"))]),
+    ]);
+    let events = vec![ok(ServiceId::Media, media(true, true, "Aurora Quartet", "Slow Harbour"))];
+    send_all(&mut h, events);
+    assert_eq!(
+        shown(&h, 1),
+        "box.item.media.button.playing(icon:play text.value.ellipsis=\"Aurora Quartet - Slow Harbour\")"
+    );
+    // 60 s of 240 s played when the reading was taken, no time since: 25 %.
+    let t = shown(&h, 2);
+    assert!(
+        t.starts_with(
+            "box.item.media.button.playing.with-progress(box.media-main(icon.app-icon:svg(music) icon.state:svg(pause)"
+        ),
+        "{t}"
+    );
+    assert!(t.ends_with("box.progress())"), "{t}");
+    let line = find_style(h.root(2).unwrap(), "progress");
+    assert_eq!(line, Some("25.0%".to_string()), "the line is 25 % of the content");
+    // It moves with the clock while playing: 60 s later 50 %.
+    h.advance(60_000);
+    assert_eq!(find_style(h.root(2).unwrap(), "progress"), Some("50.0%".to_string()));
+    // Paused: the glyph says play, and the line stops where it is.
+    h.send(ok(ServiceId::Media, {
+        let Value::Map(mut m) = media(true, false, "Aurora Quartet", "Slow Harbour") else { unreachable!() };
+        m.insert("position".into(), num(120.0));
+        m.insert("position_at".into(), Value::Int(start_time().to_epoch_ms() + 60_000));
+        Value::Map(m)
+    }));
+    assert!(shown(&h, 2).contains("icon.state:svg(play)"), "{}", shown(&h, 2));
+    h.advance(30_000);
+    assert_eq!(find_style(h.root(2).unwrap(), "progress"), Some("50.0%".to_string()));
+    // No length: no line. Stale: dashes.
+    h.send(ok(ServiceId::Media, {
+        let Value::Map(mut m) = media(true, true, "A", "B") else { unreachable!() };
+        m.remove("length");
+        Value::Map(m)
+    }));
+    assert!(shown(&h, 2).contains("box.progress~"), "{}", shown(&h, 2));
+    h.send(stale(ServiceId::Media));
+    assert!(shown(&h, 2).contains("with-progress"), "{}", shown(&h, 2));
+    assert!(h.texts(2).contains(&"--".to_string()));
+}
+
+/// The inline `width` of the first element with a class.
+fn find_style(e: &Element, class: &str) -> Option<String> {
+    if e.classes.iter().any(|c| &**c == class) {
+        return e.style.iter().find(|(k, _)| k == "width").map(|(_, v)| v.clone());
+    }
+    e.children.iter().find_map(|c| find_style(c, class))
+}
+
+#[test]
+fn hover_formats_and_the_time_left_default_to_nothing() {
+    let mut h = bench();
+    h.start_specs(vec![
+        Harness::spec(1, "clock"),
+        Harness::spec(2, "date"),
+        Harness::spec(3, "battery"),
+        Harness::spec_with(4, "clock#h", &[("hover_format", s("HH:mm:ss")), ("alt_format", s(""))]),
+        Harness::spec_with(5, "battery#h", &[("hover_format", s("{time}")), ("icons", s("svg"))]),
+    ]);
+    send_all(&mut h, vec![ok(ServiceId::Battery, battery(Some(100.0), false, true, false))]);
+    // Defaults: the look and behaviour before the new options.
+    assert_eq!(shown(&h, 1), "box.item.clock.button(text.value=\"09:05\")");
+    assert_eq!(shown(&h, 2), "box.item.date(text.value=\"Tue 24 Nov\")");
+    assert_eq!(shown(&h, 3), "box.item.battery(icon:battery_10 text.value=\"100%\")");
+    assert!(h.root(2).unwrap().handlers.enter.is_none() && h.root(3).unwrap().handlers.enter.is_none());
+    // With the options: handlers on enter and leave, the SVG icon set.
+    assert!(h.root(4).unwrap().handlers.enter.is_some() && h.root(4).unwrap().handlers.leave.is_some());
+    assert_eq!(shown(&h, 5), "box.item.battery.button(icon:svg(battery-4) text.value=\"100%\")");
+    // Entering shows seconds; the clock ticks each second only now.
+    let enter = h.root(4).unwrap().handlers.enter.unwrap().0;
+    let leave = h.root(4).unwrap().handlers.leave.unwrap().0;
+    let call = |h: &mut Harness, handler: u32, kind: InputKind| {
+        h.send(ScriptIn::Input(rsb_core::hit::HandlerCall {
+            instance: InstanceId(4),
+            handler: rsb_core::element::HandlerId(handler),
+            kind,
+            x: 1.0,
+            y: 1.0,
+            gesture: 0,
+        }));
+    };
+    let before = tick_batches(&h);
+    h.advance(3000);
+    assert_eq!(tick_batches(&h), before, "a minute clock does not tick each second");
+    call(&mut h, enter, InputKind::Enter);
+    assert_eq!(h.texts(4), vec!["09:05:10"]);
+    h.advance(1000);
+    assert_eq!(h.texts(4), vec!["09:05:11"], "one tick a second while hovered");
+    call(&mut h, leave, InputKind::Leave);
+    assert_eq!(h.texts(4), vec!["09:05"]);
+    let settled = tick_batches(&h);
+    h.advance(5000);
+    assert_eq!(tick_batches(&h), settled, "and back to the idle minute clock");
+}
+
+#[test]
+fn workspaces_text_style_marks_the_active_label_and_pills_stay_the_default() {
+    let mut h = bench();
+    h.start_specs(vec![
+        Harness::spec(1, "workspaces"),
+        Harness::spec_with(2, "workspaces#t", &[("style", s("text")), ("active_format", s("-{label}-"))]),
+    ]);
+    send_all(&mut h, vec![ok(ServiceId::Workspaces, workspaces_value())]);
+    assert_eq!(
+        pills(&h, 1),
+        vec![
+            "box.ws.focused.button(text=\"1\")",
+            "box.ws.occupied.button(text=\"2\")",
+            "box.ws.empty.button(text=\"3\")",
+            "box.ws.empty.button(text=\"4\")"
+        ]
+    );
+    assert!(shown(&h, 1).starts_with("box.workspaces("), "{}", shown(&h, 1));
+    assert!(shown(&h, 2).starts_with("box.workspaces.plain("), "{}", shown(&h, 2));
+    assert_eq!(h.texts(2), vec!["-1-", "2", "3", "4"], "only the focused label is wrapped");
+}
+
+#[test]
+fn the_default_preset_follows_the_design() {
+    let default = load_preset("default");
+    let bar = &default.bars[0];
+    let names = |items: &[config::ZoneItem]| items.iter().map(|i| i.widget.to_string()).collect::<Vec<_>>();
+    assert_eq!(names(&bar.left), ["workspaces", "media"]);
+    assert_eq!(names(&bar.center), ["memory", "cpu", "dashboard", "clock", "date"]);
+    assert_eq!(names(&bar.right), ["status", "battery", "tray", "record", "power"]);
+    assert_eq!(bar.center_on.as_deref(), Some("dashboard"));
+    assert_eq!((bar.height, bar.floating, bar.reserve), (36, false, true));
+    let opt = |w: &str, k: &str| default.widgets[w].values[k].value.clone();
+    assert_eq!(opt("workspaces", "style"), s("text"));
+    assert_eq!(opt("workspaces", "active_format"), s("-{label}-"));
+    assert_eq!(opt("workspaces", "hide_empty"), b(true));
+    assert_eq!(opt("media", "format"), s("{title} - {artist}"));
+    assert_eq!(opt("media", "max_width"), Value::Int(320));
+    assert_eq!(opt("media", "progress"), b(true));
+    assert_eq!(opt("media", "icon"), s("app"));
+    assert_eq!(opt("clock", "hover_format"), s("HH:mm:ss"));
+    assert_eq!(opt("date", "format"), s("MM-dd"));
+    assert_eq!(opt("date", "hover_format"), s("dddd d MMMM, yyyy"));
+    assert_eq!(opt("battery", "hover_format"), s("{time}"));
+    assert_eq!(opt("battery", "unknown"), s("--:--"));
+    assert_eq!(opt("status", "mic"), b(true));
+    assert_eq!(opt("status", "bluetooth"), b(true));
+    // Every token of the design is defined in both themes.
+    let css = asset_text("presets/default.css");
+    for token in [
+        "seg0",
+        "seg1",
+        "seg2",
+        "panel",
+        "card",
+        "input",
+        "row",
+        "row-selected",
+        "row-hover",
+        "tile-hover",
+        "fg",
+        "muted",
+        "mem",
+        "accent",
+        "accent-fg",
+        "accent-text",
+        "accent-line",
+        "placeholder",
+        "dim",
+        "row-tint",
+        "audio-fill",
+        "power-fill-1",
+        "power-fill-2",
+        "power-fill-3",
+        "power-fill-4",
+        "power-tile",
+        "power-icon-hover",
+        "overlay-dim",
+        "overlay-dim-blur",
+        "lock-curtain",
+        "scrollbar-thumb",
+    ] {
+        let line = format!("\n\t\t--{token}:");
+        assert_eq!(css.matches(&line).count(), 2, "--{token} is set once for dark and once for light");
+    }
 }

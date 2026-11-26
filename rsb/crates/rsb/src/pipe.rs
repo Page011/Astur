@@ -544,6 +544,10 @@ pub fn send_to(name: &str, command: &Command, timeout: Duration) -> Result<Reply
         Err(e) => return Err(refused(format!("cannot check who owns the pipe ({e})"))),
     }
 
+    if opens_a_popup(command) {
+        allow_foreground(server_pid);
+    }
+
     let mode = PIPE_READMODE_MESSAGE;
     // SAFETY: `mode` is a live local.
     unsafe { SetNamedPipeHandleState(pipe.0, Some(&mode), None, None) }
@@ -560,6 +564,24 @@ pub fn send_to(name: &str, command: &Command, timeout: Duration) -> Result<Reply
     let mut buf = vec![0u8; MAX_REPLY_BYTES + 1];
     let n = read_message(pipe.0, event.0, None, left_ms(deadline), &mut buf).map_err(|f| refused(describe(f)))?;
     Reply::decode(&buf[..n]).map_err(|e| refused(e.to_string()))
+}
+
+/// `rsb popup <name>` may open a popup that takes keyboard focus. Windows lets
+/// a process take the foreground only when the process that had the user's
+/// last input hands the right over, so the client (which a hotkey tool just
+/// started) passes it to the bar it has just checked belongs to this user.
+fn opens_a_popup(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Popup { action: rsb_core::popup::PopupAction::Open | rsb_core::popup::PopupAction::Toggle, .. }
+    )
+}
+
+fn allow_foreground(server_pid: u32) {
+    // SAFETY: a plain process id; a failure only means the popup will not take focus.
+    if let Err(e) = unsafe { windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow(server_pid) } {
+        log::debug!("AllowSetForegroundWindow: {e}");
+    }
 }
 
 fn describe(fail: IoFail) -> String {
@@ -646,6 +668,26 @@ mod tests {
 
     fn echo() -> Handler {
         Arc::new(|c: Command| Reply::Ok(format!("got {}", c.encode().trim_end())))
+    }
+
+    #[test]
+    fn only_a_command_that_can_open_a_popup_passes_the_right_to_take_focus() {
+        use rsb_core::popup::PopupAction::{Close, Open, Toggle};
+        let popup = |action| Command::Popup { name: "launcher".into(), action };
+        assert!(opens_a_popup(&popup(Open)));
+        assert!(opens_a_popup(&popup(Toggle)));
+        assert!(!opens_a_popup(&popup(Close)));
+        assert!(!opens_a_popup(&Command::Toggle(None)) && !opens_a_popup(&Command::Reload));
+    }
+
+    #[test]
+    fn a_popup_command_round_trips_through_a_real_pipe_and_the_client_passes_the_right() {
+        // The server here is this process: the right to the foreground is passed to ourselves, which is harmless.
+        let name = test_name();
+        let server = PipeServer::start_named(&name, echo()).unwrap();
+        let command = Command::Popup { name: "launcher".into(), action: rsb_core::popup::PopupAction::Open };
+        assert_eq!(send_to(&name, &command, Duration::from_secs(5)), Ok(Reply::Ok("got popup launcher open".into())));
+        server.stop();
     }
 
     #[test]

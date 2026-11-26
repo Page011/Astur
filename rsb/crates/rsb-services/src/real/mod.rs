@@ -10,12 +10,22 @@ use rsb_core::services::ServiceId;
 use crate::win::{Owned, manual_event, signal};
 use crate::{HubOptions, Service, ServiceFactory};
 
+pub(crate) mod apps;
 pub(crate) mod audio;
 pub(crate) mod battery;
+pub(crate) mod bluetooth;
+pub(crate) mod endpoints;
+pub(crate) mod images;
 pub(crate) mod media;
+pub(crate) mod microphone;
 pub(crate) mod network;
+pub(crate) mod policy_config;
+pub(crate) mod power;
+pub(crate) mod power_mode;
 pub(crate) mod system;
+pub(crate) mod wifi;
 pub(crate) mod window;
+pub(crate) mod winrt;
 
 /// Makes the real services.
 pub struct RealFactory;
@@ -30,6 +40,11 @@ impl ServiceFactory for RealFactory {
             ServiceId::Media => Box::new(media::MediaService::new()),
             ServiceId::Window => Box::new(window::WindowService::new()),
             ServiceId::Workspaces => Box::new(crate::workspaces::WorkspacesService::new(options.workspaces.clone())),
+            ServiceId::Microphone => Box::new(microphone::MicrophoneService::new()),
+            ServiceId::Bluetooth => Box::new(bluetooth::BluetoothService::new()),
+            ServiceId::Apps => Box::new(apps::AppsService::new()),
+            ServiceId::Power => Box::new(power::PowerService::new(options.power_actions.clone())),
+            ServiceId::Wifi => Box::new(wifi::WifiService::new()),
         }
     }
 }

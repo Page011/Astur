@@ -14,10 +14,15 @@ pub enum ServiceId {
     Media,
     Window,
     Workspaces,
+    Microphone,
+    Bluetooth,
+    Apps,
+    Power,
+    Wifi,
 }
 
 impl ServiceId {
-    pub const ALL: [ServiceId; 7] = [
+    pub const ALL: [ServiceId; 12] = [
         ServiceId::System,
         ServiceId::Battery,
         ServiceId::Audio,
@@ -25,6 +30,11 @@ impl ServiceId {
         ServiceId::Media,
         ServiceId::Window,
         ServiceId::Workspaces,
+        ServiceId::Microphone,
+        ServiceId::Bluetooth,
+        ServiceId::Apps,
+        ServiceId::Power,
+        ServiceId::Wifi,
     ];
 
     /// Name in Luau (`rsb.services.<name>`), logs and permissions.
@@ -37,6 +47,11 @@ impl ServiceId {
             ServiceId::Media => "media",
             ServiceId::Window => "window",
             ServiceId::Workspaces => "workspaces",
+            ServiceId::Microphone => "microphone",
+            ServiceId::Bluetooth => "bluetooth",
+            ServiceId::Apps => "apps",
+            ServiceId::Power => "power",
+            ServiceId::Wifi => "wifi",
         }
     }
 
@@ -96,6 +111,180 @@ pub enum ServiceCommand {
     Audio(AudioCommand),
     Media(MediaCommand),
     Workspaces(WorkspaceCommand),
+    AudioDevice(AudioDeviceCommand),
+    Microphone(MicrophoneCommand),
+    Bluetooth(BluetoothCommand),
+    Apps(AppsCommand),
+    Power(PowerCommand),
+    Wifi(WifiCommand),
+}
+
+impl ServiceCommand {
+    /// The service that carries it out.
+    pub fn service(&self) -> ServiceId {
+        match self {
+            ServiceCommand::Audio(_) | ServiceCommand::AudioDevice(_) => ServiceId::Audio,
+            ServiceCommand::Media(_) => ServiceId::Media,
+            ServiceCommand::Workspaces(_) => ServiceId::Workspaces,
+            ServiceCommand::Microphone(_) => ServiceId::Microphone,
+            ServiceCommand::Bluetooth(_) => ServiceId::Bluetooth,
+            ServiceCommand::Apps(_) => ServiceId::Apps,
+            ServiceCommand::Power(_) => ServiceId::Power,
+            ServiceCommand::Wifi(_) => ServiceId::Wifi,
+        }
+    }
+
+    /// The command's Luau method name (`set_default`, `launch`), for stats
+    /// and logs: never its arguments, which can be device or app ids.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            ServiceCommand::Audio(c) => match c {
+                AudioCommand::SetVolume(_) => "set_volume",
+                AudioCommand::ChangeVolume(_) => "change_volume",
+                AudioCommand::SetMute(_) => "set_mute",
+                AudioCommand::ToggleMute => "toggle_mute",
+            },
+            ServiceCommand::AudioDevice(c) => match c {
+                AudioDeviceCommand::SetDefault(_) => "set_default",
+                AudioDeviceCommand::SetVolume(..) => "set_device_volume",
+                AudioDeviceCommand::SetMuted(..) => "set_device_muted",
+            },
+            ServiceCommand::Media(c) => match c {
+                MediaCommand::PlayPause => "play_pause",
+                MediaCommand::Play => "play",
+                MediaCommand::Pause => "pause",
+                MediaCommand::Next => "next",
+                MediaCommand::Previous => "previous",
+                MediaCommand::Seek(_) => "seek",
+            },
+            ServiceCommand::Workspaces(c) => match c {
+                WorkspaceCommand::Focus(_) => "focus",
+                WorkspaceCommand::FocusNext(_) => "focus_next",
+                WorkspaceCommand::FocusPrevious(_) => "focus_previous",
+            },
+            ServiceCommand::Microphone(c) => match c {
+                MicrophoneCommand::SetMuted(_) => "set_muted",
+                MicrophoneCommand::ToggleMute => "toggle_mute",
+            },
+            ServiceCommand::Bluetooth(c) => match c {
+                BluetoothCommand::SetEnabled(_) => "set_enabled",
+                BluetoothCommand::Connect(_) => "connect",
+                BluetoothCommand::Disconnect(_) => "disconnect",
+                BluetoothCommand::Forget(_) => "forget",
+                BluetoothCommand::OpenSettings => "open_settings",
+                BluetoothCommand::Rescan => "rescan",
+            },
+            ServiceCommand::Apps(c) => match c {
+                AppsCommand::Launch(_) => "launch",
+                AppsCommand::OpenUri(_) => "open_uri",
+            },
+            ServiceCommand::Power(c) => match c {
+                PowerCommand::SetMode(_) => "set_mode",
+                PowerCommand::Lock => "lock",
+                PowerCommand::Sleep => "sleep",
+                PowerCommand::Restart => "restart",
+                PowerCommand::ShutDown => "shut_down",
+                PowerCommand::SignOut => "sign_out",
+            },
+            ServiceCommand::Wifi(c) => match c {
+                WifiCommand::Scan => "scan",
+                WifiCommand::Connect(_) => "connect",
+                WifiCommand::Disconnect => "disconnect",
+            },
+        }
+    }
+}
+
+/// Commands on one audio device, by `AudioDevice.id`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AudioDeviceCommand {
+    /// Make it the default output (and the default communications output).
+    /// Uses an interface Windows does not document; fails with "not
+    /// available" when it is missing.
+    SetDefault(String),
+    /// 0..=100
+    SetVolume(String, f32),
+    SetMuted(String, bool),
+}
+
+/// The default recording device.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MicrophoneCommand {
+    SetMuted(bool),
+    ToggleMute,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BluetoothCommand {
+    /// Turn the Bluetooth radio on or off.
+    SetEnabled(bool),
+    /// Reconnect or disconnect a paired device's audio, by
+    /// `BluetoothDevice.id` (audio devices only: `can_connect`).
+    Connect(String),
+    Disconnect(String),
+    /// Remove the pairing.
+    Forget(String),
+    /// Open Windows' own Bluetooth page (pairing a new device happens there).
+    OpenSettings,
+    /// Read the paired devices and their state again now.
+    Rescan,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AppsCommand {
+    /// Start an app by `App.id`.
+    Launch(String),
+    /// Open one of Windows' own pages: `ms-settings:` or `ms-screenclip:`
+    /// URIs only (settings pages, the Snipping Tool recorder).
+    OpenUri(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerCommand {
+    /// The power mode slider (best power efficiency, balanced, best
+    /// performance). Uses an interface Windows does not document.
+    SetMode(PowerMode),
+    /// `LockWorkStation`.
+    Lock,
+    Sleep,
+    Restart,
+    ShutDown,
+    SignOut,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum PowerMode {
+    Efficiency,
+    Balanced,
+    Performance,
+}
+
+impl PowerMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            PowerMode::Efficiency => "efficiency",
+            PowerMode::Balanced => "balanced",
+            PowerMode::Performance => "performance",
+        }
+    }
+
+    pub fn from_name(s: &str) -> Option<PowerMode> {
+        match s {
+            "efficiency" => Some(PowerMode::Efficiency),
+            "balanced" => Some(PowerMode::Balanced),
+            "performance" => Some(PowerMode::Performance),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WifiCommand {
+    /// Ask the adapter for a fresh list (results arrive as a new value).
+    Scan,
+    /// Connect to a network that has a saved profile, by SSID.
+    Connect(String),
+    Disconnect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -115,6 +304,8 @@ pub enum MediaCommand {
     Pause,
     Next,
     Previous,
+    /// Jump to this position in the track, milliseconds.
+    Seek(u64),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -205,6 +396,51 @@ pub static SERVICE_TYPES: &[TypeSchema] = &[
             f("window_count", "number", "number of windows"),
         ],
     },
+    TypeSchema {
+        name: "AudioDevice",
+        doc: "An audio output or input device",
+        fields: &[
+            f("id", "string", "Windows' endpoint id; pass it to set_default and the other device commands"),
+            f("name", "string", "the name Windows shows (never logged)"),
+            f("kind", "AudioDeviceKind", "\"output\" or \"input\""),
+            f("default", "boolean", "the default device of its kind"),
+            f("volume", "number", "0-100"),
+            f("muted", "boolean", "muted"),
+            f("bluetooth", "boolean", "a Bluetooth device"),
+        ],
+    },
+    TypeSchema {
+        name: "BluetoothDevice",
+        doc: "A paired Bluetooth device",
+        fields: &[
+            f("id", "string", "device id; pass it to connect, disconnect and forget"),
+            f("name", "string", "the device's name (never logged)"),
+            f("kind", "BluetoothKind", "what sort of device it is"),
+            f("connected", "boolean", "connected now"),
+            f("battery", "number?", "battery 0-100 when the device reports it"),
+            f("can_connect", "boolean", "RSB can connect and disconnect it (audio devices)"),
+        ],
+    },
+    TypeSchema {
+        name: "App",
+        doc: "An app from the Start menu",
+        fields: &[
+            f("id", "string", "launch id; pass it to launch"),
+            f("name", "string", "the name the Start menu shows"),
+            f("icon", "string?", "image key for rsb.image { src = app.icon }, once the icon is ready"),
+        ],
+    },
+    TypeSchema {
+        name: "WifiNetwork",
+        doc: "A Wi-Fi network in range",
+        fields: &[
+            f("ssid", "string?", "network name; nil when Windows withholds it (location permission) (never logged)"),
+            f("signal", "number", "signal 0-100"),
+            f("secure", "boolean", "needs a password"),
+            f("connected", "boolean", "connected now"),
+            f("known", "boolean", "Windows has a saved profile for it"),
+        ],
+    },
 ];
 
 pub static SERVICE_SCHEMAS: &[ServiceSchema] = &[
@@ -244,12 +480,22 @@ pub static SERVICE_SCHEMAS: &[ServiceSchema] = &[
             f("available", "boolean", "an output device exists"),
             f("volume", "number", "0-100"),
             f("muted", "boolean", "muted"),
+            f("devices", "{AudioDevice}?", "output devices, the default first"),
+            f("inputs", "{AudioDevice}?", "input (recording) devices, the default first"),
+            f(
+                "switch_available",
+                "boolean?",
+                "set_default works here (it uses an interface Windows does not document)",
+            ),
         ],
         commands: &[
             c("set_volume", "percent: number", "set the volume, 0-100"),
             c("change_volume", "delta: number", "add delta (may be negative) to the volume"),
             c("set_muted", "muted: boolean", "mute or unmute"),
             c("toggle_mute", "", "flip mute"),
+            c("set_default", "id: string", "make this output the default"),
+            c("set_device_volume", "id: string, percent: number", "set one device's volume, 0-100"),
+            c("set_device_muted", "id: string, muted: boolean", "mute or unmute one device"),
         ],
         sampled: false,
     },
@@ -283,6 +529,12 @@ pub static SERVICE_SCHEMAS: &[ServiceSchema] = &[
             f("can_play_pause", "boolean", "play/pause is allowed"),
             f("can_next", "boolean", "next is allowed"),
             f("can_previous", "boolean", "previous is allowed"),
+            f("position", "number?", "seconds into the track when position_at was read"),
+            f("position_at", "number?", "when position was read, ms since 1970 (add the time since while playing)"),
+            f("length", "number?", "track length in seconds"),
+            f("can_seek", "boolean?", "seek is allowed"),
+            f("art", "string?", "image key of the cover for rsb.image { src = media.art } (kept in memory only)"),
+            f("app_icon", "string?", "image key of the player app's own icon, when Windows has one for it"),
         ],
         commands: &[
             c("play_pause", "", "toggle play and pause"),
@@ -290,6 +542,7 @@ pub static SERVICE_SCHEMAS: &[ServiceSchema] = &[
             c("pause", "", "pause"),
             c("next", "", "next track"),
             c("previous", "", "previous track"),
+            c("seek", "seconds: number", "jump to this position in the track"),
         ],
         sampled: false,
     },
@@ -321,6 +574,93 @@ pub static SERVICE_SCHEMAS: &[ServiceSchema] = &[
         ],
         sampled: false,
     },
+    ServiceSchema {
+        id: ServiceId::Microphone,
+        type_name: "MicrophoneService",
+        doc: "The default recording device, and whether any app is using a microphone",
+        fields: &[
+            f("available", "boolean", "a recording device exists"),
+            f("muted", "boolean", "the default recording device is muted"),
+            f("volume", "number", "its level, 0-100"),
+            f("in_use", "boolean", "an app is recording from a microphone now"),
+        ],
+        commands: &[
+            c("set_muted", "muted: boolean", "mute or unmute the default recording device"),
+            c("toggle_mute", "", "flip its mute"),
+        ],
+        sampled: false,
+    },
+    ServiceSchema {
+        id: ServiceId::Bluetooth,
+        type_name: "BluetoothService",
+        doc: "The Bluetooth radio and paired devices",
+        fields: &[
+            f("available", "boolean", "this PC has a Bluetooth radio"),
+            f("enabled", "boolean", "the radio is on"),
+            f("can_toggle", "boolean", "RSB may turn the radio on and off"),
+            f("devices", "{BluetoothDevice}", "paired devices, connected first"),
+        ],
+        commands: &[
+            c("set_enabled", "on: boolean", "turn the radio on or off"),
+            c("connect", "id: string", "connect a paired audio device"),
+            c("disconnect", "id: string", "disconnect a paired audio device"),
+            c("forget", "id: string", "remove a pairing"),
+            c("open_settings", "", "open Windows' Bluetooth page to pair a new device"),
+            c("rescan", "", "read the paired devices and their state again"),
+        ],
+        sampled: false,
+    },
+    ServiceSchema {
+        id: ServiceId::Apps,
+        type_name: "AppsService",
+        doc: "Apps in the Start menu, for a launcher",
+        fields: &[f("ready", "boolean", "the list has been read"), f("apps", "{App}", "every app, sorted by name")],
+        commands: &[
+            c("launch", "id: string", "start an app"),
+            c("open_uri", "uri: string", "open a Windows page: ms-settings: or ms-screenclip: only"),
+        ],
+        sampled: false,
+    },
+    ServiceSchema {
+        id: ServiceId::Power,
+        type_name: "PowerService",
+        doc: "Power mode and the lock, sleep, restart, shut down and sign out actions",
+        fields: &[
+            f("mode", "PowerMode", "\"efficiency\", \"balanced\", \"performance\" or \"unknown\""),
+            f("mode_available", "boolean", "set_mode works here (it uses an interface Windows does not document)"),
+            f("can_sleep", "boolean", "this PC can sleep"),
+        ],
+        commands: &[
+            c("set_mode", "mode: PowerMode", "change the power mode"),
+            c("lock", "", "lock the PC (Windows' lock screen)"),
+            c("sleep", "", "sleep"),
+            c("restart", "", "restart"),
+            c("shut_down", "", "shut down"),
+            c("sign_out", "", "sign out"),
+        ],
+        sampled: false,
+    },
+    ServiceSchema {
+        id: ServiceId::Wifi,
+        type_name: "WifiService",
+        doc: "Wi-Fi networks in range",
+        fields: &[
+            f("available", "boolean", "this PC has a Wi-Fi adapter"),
+            f("scanning", "boolean", "a scan is running"),
+            f("networks", "{WifiNetwork}", "networks in range, strongest first"),
+            f(
+                "access",
+                "WifiAccess?",
+                "\"needs_location\": Windows shares network lists with desktop apps only when location is on for them",
+            ),
+        ],
+        commands: &[
+            c("scan", "", "look for networks again"),
+            c("connect", "ssid: string", "connect to a network Windows has a saved profile for"),
+            c("disconnect", "", "disconnect from the current network"),
+        ],
+        sampled: false,
+    },
 ];
 
 /// Luau literal unions named by fields above.
@@ -328,6 +668,10 @@ pub static SERVICE_ENUMS: &[(&str, &[&str])] = &[
     ("ServiceStatus", &["off", "starting", "ok", "stale", "unavailable", "error"]),
     ("NetworkKind", &["wifi", "ethernet", "cellular", "other", "none"]),
     ("WorkspaceProvider", &["glazewm", "komorebi", "none"]),
+    ("AudioDeviceKind", &["output", "input"]),
+    ("BluetoothKind", &["audio", "input", "phone", "computer", "wearable", "other"]),
+    ("PowerMode", &["efficiency", "balanced", "performance", "unknown"]),
+    ("WifiAccess", &["allowed", "needs_location"]),
 ];
 
 pub fn schema(id: ServiceId) -> &'static ServiceSchema {

@@ -409,6 +409,7 @@ fn a_preempted_call_is_not_stopped_but_250_ms_of_wall_time_always_is() {
         kind: rsb_core::hit::InputKind::Click(rsb_core::hit::Button::Right),
         x: 0.0,
         y: 0.0,
+        gesture: 1,
     }));
     let e = t.elapsed();
     assert!(matches!(h.state_of(1), WidgetState::Stopped(_)));

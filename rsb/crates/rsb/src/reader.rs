@@ -18,6 +18,7 @@ use rsb_core::wake::Wake;
 use rsb_services::watch::DirWatcher;
 
 use crate::cfgload::{self, read_capped};
+use crate::fonts::FontCache;
 use crate::msg::{ConfigUpdate, ReloadKind, UiMsg};
 use crate::stats::wall_ms;
 
@@ -32,6 +33,8 @@ enum ReaderMsg {
 pub struct Touched {
     pub toml: bool,
     pub css: bool,
+    /// A file in `fonts\` changed: the sheet's `@font-face` rules read again.
+    pub fonts: bool,
     /// `widgets/...` paths, `/` separators, relative to the config folder.
     pub widgets: BTreeSet<String>,
     /// Something was created, renamed or saved inside `widgets\`. Windows
@@ -63,6 +66,10 @@ pub fn classify(dir: &Path, paths: &[PathBuf]) -> Touched {
         let lower = name.to_ascii_lowercase();
         let in_widgets = first.eq_ignore_ascii_case(WIDGETS_DIR);
         if first.eq_ignore_ascii_case("types") || first.eq_ignore_ascii_case(".vscode") {
+            continue;
+        }
+        if first.eq_ignore_ascii_case("fonts") && parts.len() > 1 {
+            t.fonts = true;
             continue;
         }
         if parts.len() == 1 && lower == BAR_TOML {
@@ -116,6 +123,8 @@ struct Worker {
     /// Hash of the source last sent for each widget file, so a folder-level
     /// notice does not restart widgets whose file did not change.
     sent: HashMap<String, u64>,
+    /// Which font files the UI already has.
+    fonts: FontCache,
 }
 
 impl Worker {
@@ -126,7 +135,7 @@ impl Worker {
     }
 
     fn rebuild(&mut self, kind: ReloadKind, notified: u64) {
-        let built = cfgload::build(&self.dir, None, &self.preset);
+        let built = cfgload::build_cached(&self.dir, None, &self.preset, &mut self.fonts);
         if let Some(cfg) = &built.config {
             self.preset = cfg.preset.clone();
         }
@@ -192,7 +201,7 @@ impl Worker {
         if t.widgets_folder {
             self.scan_widgets(notified, true);
         }
-        if t.toml || t.css {
+        if t.toml || t.css || t.fonts {
             let kind = if t.toml { ReloadKind::Toml } else { ReloadKind::Css };
             self.rebuild(kind, notified);
         }
@@ -215,6 +224,7 @@ impl Reader {
         ui_tx: Sender<UiMsg>,
         script_tx: Sender<ScriptIn>,
         waker: Arc<dyn Wake>,
+        fonts: FontCache,
     ) -> Reader {
         let (tx, rx) = channel::<ReaderMsg>();
         let (done_tx, done) = channel();
@@ -244,7 +254,7 @@ impl Reader {
                 _ => None,
             })
             .collect();
-        let mut worker = Worker { known, sent, dir, ui_tx, script_tx, waker, preset };
+        let mut worker = Worker { known, sent, dir, ui_tx, script_tx, waker, preset, fonts };
         let thread = std::thread::Builder::new()
             .name("rsb-config".into())
             .spawn(move || {
@@ -314,6 +324,16 @@ mod tests {
     }
 
     #[test]
+    fn a_file_in_the_fonts_folder_means_the_font_rules_read_again() {
+        let dir = PathBuf::from(r"C:\cfg");
+        let t = classify(&dir, &[p(&dir, "fonts/Mine.ttf")]);
+        assert!(t.fonts && !t.toml && !t.css && !t.everything);
+        let t = classify(&dir, &[p(&dir, "Fonts/sub/x.otf"), p(&dir, "fonts")]);
+        assert!(t.fonts, "any case, any depth");
+        assert!(!classify(&dir, &[p(&dir, "fonts")]).fonts, "the folder alone says nothing");
+    }
+
+    #[test]
     fn the_folder_itself_means_read_everything_and_the_widgets_folder_only_a_look() {
         let dir = PathBuf::from(r"C:\cfg");
         assert!(classify(&dir, std::slice::from_ref(&dir)).everything);
@@ -357,6 +377,7 @@ mod tests {
             preset: String::new(),
             known,
             sent,
+            fonts: FontCache::default(),
         };
         Rig { dir, worker, script }
     }

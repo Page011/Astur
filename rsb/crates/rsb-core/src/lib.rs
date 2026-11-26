@@ -8,6 +8,8 @@
 //! - `draw`: the draw list a renderer consumes, and the damage diff.
 //! - `services`, `io`, `msg`: what crosses thread and crate boundaries.
 //! - `ipc`: the command-pipe wire format.
+//! - `popup`, `key`, `fuzzy`: popup placement and dismissal, keyboard and
+//!   text input, typo-tolerant search ranking.
 
 pub mod anim;
 pub mod color;
@@ -17,16 +19,19 @@ pub mod diag;
 pub mod draw;
 pub mod duration;
 pub mod element;
+pub mod fuzzy;
 pub mod geom;
 pub mod hit;
 pub mod icons;
 pub mod io;
 pub mod ipc;
+pub mod key;
 pub mod layout;
 pub mod msg;
 pub mod paths;
 pub mod permissions;
 pub mod pixels;
+pub mod popup;
 pub mod scene;
 pub mod services;
 pub mod style;

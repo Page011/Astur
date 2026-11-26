@@ -12,6 +12,7 @@ tiny-skia.workspace = true
 parley.workspace = true
 swash.workspace = true
 png.workspace = true
+resvg.workspace = true
 log.workspace = true
 
 [lints]

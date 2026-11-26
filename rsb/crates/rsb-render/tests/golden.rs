@@ -200,6 +200,10 @@ golden!(golden_text_spacing, scene_text_spacing);
 golden!(golden_text_tabular, scene_text_tabular);
 golden!(golden_emoji, scene_emoji);
 golden!(golden_icons, scene_icons);
+golden!(golden_paths, scene_paths);
+golden!(golden_chevrons, scene_chevrons);
+golden!(golden_svg, scene_svg);
+golden!(golden_mono, scene_mono);
 
 /// The reference images stay small.
 #[test]

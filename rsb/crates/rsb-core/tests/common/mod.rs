@@ -135,3 +135,91 @@ pub fn rect_of(i: &DrawItem) -> Option<RectF> {
 pub fn diag_text(d: &[Diagnostic]) -> Vec<String> {
     d.iter().map(|d| d.to_string()).collect()
 }
+
+// ---- popups, inputs and friends ----
+
+use rsb_core::element::{InputProps, SliderProps};
+use rsb_core::popup::{PopupDecl, PopupProps, Side};
+use rsb_core::scene::PopupSurfaceSpec;
+
+pub fn popup_el(props: PopupProps, kind: ElementKind, children: Vec<Element>) -> Element {
+    let mut e = Element::new(kind);
+    e.popup = Some(Box::new(props));
+    e.children = children;
+    e
+}
+
+pub fn open_props(seq: u64) -> PopupProps {
+    PopupProps { open: true, open_seq: seq, ..PopupProps::default() }
+}
+
+pub fn input_el(value: &str) -> Element {
+    let mut e = Element::new(ElementKind::Input);
+    e.input = Some(Box::new(InputProps { value: Arc::from(value), ..InputProps::default() }));
+    e
+}
+
+pub fn slider_el(props: SliderProps) -> Element {
+    let mut e = Element::new(ElementKind::Slider);
+    e.slider = Some(Box::new(props));
+    e
+}
+
+pub fn kind_el(kind: ElementKind, children: Vec<Element>) -> Element {
+    let mut e = Element::new(kind);
+    e.children = children;
+    e
+}
+
+pub fn focusable(mut e: Element) -> Element {
+    e.interaction.focusable = true;
+    e
+}
+
+pub fn spec(side: Side) -> PopupSurfaceSpec {
+    PopupSurfaceSpec { bar: bar(), slot: slot(1, "l"), kind: ElementKind::Popup, side, blur: false }
+}
+
+/// A bar scene with one widget: `root > .anchor > popup(content)`.
+pub fn bar_with_popup(css: &str, props: PopupProps, content: Vec<Element>) -> (Scene, Arc<WidgetTree>) {
+    let popup = popup_el(props, ElementKind::Popup, content);
+    let anchor = classed(boxed(vec![popup]), &["anchor"]);
+    let root = classed(boxed(vec![anchor]), &["root"]);
+    let mut s = scene_with(css, 400, 1.0, Some(root), None, None);
+    frame(&mut s, Instant::now());
+    let tr = tree_of(&s);
+    (s, tr)
+}
+
+/// The tree the scene was given for instance 1, rebuilt from `decls`.
+fn tree_of(s: &Scene) -> Arc<WidgetTree> {
+    s.popups().first().map(|d| d.tree.clone()).unwrap_or_else(|| tree(1, 1, None))
+}
+
+pub fn decls(s: &Scene) -> Vec<PopupDecl> {
+    s.popups()
+}
+
+/// A popup scene showing the popup `decl` declares.
+pub fn popup_scene(css: &str, decl: &PopupDecl, side: Side, w: u32, h: u32) -> Scene {
+    let kind = decl.kind;
+    let mut sp = spec(side);
+    sp.kind = kind;
+    let mut s = Scene::new_popup(sp, BarGeometry { width_px: w, height_px: h, scale: 1.0 }, env(true));
+    s.set_stylesheet(sheet(css));
+    s.set_popup_tree(decl.tree.clone(), decl.path.clone());
+    s
+}
+
+pub fn key_down(k: rsb_core::key::Key) -> rsb_core::key::KeyEvent {
+    rsb_core::key::KeyEvent { key: k, mods: rsb_core::key::Modifiers::default(), down: true, repeat: false }
+}
+
+pub fn key_mod(k: rsb_core::key::Key, ctrl: bool, shift: bool) -> rsb_core::key::KeyEvent {
+    rsb_core::key::KeyEvent {
+        key: k,
+        mods: rsb_core::key::Modifiers { ctrl, shift, alt: false, meta: false },
+        down: true,
+        repeat: false,
+    }
+}

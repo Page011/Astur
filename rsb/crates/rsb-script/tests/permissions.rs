@@ -25,6 +25,7 @@ fn click_right(h: &mut Harness, id: u32) {
         kind: rsb_core::hit::InputKind::Click(rsb_core::hit::Button::Right),
         x: 0.0,
         y: 0.0,
+        gesture: 1,
     }));
 }
 
@@ -43,7 +44,7 @@ fn the_grant_is_logged_once_per_load_with_broad_programs_marked() {
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert_eq!(
         lines[0],
-        "INFO granted granted: exec:cmd (can run any program), exec:git (can run any program), file:~/x.txt, net:api.open-meteo.com, control:audio, read:window, read:media, read:network"
+        "INFO granted granted: exec:cmd (can run any program), exec:git (can run any program), file:~/x.txt, net:api.open-meteo.com, control:audio (can change volume, mute and the default output device), read:window, read:media, read:network"
     );
 }
 

@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use mlua::{Error, Function, Lua, Thread, Value as Lv};
 use rsb_core::diag::{DiagKind, Diagnostic, Plate};
 use rsb_core::element::InstanceId;
-use rsb_core::hit::HandlerCall;
+use rsb_core::hit::{ElementCall, HandlerCall};
 use rsb_core::io::{ExecResult, HttpResponse, IoError, IoId};
 use rsb_core::msg::{Heartbeat, HubPort, InstanceSpec, ScriptSink, WidgetSource, WidgetState};
 use rsb_core::permissions::{PathEnv, Permissions};
+use rsb_core::popup::PopupAction;
 use rsb_core::services::{ServiceEvent, ServiceId};
 use rsb_core::time::{Clock, Precision, ThreadTime, TimeZone};
 use rsb_core::value::Value;
@@ -187,6 +188,8 @@ pub(crate) struct Inst {
     pub ref_text: String,
     pub source: WidgetSource,
     pub builtin: bool,
+    /// A user file standing in for the built-in widget of the same name.
+    pub replaces_builtin: bool,
     /// Relative paths (entry file and required modules) the instance loaded.
     pub files: HashSet<String>,
     /// Folder of the entry file relative to the config (or assets) folder.
@@ -206,6 +209,9 @@ pub(crate) struct Inst {
     pub version: u64,
     pub dirty: bool,
     pub error_until: Option<Instant>,
+    /// The failure behind `error_until`, one line without a path: what an
+    /// empty popup shows in place of its content.
+    pub last_error: Option<String>,
     pub err_times: VecDeque<Instant>,
     pub cpu: VecDeque<(Instant, Duration)>,
     /// Sum of `cpu`, kept up to date so a check costs the same however many
@@ -223,6 +229,8 @@ pub(crate) struct Inst {
     pub loading: Vec<String>,
     pub timer_warned: bool,
     pub widget_name: String,
+    /// When the last gesture-only command ran, for the one-per-2-seconds limit.
+    pub gesture_cmd_at: Option<Instant>,
 }
 
 pub(crate) struct Task {
@@ -282,11 +290,30 @@ pub(crate) enum Payload {
 
 pub(crate) enum Work {
     Timer(u64),
-    Resume { task: u64, payload: Payload },
-    Event { sub: u64, data: Rc<Value> },
+    Resume {
+        task: u64,
+        payload: Payload,
+    },
+    Event {
+        sub: u64,
+        data: Rc<Value>,
+    },
     Input(HandlerCall),
+    /// A key, text, value, focus, scroll or popup event for one handler.
+    Element(ElementCall),
+    /// `rsb popup` or `rsb.popups.*`: open, close or toggle one popup of the
+    /// instance; `gesture` is the user input the command came from, if any.
+    Popup {
+        pid: u64,
+        action: PopupAction,
+        name: String,
+        gesture: Option<u64>,
+    },
     Flush,
-    Callback { f: Function, args: Vec<Value> },
+    Callback {
+        f: Function,
+        args: Vec<Value>,
+    },
 }
 
 #[derive(Default)]
@@ -303,6 +330,8 @@ pub(crate) struct State {
     pub pending_flush: BTreeSet<InstanceId>,
     pub svc: HashMap<ServiceId, ServiceEvent>,
     pub user_src: HashMap<String, Option<String>>,
+    /// User files already reported as replacing a built-in widget.
+    pub replaced_reported: HashSet<String>,
     pub cur: Option<Cur>,
     pub cur_task: Option<u64>,
     pub diags: Vec<Diagnostic>,
@@ -312,18 +341,65 @@ pub(crate) struct State {
     pub event_subs: HashMap<u64, EventSub>,
     pub next_sub: u64,
     pub turn: u64,
-    /// True while a click handler's first run is on the stack: the only time
-    /// `rsb.open_url` may open anything.
-    pub in_click: bool,
+    /// Set while the first run of a click or key handler (or `rsb popup`) is
+    /// on the stack: the id of that user input. The only time a
+    /// gesture-only command may run (`rsb.open_url`, power actions, ...).
+    pub gesture: Option<u64>,
     pub last_open: Option<Instant>,
+    /// Popups made by `rsb.popup` and `rsb.menu`, by id.
+    pub popups: BTreeMap<u64, PopReg>,
+    pub next_popup: u64,
+    /// Open states to push into every VM: (`name@monitor`, open).
+    pub popup_events: Vec<(String, bool)>,
+    /// `name@monitor` keys of popups that are open now.
+    pub popup_open: HashSet<String>,
     pub dark: bool,
     pub vm_mem: HashMap<VmId, usize>,
     /// Plates and trees queued for the end of the turn.
     pub plates: Vec<(InstanceId, Option<Plate>)>,
     pub cleared: Vec<InstanceId>,
+    /// Failures to tell the bar plate about, and the ones that ended.
+    pub error_notes: Vec<(InstanceId, Option<Diagnostic>)>,
     /// Instances the UI currently shows a plate for, so a later good load
     /// can tell it to clear.
     pub plates_shown: BTreeSet<InstanceId>,
+}
+
+/// One popup or menu a widget made, as the command lookup sees it.
+#[derive(Clone, Debug)]
+pub(crate) struct PopReg {
+    pub inst: InstanceId,
+    /// Monitor handle of the instance, for `name@monitor` keys.
+    pub monitor: u64,
+    pub names: Vec<String>,
+    pub open: bool,
+}
+
+impl State {
+    /// Recomputes whether each of `names` is open on `monitor` and queues a
+    /// push into every VM for the ones that changed.
+    pub(crate) fn popup_sync(&mut self, names: &[String], monitor: u64) {
+        for name in names {
+            let open = self.popups.values().any(|r| r.monitor == monitor && r.open && r.names.contains(name));
+            let key = format!("{name}@{monitor}");
+            let was = self.popup_open.contains(&key);
+            if open != was {
+                if open {
+                    self.popup_open.insert(key.clone());
+                } else {
+                    self.popup_open.remove(&key);
+                }
+                self.popup_events.push((key, open));
+            }
+        }
+    }
+
+    /// Forgets one popup (its widget stopped or the popup was disposed).
+    pub(crate) fn popup_drop(&mut self, pid: u64) {
+        if let Some(reg) = self.popups.remove(&pid) {
+            self.popup_sync(&reg.names, reg.monitor);
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -675,6 +751,14 @@ impl Shared {
             i.errors += 1;
             i.dirty = true;
             i.error_until = Some(now + Duration::from_secs(10));
+            let (pos, text) = error_line(msg);
+            i.last_error = Some(match &pos {
+                Some(p) => format!("{p} {text}"),
+                None => text.clone(),
+            });
+            let note = Diagnostic::warning(DiagKind::Script, pos, text);
+            st.error_notes.push((inst, Some(note)));
+            let i = st.instances.get_mut(&inst)?;
             i.err_times.push_back(now);
             while let Some(t) = i.err_times.front() {
                 if now.saturating_duration_since(*t) > lim.error_window {
@@ -696,6 +780,21 @@ impl Shared {
         st.next_io += 1;
         IoId(st.next_io)
     }
+}
+
+/// `widgets/doc/broken.luau:20: attempt to index nil` as a position (`doc/broken.luau`, line 20) and the
+/// message, cut and cleaned for the screen. A message with no such start keeps its text.
+pub(crate) fn error_line(msg: &str) -> (Option<rsb_core::diag::SourcePos>, String) {
+    let first = msg.lines().next().unwrap_or("");
+    if let Some((file, rest)) = first.split_once(".luau:")
+        && let Some((line, text)) = rest.split_once(':')
+        && let Ok(line) = line.trim().parse::<u32>()
+        && !file.contains(['\\', ':'])
+    {
+        let name = file.strip_prefix("widgets/").unwrap_or(file);
+        return (Some(rsb_core::diag::SourcePos::new(&format!("{name}.luau"), line, 0)), escape_log(text.trim(), 100));
+    }
+    (None, escape_log(first.trim(), 100))
 }
 
 /// Control characters and line breaks are escaped so a script cannot forge

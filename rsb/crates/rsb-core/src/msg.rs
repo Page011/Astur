@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use crate::config::{WidgetOptions, WidgetRef};
 use crate::diag::{Diagnostic, Plate, SourcePos};
 use crate::element::{InstanceId, WidgetTree};
-use crate::hit::HandlerCall;
+use crate::hit::{ElementCall, HandlerCall};
 use crate::io::{IoEvent, IoGrant, IoId, IoRequest};
 use crate::services::{ServiceCommand, ServiceEvent, ServiceId, ServiceStatus};
 use crate::value::Value;
@@ -77,6 +77,14 @@ pub enum HubRequest {
 pub enum HubEvent {
     Service(ServiceEvent),
     Io(IoEvent),
+    /// An image a service made (album art, an app icon), keyed
+    /// `rsb-image:<service>/<id>` as its value names it. Held in memory
+    /// only. The binary routes it to the UI thread's renderer, never to
+    /// the script thread.
+    Image {
+        key: Arc<str>,
+        image: crate::pixels::RgbaImage,
+    },
 }
 
 /// Sending side of the hub, as the script runtime sees it.
@@ -178,6 +186,20 @@ pub enum ScriptIn {
         reply: Sender<Vec<WidgetStatus>>,
     },
     Shutdown,
+    /// A key, text, value, focus, scroll or popup-closed event for one
+    /// handler (from the scenes, like `Input`).
+    Element(ElementCall),
+    /// `rsb popup <name> [action]`: open, close or toggle the popup with
+    /// that name; `monitor` (HMONITOR value) picks among instances on
+    /// several monitors, None = the primary monitor's. `gesture` is the id
+    /// the UI gave this command (a hotkey tool running `rsb popup` is a
+    /// user's action); the runtime handles it inside that gesture.
+    Popup {
+        name: String,
+        action: crate::popup::PopupAction,
+        monitor: Option<u64>,
+        gesture: u64,
+    },
 }
 
 /// From the script thread. Sent at the end of each script turn, so one
@@ -192,6 +214,13 @@ pub enum ScriptOut {
     },
     /// Already logged by the script thread; the UI decides what is shown.
     Diagnostics(Vec<Diagnostic>),
+    /// A widget's code failed (a handler, an effect, a popup's content): the
+    /// bar plate counts it for as long as the widget shows its error state.
+    /// None clears it.
+    ErrorNote {
+        instance: InstanceId,
+        note: Option<Diagnostic>,
+    },
 }
 
 /// Receiving side of the UI, as the script thread sees it (a channel plus a
@@ -225,6 +254,9 @@ pub struct WidgetStatus {
     /// placed more than once.
     pub shared_vm: bool,
     pub source: WidgetSource,
+    /// A user file stands in for the built-in widget of the same name (its
+    /// popups and hotkey included).
+    pub replaces_builtin: bool,
     /// Uncaught errors in handlers, timers, tasks, effects and function
     /// props since load (these do not stop the widget unless 10 come within
     /// 10 s).

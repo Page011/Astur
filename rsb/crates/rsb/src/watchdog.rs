@@ -3,6 +3,11 @@
 //! interrupt cannot see (a long call inside a library function or a Rust
 //! callback): the UI is told, shows a bar plate and logs it once; when the
 //! call returns the plate clears. Cost: 60 wakes a minute and nothing else.
+//!
+//! While an overlay (the full-screen power menu) is shown it also watches
+//! the UI thread: a turn that has run for more than 2 s hides every overlay
+//! window, so a hung topmost window never traps the person at the screen.
+//! It wakes four times a second only while an overlay is shown.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
@@ -12,11 +17,26 @@ use std::time::{Duration, Instant};
 
 use rsb_core::msg::Heartbeat;
 use rsb_core::wake::Wake;
+use serde_json::json;
 
 use crate::msg::UiMsg;
+use crate::popups::OverlayWatch;
+use crate::stats::Stats;
 
 pub const STALL_AFTER: Duration = Duration::from_secs(2);
 const PERIOD: Duration = Duration::from_secs(1);
+/// How often it looks while an overlay is shown.
+const OVERLAY_PERIOD: Duration = Duration::from_millis(250);
+
+/// What the overlay check needs: the flag the UI sets while an overlay is
+/// shown, how long the UI thread's current turn has run, and the call that
+/// hides the overlay windows (it must not wait for the UI thread).
+pub struct OverlayGuard {
+    pub watch: Arc<OverlayWatch>,
+    pub busy_for: Box<dyn Fn() -> Duration + Send>,
+    pub hide: Box<dyn Fn() -> usize + Send>,
+    pub stats: Arc<Stats>,
+}
 
 pub struct Watchdog {
     stop: Arc<(Mutex<bool>, Condvar)>,
@@ -25,8 +45,13 @@ pub struct Watchdog {
 }
 
 impl Watchdog {
-    pub fn start(heartbeat: Arc<Heartbeat>, tx: Sender<UiMsg>, waker: Arc<dyn Wake>) -> Watchdog {
-        Watchdog::start_with(heartbeat, tx, waker, PERIOD, STALL_AFTER)
+    pub fn start(
+        heartbeat: Arc<Heartbeat>,
+        tx: Sender<UiMsg>,
+        waker: Arc<dyn Wake>,
+        overlays: Option<OverlayGuard>,
+    ) -> Watchdog {
+        Watchdog::start_guarded(heartbeat, tx, waker, PERIOD, STALL_AFTER, overlays)
     }
 
     /// The same with the timings chosen (tests shorten them).
@@ -36,6 +61,18 @@ impl Watchdog {
         waker: Arc<dyn Wake>,
         period: Duration,
         stall_after: Duration,
+    ) -> Watchdog {
+        Watchdog::start_guarded(heartbeat, tx, waker, period, stall_after, None)
+    }
+
+    /// The same with the overlay check, and the timings chosen.
+    pub fn start_guarded(
+        heartbeat: Arc<Heartbeat>,
+        tx: Sender<UiMsg>,
+        waker: Arc<dyn Wake>,
+        period: Duration,
+        stall_after: Duration,
+        overlays: Option<OverlayGuard>,
     ) -> Watchdog {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let wakes = Arc::new(AtomicU64::new(0));
@@ -47,12 +84,26 @@ impl Watchdog {
                 loop {
                     let (lock, cond) = &*thread_stop;
                     let guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-                    let (guard, _) = cond.wait_timeout_while(guard, period, |s| !*s).unwrap_or_else(|e| e.into_inner());
+                    let overlay_up = overlays.as_ref().is_some_and(|g| g.watch.shown.load(Ordering::Acquire));
+                    let wait = if overlay_up { OVERLAY_PERIOD.min(period) } else { period };
+                    let (guard, _) = cond.wait_timeout_while(guard, wait, |s| !*s).unwrap_or_else(|e| e.into_inner());
                     thread_wakes.fetch_add(1, Ordering::Relaxed);
                     if *guard {
                         break;
                     }
                     drop(guard);
+                    if let Some(g) = &overlays
+                        && g.watch.shown.load(Ordering::Acquire)
+                        && (g.busy_for)() >= STALL_AFTER
+                    {
+                        let windows = (g.hide)();
+                        if windows > 0 {
+                            let total = g.watch.hidden.fetch_add(1, Ordering::AcqRel) + 1;
+                            g.watch.shown.store(false, Ordering::Release);
+                            g.stats.emit("watchdog", json!({"overlays_hidden": total, "windows": windows}));
+                            log::error!("the UI thread stopped answering; the overlay was hidden");
+                        }
+                    }
                     match heartbeat.busy(Instant::now()) {
                         Some((instance, ran, call)) if ran >= stall_after => {
                             if reported != Some(call) {
@@ -149,7 +200,50 @@ mod tests {
     }
 
     #[test]
+    fn a_stalled_ui_thread_hides_the_overlays_once_and_only_while_one_is_shown() {
+        use std::sync::atomic::AtomicUsize;
+        let hb = Arc::new(Heartbeat::new());
+        let (tx, _rx) = channel();
+        let watch = Arc::new(OverlayWatch::default());
+        let busy_ms = Arc::new(AtomicU64::new(0));
+        let hidden_calls = Arc::new(AtomicUsize::new(0));
+        let (b, h) = (Arc::clone(&busy_ms), Arc::clone(&hidden_calls));
+        let guard = OverlayGuard {
+            watch: Arc::clone(&watch),
+            busy_for: Box::new(move || Duration::from_millis(b.load(Ordering::Relaxed))),
+            hide: Box::new(move || {
+                h.fetch_add(1, Ordering::Relaxed);
+                2
+            }),
+            stats: Arc::new(Stats::off()),
+        };
+        let dog = Watchdog::start_guarded(hb, tx, Arc::new(NoWake), PERIOD_TEST, Duration::from_secs(5), Some(guard));
+        // A long stall with no overlay up hides nothing.
+        busy_ms.store(3000, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(hidden_calls.load(Ordering::Relaxed), 0);
+        // Overlay up, UI turn shorter than the limit: nothing.
+        watch.shown.store(true, Ordering::Release);
+        busy_ms.store(1999, Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(hidden_calls.load(Ordering::Relaxed), 0);
+        // Over 2 s: hidden, once, and the counter the UI reads moves.
+        busy_ms.store(2001, Ordering::Relaxed);
+        let until = Instant::now() + Duration::from_secs(3);
+        while hidden_calls.load(Ordering::Relaxed) == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(hidden_calls.load(Ordering::Relaxed), 1);
+        std::thread::sleep(Duration::from_millis(300));
+        assert_eq!(hidden_calls.load(Ordering::Relaxed), 1, "the flag was cleared: no second hide for one stall");
+        assert_eq!(watch.hidden.load(Ordering::Acquire), 1);
+        assert!(!watch.shown.load(Ordering::Acquire));
+        dog.stop();
+    }
+
+    #[test]
     fn the_real_timings_are_one_second_and_two() {
         assert_eq!((PERIOD, STALL_AFTER), (Duration::from_secs(1), Duration::from_secs(2)));
+        assert_eq!(OVERLAY_PERIOD, Duration::from_millis(250));
     }
 }

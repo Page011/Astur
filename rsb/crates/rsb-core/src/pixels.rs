@@ -19,3 +19,29 @@ impl<'a> PixelsMut<'a> {
         self.width as usize * 4
     }
 }
+
+/// Prefix of in-memory image keys published by services (album art, app
+/// icons): `rsb-image:<service>/<id>`. Such an `ImageRef::path` is never
+/// opened as a file; the image arrives as `HubEvent::Image`.
+pub const IMAGE_KEY_PREFIX: &str = "rsb-image:";
+
+/// A decoded picture: premultiplied RGBA8, top-down, `width * 4` bytes per
+/// row. Shared, so handing it between threads copies no pixels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RgbaImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: std::sync::Arc<[u8]>,
+}
+
+impl RgbaImage {
+    /// None when `data` is not exactly `width * height * 4` bytes.
+    pub fn new(width: u32, height: u32, data: Vec<u8>) -> Option<RgbaImage> {
+        let need = (width as usize).checked_mul(height as usize)?.checked_mul(4)?;
+        (data.len() == need).then(|| RgbaImage { width, height, data: data.into() })
+    }
+
+    pub fn bytes(&self) -> usize {
+        self.data.len()
+    }
+}

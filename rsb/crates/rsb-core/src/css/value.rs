@@ -4,10 +4,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use super::{PropertyId, PropertyInfo};
+use super::{PropertyId, PropertyInfo, extra};
 use crate::anim::Easing;
 use crate::color::Color;
-use crate::style::{Align, Backdrop, Cursor, FlexDirection, Justify, LinearGradient, TextAlign, TransitionProperty};
+use crate::style::{
+    Align, AnimDirection, AnimFill, Backdrop, CornerShape, Cursor, FlexDirection, Justify, LinearGradient, Overflow,
+    ScrollbarWidth, TextAlign, TransitionProperty,
+};
 
 /// A length as written: px or em (em is resolved against the element's own
 /// font size at computed-value time).
@@ -24,6 +27,34 @@ pub(crate) enum DimVal {
     Px(f32),
     Em(f32),
     Percent(f32),
+}
+
+/// A length-percentage as written: `13px`, `50%`, `calc(100% - 13px)`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LpVal {
+    pub px: f32,
+    pub em: f32,
+    pub pct: f32,
+}
+
+impl LpVal {
+    pub const ZERO: LpVal = LpVal { px: 0.0, em: 0.0, pct: 0.0 };
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClipVal {
+    pub points: Vec<(LpVal, LpVal)>,
+    pub evenodd: bool,
+}
+
+/// `translate() scale()` composed into one: `tx`/`ty` already include the
+/// scale that preceded them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct TransformVal {
+    pub tx: LpVal,
+    pub ty: LpVal,
+    pub sx: f32,
+    pub sy: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -110,7 +141,8 @@ pub(crate) enum Longhand {
     LetterSpacing(Len),
     TextAlign(TextAlign),
     Ellipsis(bool),
-    Clip(bool),
+    OverflowX(Overflow),
+    OverflowY(Overflow),
     BoxShadow(Vec<ShadowVal>),
     DisplayNone(bool),
     Visible(bool),
@@ -121,6 +153,30 @@ pub(crate) enum Longhand {
     TransitionTiming(Vec<Easing>),
     Cursor(Cursor),
     Backdrop(Backdrop),
+    CornerShape([CornerShape; 4]),
+    ClipPath(Option<ClipVal>),
+    Transform(Option<TransformVal>),
+    TransformOrigin(LpVal, LpVal),
+    /// `None` = `animation-name: none`.
+    AnimName(Vec<Option<Arc<str>>>),
+    AnimDuration(Vec<Duration>),
+    AnimTiming(Vec<Easing>),
+    /// Seconds, negative allowed.
+    AnimDelay(Vec<f64>),
+    /// `f64::INFINITY` for `infinite`.
+    AnimIterations(Vec<f64>),
+    AnimDirection(Vec<AnimDirection>),
+    AnimFill(Vec<AnimFill>),
+    /// True = paused.
+    AnimPaused(Vec<bool>),
+    ScrollbarWidth(ScrollbarWidth),
+    ScrollbarColor(Option<(ColorVal, ColorVal)>),
+    CaretColor(Option<ColorVal>),
+    AccentColor(Option<ColorVal>),
+    OutlineWidth(Len),
+    OutlineColor(ColorVal),
+    OutlineOffset(Len),
+    PointerEvents(bool),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,7 +196,7 @@ pub(crate) enum Comp<'a> {
 }
 
 impl Comp<'_> {
-    fn text(&self) -> String {
+    pub(super) fn text(&self) -> String {
         match self {
             Comp::Word(w) => (*w).to_string(),
             Comp::Func(w, _, _) => (*w).to_string(),
@@ -149,7 +205,7 @@ impl Comp<'_> {
         }
     }
 
-    fn keyword(&self) -> Option<String> {
+    pub(super) fn keyword(&self) -> Option<String> {
         match self {
             Comp::Word(w) => Some(w.to_ascii_lowercase()),
             _ => None,
@@ -300,7 +356,7 @@ pub(crate) fn split_num(s: &str) -> Option<(f32, &str)> {
     (n.is_finite() && rest.bytes().all(|b| b.is_ascii_alphabetic() || b == b'%')).then_some((n, rest))
 }
 
-fn number(c: &Comp) -> Result<f32, String> {
+pub(super) fn number(c: &Comp) -> Result<f32, String> {
     match c {
         Comp::Word(w) => match split_num(w) {
             Some((n, "")) => Ok(n),
@@ -310,7 +366,7 @@ fn number(c: &Comp) -> Result<f32, String> {
     }
 }
 
-fn len(c: &Comp, ctx: Ctx) -> Result<Len, String> {
+pub(super) fn len(c: &Comp, ctx: Ctx) -> Result<Len, String> {
     match c {
         Comp::Word(w) => {
             let Some((n, unit)) = split_num(w) else {
@@ -327,12 +383,14 @@ fn len(c: &Comp, ctx: Ctx) -> Result<Len, String> {
                 u => Err(format!("unknown unit '{u}'; use px or em")),
             }
         }
-        Comp::Func(_, name, _) if name == "calc" => Err("calc() is not supported; write one length".into()),
+        Comp::Func(_, name, _) if name == "calc" => Err(CALC_MESSAGE.into()),
         other => Err(format!("expected a length like 12px, got '{}'", other.text())),
     }
 }
 
-fn nonneg(l: Len) -> Result<Len, String> {
+pub(super) const CALC_MESSAGE: &str = "calc() only works inside polygon(): use a length or a percentage";
+
+pub(super) fn nonneg(l: Len) -> Result<Len, String> {
     match l {
         Len::Px(v) | Len::Em(v) if v < 0.0 => Err("must not be negative".into()),
         l => Ok(l),
@@ -352,7 +410,7 @@ fn dim(c: &Comp, ctx: Ctx) -> Result<DimVal, String> {
     })
 }
 
-fn color(c: &Comp) -> Result<ColorVal, String> {
+pub(super) fn color(c: &Comp) -> Result<ColorVal, String> {
     match c {
         Comp::Word(w) if w.eq_ignore_ascii_case("currentcolor") => Ok(ColorVal::Current),
         Comp::Word(_) | Comp::Func(..) => Color::parse(&c.text()).map(ColorVal::Color),
@@ -360,7 +418,7 @@ fn color(c: &Comp) -> Result<ColorVal, String> {
     }
 }
 
-fn one<'a, 'b>(comps: &'b [Comp<'a>], what: &str) -> Result<&'b Comp<'a>, String> {
+pub(super) fn one<'a, 'b>(comps: &'b [Comp<'a>], what: &str) -> Result<&'b Comp<'a>, String> {
     match comps {
         [c] => Ok(c),
         [] => Err(format!("expected {what}")),
@@ -369,7 +427,7 @@ fn one<'a, 'b>(comps: &'b [Comp<'a>], what: &str) -> Result<&'b Comp<'a>, String
 }
 
 /// Expands 1 to 4 values in CSS order (top right bottom left).
-fn expand4<T: Copy>(v: &[T], what: &str) -> Result<[T; 4], String> {
+pub(super) fn expand4<T: Copy>(v: &[T], what: &str) -> Result<[T; 4], String> {
     match v {
         [a] => Ok([*a, *a, *a, *a]),
         [a, b] => Ok([*a, *b, *a, *b]),
@@ -379,11 +437,11 @@ fn expand4<T: Copy>(v: &[T], what: &str) -> Result<[T; 4], String> {
     }
 }
 
-fn no_commas<'a, 'b>(comps: &'b [Comp<'a>]) -> Result<&'b [Comp<'a>], String> {
+pub(super) fn no_commas<'a, 'b>(comps: &'b [Comp<'a>]) -> Result<&'b [Comp<'a>], String> {
     if comps.contains(&Comp::Comma) { Err("unexpected ','".into()) } else { Ok(comps) }
 }
 
-fn keyword_of(comps: &[Comp], allowed: &[&str]) -> Result<String, String> {
+pub(super) fn keyword_of(comps: &[Comp], allowed: &[&str]) -> Result<String, String> {
     let c = one(comps, &allowed.join(" | "))?;
     match c.keyword() {
         Some(k) if allowed.contains(&k.as_str()) => Ok(k),
@@ -394,7 +452,7 @@ fn keyword_of(comps: &[Comp], allowed: &[&str]) -> Result<String, String> {
 const SIDES: [Side; 4] = [Side::Top, Side::Right, Side::Bottom, Side::Left];
 const CORNERS: [Corner; 4] = [Corner::Tl, Corner::Tr, Corner::Br, Corner::Bl];
 
-fn time(c: &Comp) -> Result<Duration, String> {
+pub(super) fn time(c: &Comp) -> Result<Duration, String> {
     let Comp::Word(w) = c else { return Err(format!("expected a time like 200ms, got '{}'", c.text())) };
     let Some((n, unit)) = split_num(w) else { return Err(format!("expected a time like 200ms, got '{w}'")) };
     let secs = match unit.to_ascii_lowercase().as_str() {
@@ -406,7 +464,7 @@ fn time(c: &Comp) -> Result<Duration, String> {
     crate::duration::from_seconds(secs as f64)
 }
 
-fn easing(c: &Comp) -> Option<Result<Easing, String>> {
+pub(super) fn easing(c: &Comp) -> Option<Result<Easing, String>> {
     match c {
         Comp::Word(w) => Some(Ok(match w.to_ascii_lowercase().as_str() {
             "linear" => Easing::Linear,
@@ -427,6 +485,22 @@ fn easing(c: &Comp) -> Option<Result<Easing, String>> {
                 Some(&[_, _, _, _]) => Err("cubic-bezier x values must be between 0 and 1".into()),
                 _ => Err("expected cubic-bezier(x1, y1, x2, y2)".into()),
             })
+        }
+        Comp::Func(_, name, inner) if name == "steps" => {
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            let count = parts.first().and_then(|p| split_num(p)).filter(|(n, u)| u.is_empty() && n.fract() == 0.0);
+            let jump = match parts.get(1).map(|p| p.to_ascii_lowercase()).as_deref() {
+                None | Some("end") | Some("jump-end") => Some(false),
+                Some("start") | Some("jump-start") => Some(true),
+                _ => None,
+            };
+            Some(match (count, jump, parts.len()) {
+                (Some((n, _)), Some(start), 1 | 2) if (1.0..=1000.0).contains(&n) => Ok(Easing::Steps(n as u32, start)),
+                _ => Err("expected steps(n) or steps(n, start | end) with n from 1 to 1000".into()),
+            })
+        }
+        Comp::Func(_, name, _) if name == "linear" => {
+            Some(Err("linear() is not supported; use cubic-bezier() or steps()".into()))
         }
         _ => None,
     }
@@ -724,7 +798,20 @@ fn parse_size(prop: SizeProp, comps: &[Comp], ctx: Ctx) -> Result<Vec<Longhand>,
             ("auto", false) | ("none", true) => return Ok(vec![Longhand::Size(prop, DimVal::Auto)]),
             ("auto", true) => return Err("use 'none' for no limit".into()),
             ("none", false) => return Err("use 'auto'".into()),
-            ("min-content" | "max-content" | "fit-content" | "stretch", _) => {
+            ("fit-content", _) => {
+                let name = match prop {
+                    SizeProp::Width => "width",
+                    SizeProp::Height => "height",
+                    SizeProp::MinWidth => "min-width",
+                    SizeProp::MinHeight => "min-height",
+                    SizeProp::MaxWidth => "max-width",
+                    SizeProp::MaxHeight => "max-height",
+                };
+                return Err(format!(
+                    "'{name}' cannot animate to 'fit-content' (it is not supported); use auto, a length or a percentage"
+                ));
+            }
+            ("min-content" | "max-content" | "stretch", _) => {
                 return Err(format!("'{k}' is not supported; use a length, a percentage or auto"));
             }
             _ => {}
@@ -739,7 +826,20 @@ fn parse_size(prop: SizeProp, comps: &[Comp], ctx: Ctx) -> Result<Vec<Longhand>,
 
 /// Parses one declaration's value for the property `info`. The error is the
 /// short reason shown after `bad value for '<property>':`.
-pub(crate) fn parse_property(info: &PropertyInfo, value: &str, ctx: Ctx) -> Result<Vec<Longhand>, String> {
+/// Notes about values that were cut to a limit go to `warns` (the caller
+/// reports each as a warning).
+pub(crate) fn parse_property_w(
+    info: &PropertyInfo,
+    value: &str,
+    ctx: Ctx,
+    warns: &mut Vec<String>,
+) -> Result<Vec<Longhand>, String> {
+    let mut out = parse_property_inner(info, value, ctx)?;
+    extra::clamp_longhands(&mut out, warns);
+    Ok(out)
+}
+
+fn parse_property_inner(info: &PropertyInfo, value: &str, ctx: Ctx) -> Result<Vec<Longhand>, String> {
     let comps = components(value)?;
     if comps.is_empty() {
         return Err("expected a value".into());
@@ -935,7 +1035,35 @@ pub(crate) fn parse_property(info: &PropertyInfo, value: &str, ctx: Ctx) -> Resu
             })]
         }
         P::TextOverflow => vec![Longhand::Ellipsis(keyword_of(comps, &["clip", "ellipsis"])? == "ellipsis")],
-        P::Overflow => vec![Longhand::Clip(keyword_of(comps, &["visible", "hidden"])? == "hidden")],
+        P::Overflow => return extra::parse_overflow(comps),
+        P::OverflowX => vec![Longhand::OverflowX(extra::overflow_kw(one(comps, "visible, hidden, auto or scroll")?)?)],
+        P::OverflowY => vec![Longhand::OverflowY(extra::overflow_kw(one(comps, "visible, hidden, auto or scroll")?)?)],
+        P::CornerShape => return extra::parse_corner_shape(comps),
+        P::ClipPath => return extra::parse_clip_path(comps, ctx),
+        P::Transform => return extra::parse_transform(comps, ctx),
+        P::TransformOrigin => return extra::parse_origin(comps, ctx),
+        P::Animation => return extra::parse_animation(comps),
+        P::AnimationName
+        | P::AnimationDuration
+        | P::AnimationTimingFunction
+        | P::AnimationDelay
+        | P::AnimationIterationCount
+        | P::AnimationDirection
+        | P::AnimationFillMode
+        | P::AnimationPlayState => return extra::parse_animation_longhand(info.id, comps),
+        P::ScrollbarWidth => {
+            vec![Longhand::ScrollbarWidth(match keyword_of(comps, &["auto", "thin", "none"])?.as_str() {
+                "thin" => ScrollbarWidth::Thin,
+                "none" => ScrollbarWidth::None,
+                _ => ScrollbarWidth::Auto,
+            })]
+        }
+        P::ScrollbarColor => return extra::parse_scrollbar_color(comps),
+        P::CaretColor => vec![Longhand::CaretColor(extra::auto_or_color(comps)?)],
+        P::AccentColor => vec![Longhand::AccentColor(extra::auto_or_color(comps)?)],
+        P::Outline => return extra::parse_outline(comps, ctx),
+        P::OutlineOffset => vec![Longhand::OutlineOffset(len(one(comps, "a length")?, ctx)?)],
+        P::PointerEvents => vec![Longhand::PointerEvents(keyword_of(comps, &["auto", "none"])? == "auto")],
         P::BoxShadow => vec![parse_shadow(comps, ctx)?],
         P::Display => vec![Longhand::DisplayNone(keyword_of(comps, &["flex", "none"])? == "none")],
         P::Visibility => vec![Longhand::Visible(keyword_of(comps, &["visible", "hidden"])? == "visible")],
@@ -975,10 +1103,13 @@ pub(crate) fn parse_property(info: &PropertyInfo, value: &str, ctx: Ctx) -> Resu
                 .collect::<Result<_, _>>()?;
             vec![Longhand::TransitionTiming(v)]
         }
-        P::Cursor => vec![Longhand::Cursor(match keyword_of(comps, &["default", "pointer", "auto"])?.as_str() {
-            "pointer" => Cursor::Pointer,
-            _ => Cursor::Default,
-        })],
+        P::Cursor => {
+            vec![Longhand::Cursor(match keyword_of(comps, &["default", "pointer", "text", "auto"])?.as_str() {
+                "pointer" => Cursor::Pointer,
+                "text" => Cursor::Text,
+                _ => Cursor::Default,
+            })]
+        }
         P::Backdrop => vec![Longhand::Backdrop(match keyword_of(comps, &["none", "acrylic", "mica"])?.as_str() {
             "acrylic" => Backdrop::Acrylic,
             "mica" => Backdrop::Mica,
@@ -1004,17 +1135,9 @@ fn margin_value(c: &Comp, ctx: Ctx) -> Result<Option<Len>, String> {
 /// property people reach for.
 pub(crate) fn unsupported_property(name: &str) -> Option<&'static str> {
     Some(match name {
-        "transform" | "text-shadow" | "filter" | "backdrop-filter" | "clip-path" | "mask" => {
-            "is not supported in this version"
-        }
-        "animation"
-        | "animation-name"
-        | "animation-duration"
-        | "animation-delay"
-        | "animation-timing-function"
-        | "animation-iteration-count"
-        | "animation-direction"
-        | "animation-fill-mode" => "is not supported: animations come in a later version",
+        "text-shadow" | "filter" | "backdrop-filter" | "mask" => "is not supported in this version",
+        "z-index" => "is not supported: later siblings draw on top; reorder the elements",
+        "scroll-behavior" => "is not supported: scrolling is always smooth",
         "flex" | "flex-basis" | "flex-flow" => "is not supported; use flex-grow and flex-shrink",
         "flex-wrap"
         | "position"
@@ -1022,12 +1145,10 @@ pub(crate) fn unsupported_property(name: &str) -> Option<&'static str> {
         | "left"
         | "right"
         | "bottom"
-        | "z-index"
         | "float"
         | "line-height"
         | "white-space"
         | "box-sizing"
-        | "outline"
         | "text-decoration"
         | "text-transform"
         | "word-spacing"
@@ -1041,9 +1162,6 @@ pub(crate) fn unsupported_property(name: &str) -> Option<&'static str> {
         | "order"
         | "row-gap"
         | "column-gap"
-        | "overflow-x"
-        | "overflow-y"
-        | "pointer-events"
         | "user-select" => "is not supported in this version",
         _ => return None,
     })

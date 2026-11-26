@@ -7,6 +7,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use rsb_core::config::{default_config, load_config};
+use rsb_core::geom::RectPx;
 use rsb_core::ipc::{Command, Reply};
 use rsb_core::msg::{ScriptOut, ScriptSink};
 use rsb_core::services::{ServiceCommand, ServiceId};
@@ -14,19 +15,23 @@ use rsb_core::wake::Wake;
 use rsb_render::{FontConfig, Renderer};
 use rsb_services::fake::FakeWorld;
 use rsb_services::fake::glazewm::{FakeGlazeServer, FakeWorkspace};
-use rsb_win::{Ui, UiOptions, UiWaker};
+use rsb_win::{MonitorInfo, Ui, UiOptions, UiWaker};
 use serde_json::json;
 
 use crate::app::{App, AppOptions};
 use crate::args::{Parsed, RunOpts};
+use crate::capture::Capture;
+use crate::fonts::{self, FontCache};
+use crate::gate::{self, Gate};
 use crate::images::ImageLoader;
 use crate::instance::{self, Instance};
 use crate::msg::{ConfigUpdate, ReloadKind, UiMsg};
 use crate::pipe::{Handler, PipeServer};
+use crate::popups::OverlayWatch;
 use crate::reader::Reader;
 use crate::stats::{self, Stats, wall_ms};
 use crate::status::{self, Sources};
-use crate::watchdog::Watchdog;
+use crate::watchdog::{OverlayGuard, Watchdog};
 use crate::{assets, cfgload, console, engine, firstrun, logger, paths, sim};
 
 /// Exit code: the bar could not start (instance mutex, window creation,
@@ -46,6 +51,11 @@ impl ScriptSink for UiSink {
     }
 }
 
+/// `Connect("...")` -> `Connect`.
+fn variant(debug: &str) -> String {
+    debug.split(['(', ' ', '{']).next().unwrap_or_default().to_string()
+}
+
 /// Writes the commands a `FakeWorld` has received since the last call.
 fn report_commands(stats: &Stats, world: &FakeWorld, seen: &mut usize) {
     let all = world.commands();
@@ -54,6 +64,13 @@ fn report_commands(stats: &Stats, world: &FakeWorld, seen: &mut usize) {
             ServiceCommand::Audio(a) => ("audio", format!("{a:?}")),
             ServiceCommand::Media(m) => ("media", format!("{m:?}")),
             ServiceCommand::Workspaces(w) => ("workspaces", format!("{w:?}")),
+            // Device ids and network names stay out of the stats: the command's name only.
+            ServiceCommand::AudioDevice(d) => ("audio", variant(&format!("{d:?}"))),
+            ServiceCommand::Microphone(m) => ("microphone", format!("{m:?}")),
+            ServiceCommand::Bluetooth(b) => ("bluetooth", variant(&format!("{b:?}"))),
+            ServiceCommand::Apps(a) => ("apps", variant(&format!("{a:?}"))),
+            ServiceCommand::Power(p) => ("power", format!("{p:?}")),
+            ServiceCommand::Wifi(w) => ("wifi", variant(&format!("{w:?}"))),
         };
         stats.emit("service_command", json!({"service": service, "command": command}));
     }
@@ -120,6 +137,14 @@ fn start_fake_glaze() -> Option<FakeGlazeServer> {
 }
 
 pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
+    let capture = match opts.capture.as_deref().map(Capture::create) {
+        Some(Ok(c)) => Some(c),
+        Some(Err(e)) => {
+            eprintln!("rsb: {e}");
+            return ExitCode::from(2);
+        }
+        None => None,
+    };
     let start = Instant::now();
     console::detach_if_own_console();
     let _guard = match instance::acquire() {
@@ -164,6 +189,18 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
         }
         None => Vec::new(),
     };
+    let key_script = match &opts.simulate_key {
+        Some(path) => {
+            match std::fs::read_to_string(path).map_err(|e| e.to_string()).and_then(|t| sim::parse_key_script(&t)) {
+                Ok(list) => list,
+                Err(e) => {
+                    eprintln!("rsb: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+        }
+        None => Vec::new(),
+    };
 
     match firstrun::prepare(&config_dir) {
         Ok(p) if p.first_run => log::info!("first run: the config files were written"),
@@ -176,7 +213,8 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
     }
 
     // Read and parse before the loop starts: nothing here is UI-thread I/O.
-    let mut built = cfgload::build(&config_dir, None, "default");
+    let mut font_cache = FontCache::default();
+    let mut built = cfgload::build_cached(&config_dir, None, "default", &mut font_cache);
     if built.config.is_none() {
         // A broken bar.toml on the very first start still gets a bar; the plate says why.
         built.config = load_config(None, &|n| assets::preset_toml(n).map(str::to_string))
@@ -186,7 +224,15 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
     let preset = built.config.as_ref().map_or_else(|| "default".to_string(), |c| c.preset.clone());
     let first = ConfigUpdate { kind: ReloadKind::Initial, built, notified_wall_ms: wall_ms() };
 
-    let mut ui = match Ui::new(UiOptions { probe: opts.probe_ui }) {
+    let extra_monitors = opts
+        .simulate_monitors
+        .iter()
+        .map(|&(w, h, dpi)| {
+            let rect = RectPx::new(0, 0, w as i32, h as i32);
+            MonitorInfo { index: 0, handle: 0, device: String::new(), primary: false, rect, work: rect, dpi }
+        })
+        .collect();
+    let mut ui = match Ui::new(UiOptions { probe: opts.probe_ui, extra_monitors }) {
         Ok(ui) => ui,
         Err(e) => {
             log::error!("cannot create the UI: {e}");
@@ -206,17 +252,29 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
         w.set_stale_after(ServiceId::System, Duration::from_secs(3));
     }
     let glaze = if opts.fake_glazewm { start_fake_glaze() } else { None };
+    // A run driven by a test flag, or under a test tag, never reaches the real PC's services.
+    let selection = gate::select_run(opts, gate::tag_set());
+    stats.emit("gate", json!({"recorder": selection.is_some(), "forward": selection.is_some_and(|s| s.forward)}));
     let engine = engine::start(
         engine::EngineOptions {
+            clock: None,
             config_dir: config_dir.clone(),
             dark,
             world: world.clone(),
             glaze_url: glaze.as_ref().map(FakeGlazeServer::url),
             test_stall: opts.test_script_stall.as_ref().map(|(w, _)| w.clone()),
+            gate: selection.map(|s| Gate::new(s, Arc::clone(&stats))),
+            images: Some(engine::ImageRoute { tx: ui_tx.clone(), wake: Arc::clone(&wake) }),
+            observe: None,
         },
         Box::new(UiSink { tx: ui_tx.clone(), waker: waker.clone() }),
     );
 
+    let overlays = Arc::new(OverlayWatch::default());
+    let mut renderer = Renderer::new(FontConfig::default());
+    if let Err(e) = fonts::register_bundled(&mut renderer) {
+        log::warn!("the bundled font could not be registered: {e}");
+    }
     let mut app = App::new(
         AppOptions {
             config_dir: config_dir.clone(),
@@ -224,15 +282,29 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
             no_reserve: opts.no_reserve,
             offscreen: opts.test_offscreen,
             simulated_pointer: opts.simulate_pointer.is_some(),
+            no_hook: opts.no_hook,
+            no_activate: opts.no_activate,
+            gated: selection.is_some(),
+            overlays: Arc::clone(&overlays),
         },
         Arc::clone(&stats),
         ui_rx,
         engine.script_tx.clone(),
         ImageLoader::start(ui_tx.clone(), Arc::clone(&wake)),
-        Renderer::new(FontConfig::default()),
+        renderer,
         dark,
     );
-    app.set_reader(Reader::start(config_dir, preset, ui_tx.clone(), engine.script_tx.clone(), Arc::clone(&wake)));
+    if let Some(c) = capture {
+        app.set_capture(c);
+    }
+    app.set_reader(Reader::start(
+        config_dir,
+        preset,
+        ui_tx.clone(),
+        engine.script_tx.clone(),
+        Arc::clone(&wake),
+        font_cache,
+    ));
 
     // The command pipe: everything but `status` is answered by the UI thread.
     let sources = Arc::new(Sources {
@@ -266,7 +338,16 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
             None
         }
     };
-    let watchdog = Watchdog::start(Arc::clone(&engine.heartbeat), ui_tx.clone(), Arc::clone(&wake));
+    let stall = ui.stall_guard();
+    let hide = stall.clone();
+    let overlay_guard = OverlayGuard {
+        watch: Arc::clone(&overlays),
+        busy_for: Box::new(move || stall.busy_for(Instant::now())),
+        hide: Box::new(move || hide.hide_overlays()),
+        stats: Arc::clone(&stats),
+    };
+    let watchdog =
+        Watchdog::start(Arc::clone(&engine.heartbeat), ui_tx.clone(), Arc::clone(&wake), Some(overlay_guard));
     {
         let (tx, waker) = (ui_tx.clone(), waker.clone());
         console::install_ctrl_handler(move || {
@@ -277,7 +358,7 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
 
     app.start(&mut ui, first);
 
-    let plan = sim::schedule(opts, pointer_script);
+    let plan = sim::schedule(opts, pointer_script, key_script);
     let player = (!plan.is_empty()).then(|| sim::Player::start(plan, ui_tx.clone(), Arc::clone(&wake)));
     let storm = match (opts.service_storm, &world) {
         (Some((hz, secs)), Some(w)) => Some(sim::service_storm(w.clone(), hz, secs)),
@@ -296,12 +377,14 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
 
     // Stop order. 1: the loop has returned, so every bar is gone and the
     // work area is back.
+    app.finish_capture();
     app.emit_workarea(&ui, "unregister");
     app.emit_workarea(&ui, "exit");
     if let Some(p) = ui.probe_stats() {
         stats.emit(
             "probe",
-            json!({"p50_ms": p.p50_ms, "p95_ms": p.p95_ms, "worst_ms": p.worst_ms, "samples": p.samples}),
+            json!({"p50_ms": p.p50_ms, "p95_ms": p.p95_ms, "worst_ms": p.worst_ms,
+                   "worst_after_first_frame_ms": p.worst_after_first_frame_ms, "samples": p.samples}),
         );
     }
     stats.emit(
@@ -311,7 +394,15 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
     );
     let (private_mb, working_set_mb) = stats::memory_mb();
     stats.emit("mem", json!({"private_mb": private_mb, "working_set_mb": working_set_mb}));
+    stats.emit_pacing(ui.compositor_period());
     stats.emit("cpu", json!({"ms": stats::cpu_ms(), "resolution_ms": stats::CPU_TIME_RESOLUTION_MS}));
+    if let Some(h) = ui.hook_stats() {
+        stats.emit(
+            "hook",
+            json!({"on": false, "wanted": false, "events": h.events, "max_us": h.max_us,
+                   "p99_delivery_us": h.p99_delivery_us, "reinstalls": h.reinstalls, "final": true}),
+        );
+    }
     // Commands the ticker already reported are not reported again.
     let mut reported = ticker.map_or(0, Ticker::stop);
     if let Some(w) = &world {

@@ -266,3 +266,28 @@ fn points_outside_the_bar_hit_nothing() {
     let r = press(&mut s, PointF { x: 100.0, y: 500.0 }, Button::Right, t);
     assert_eq!(r.unhandled, Some(Button::Right));
 }
+
+// ---- the strip above the widgets ------------------------------------------------------------
+
+#[test]
+fn the_strip_above_the_widgets_belongs_to_the_widget_below_it() {
+    // The default bar hangs its segments from 10 px down; a pointer pushed against the top edge of the screen is
+    // in that empty strip and must still reach the widget under it.
+    let css = "bar { font-size: 10px; padding: 10px 0 0 0 } .btn { width: 40px; height: 20px; background: #404040 }";
+    let t = Instant::now();
+    let mut s = scene_with(css, 300, 1.0, Some(click(classed(boxed(vec![]), &["btn"]), 7)), None, None);
+    frame(&mut s, t);
+    let btn = node_by_class(&s, "btn").rect;
+    assert!(btn.y >= 10.0, "the button hangs below the 10 px strip: {btn:?}");
+    for y in [0.0, 3.0, btn.y - 1.0] {
+        let p = PointF { x: btn.x + btn.w / 2.0, y };
+        let r = press(&mut s, p, Button::Left, t);
+        assert_eq!(calls(&r), [(7, InputKind::Click(Button::Left))], "a press at y {y} reaches the button");
+    }
+    // Hover follows too, so the pointer cursor shows at the edge.
+    s.pointer(ev(PointerKind::Move, PointF { x: btn.x + 5.0, y: 0.0 }), t);
+    assert_eq!(frame(&mut s, t).cursor, rsb_core::style::Cursor::Pointer);
+    // Above empty space nothing is hit: the strip is not stretched sideways.
+    let r = press(&mut s, PointF { x: btn.right() + 50.0, y: 0.0 }, Button::Left, t);
+    assert!(r.calls.is_empty());
+}

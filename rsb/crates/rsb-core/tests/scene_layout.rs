@@ -221,6 +221,11 @@ fn the_draw_list_starts_with_the_hit_fill_and_keeps_the_specified_order() {
             DrawCmd::PopClip => "pop-clip",
             DrawCmd::PushOpacity(_) => "push-opacity",
             DrawCmd::PopOpacity => "pop-opacity",
+            DrawCmd::FillPath { .. } => "fill-path",
+            DrawCmd::BorderPath { .. } => "border-path",
+            DrawCmd::ShadowPath { .. } => "shadow-path",
+            DrawCmd::PushClipPath { .. } => "push-clip-path",
+            DrawCmd::Svg { .. } => "svg",
         })
         .collect();
     assert_eq!(kinds, ["fill", "fill", "shadow", "fill", "border", "text"]);
@@ -252,6 +257,7 @@ fn a_transparent_bar_still_paints_every_pixel_of_its_box() {
 fn a_floating_bar_keeps_its_margin_transparent() {
     let mut b = bar();
     b.floating = true;
+    b.height = 32;
     b.margin = 8;
     b.radius = 10;
     let g = rsb_core::scene::BarGeometry { width_px: 400, height_px: 48, scale: 1.0 };

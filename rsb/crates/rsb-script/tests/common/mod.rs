@@ -115,8 +115,11 @@ pub struct Harness {
     pub latest: HashMap<InstanceId, Arc<WidgetTree>>,
     pub plates: HashMap<InstanceId, Option<Plate>>,
     pub diags: Vec<Diagnostic>,
+    /// Error notes in the order they arrived: (instance, note or the end of it).
+    pub error_notes: Vec<(u32, Option<Diagnostic>)>,
     pub tree_batches: usize,
     pub config_dir: PathBuf,
+    pub gestures: u64,
 }
 
 pub fn start_time() -> LocalTime {
@@ -181,8 +184,10 @@ impl Harness {
             latest: HashMap::new(),
             plates: HashMap::new(),
             diags: Vec::new(),
+            error_notes: Vec::new(),
             tree_batches: 0,
             config_dir,
+            gestures: 100,
         }
     }
 
@@ -229,6 +234,7 @@ impl Harness {
                     self.plates.insert(instance, plate);
                 }
                 ScriptOut::Diagnostics(d) => self.diags.extend(d),
+                ScriptOut::ErrorNote { instance, note } => self.error_notes.push((instance.0, note)),
             }
         }
     }
@@ -297,14 +303,26 @@ impl Harness {
         self.send(ScriptIn::Hub(HubEvent::Io(IoEvent { id, owner: InstanceId(owner), kind })));
     }
 
+    /// A left click the UI stamped with a new gesture id (a click is a user input).
     pub fn click(&mut self, id: u32, handler: u32) {
+        let gesture = self.next_gesture();
+        self.click_gesture(id, handler, gesture);
+    }
+
+    pub fn click_gesture(&mut self, id: u32, handler: u32, gesture: u64) {
         self.send(ScriptIn::Input(HandlerCall {
             instance: InstanceId(id),
             handler: rsb_core::element::HandlerId(handler),
             kind: InputKind::Click(Button::Left),
             x: 1.0,
             y: 2.0,
+            gesture,
         }));
+    }
+
+    pub fn next_gesture(&mut self) -> u64 {
+        self.gestures += 1;
+        self.gestures
     }
 }
 
@@ -330,4 +348,41 @@ pub fn first_click(e: &Element) -> Option<u32> {
 
 pub fn map(pairs: &[(&str, Value)]) -> Value {
     Value::Map(pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect())
+}
+
+/// A widget file with the given permissions table and setup body.
+pub fn pwidget(perms: &str, body: &str) -> String {
+    format!(
+        "local rsb = require(\"@rsb\")
+return rsb.widget {{
+  permissions = {perms},
+  setup = function(props, ctx)
+{body}
+  end,
+}}
+"
+    )
+}
+
+pub fn find_kind(e: &Element, kind: rsb_core::element::ElementKind) -> Option<&Element> {
+    find(e, &|n| n.kind == kind)
+}
+
+pub fn find_all<'a>(e: &'a Element, kind: rsb_core::element::ElementKind, out: &mut Vec<&'a Element>) {
+    if e.kind == kind {
+        out.push(e);
+    }
+    for c in &e.children {
+        find_all(c, kind, out);
+    }
+}
+
+/// An element event for one handler of an instance.
+pub fn element_call(
+    inst: u32,
+    handler: rsb_core::element::HandlerId,
+    event: rsb_core::hit::ElementEvent,
+    gesture: u64,
+) -> ScriptIn {
+    ScriptIn::Element(rsb_core::hit::ElementCall { instance: InstanceId(inst), handler, event, gesture })
 }

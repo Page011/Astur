@@ -27,7 +27,14 @@ fn surface(l: &DrawList) -> RectPx {
 }
 
 fn is_leaf(c: &DrawCmd) -> bool {
-    !matches!(c, DrawCmd::PushClip { .. } | DrawCmd::PopClip | DrawCmd::PushOpacity(_) | DrawCmd::PopOpacity)
+    !matches!(
+        c,
+        DrawCmd::PushClip { .. }
+            | DrawCmd::PushClipPath { .. }
+            | DrawCmd::PopClip
+            | DrawCmd::PushOpacity(_)
+            | DrawCmd::PopOpacity
+    )
 }
 
 /// Bytes of a canvas inside / outside a rectangle.
@@ -79,7 +86,7 @@ fn items_draw_something() {
     // that are meant to draw nothing
     for scene in all_scenes() {
         for it in scene.list.items.iter().filter(|i| i.node.0 != 0 && is_leaf(&i.cmd)) {
-            let skip = matches!(&it.cmd, DrawCmd::Image { key, .. } if &**key == "missing")
+            let skip = matches!(&it.cmd, DrawCmd::Image { key, .. } | DrawCmd::Svg { key, .. } if &**key == "missing")
                 || matches!(&it.cmd, DrawCmd::Fill { rect, .. } if rect.w == 0.0)
                 || (scene.name == "clips" && it.node.0 == 13)
                 || (scene.name == "opacity" && it.node.0 == 12);
@@ -855,8 +862,9 @@ fn clock_tick_redraw_timing() {
     let m_new = median(&mut new_text);
     let m_same = median(&mut same_text);
     eprintln!(
-        "render timing (rdp session, {}): first full frame {first_full_ms:.2} ms, warm full frame {warm_full_ms:.2} ms, \
+        "render timing ({} session, {}): first full frame {first_full_ms:.2} ms, warm full frame {warm_full_ms:.2} ms, \
          clock tick with new text median {m_new:.3} ms (p95 {:.3}), clock tick same text median {m_same:.3} ms",
+        session_name(),
         if cfg!(debug_assertions) { "debug build" } else { "release build" },
         new_text[new_text.len() * 95 / 100],
     );
@@ -918,7 +926,8 @@ fn memory_report() {
     let first_ms = t.elapsed().as_secs_f64() * 1000.0;
     let (p1, w1) = read();
     eprintln!(
-        "renderer memory (rdp session, {}): before private {p0:.1} MB working set {w0:.1} MB; after Renderer::new ({new_ms:.1} ms) and the first 1920x32 frame ({first_ms:.1} ms) private {p1:.1} MB working set {w1:.1} MB; renderer adds {:.1} MB private",
+        "renderer memory ({} session, {}): before private {p0:.1} MB working set {w0:.1} MB; after Renderer::new ({new_ms:.1} ms) and the first 1920x32 frame ({first_ms:.1} ms) private {p1:.1} MB working set {w1:.1} MB; renderer adds {:.1} MB private",
+        session_name(),
         if cfg!(debug_assertions) { "debug build" } else { "release build" },
         p1 - p0
     );

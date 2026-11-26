@@ -20,6 +20,14 @@
 //! message-only (`HWND_MESSAGE`) window. Tests check its parent is the
 //! desktop window; they never broadcast.
 //!
+//! Popups, menus, tooltips and overlays are further layered windows of the
+//! same kind (`create_popup`, `create_dim`); they are created hidden, shown
+//! without activation by their first present, and take keyboard focus only
+//! when `activate_popup` asks for it. Keys, text and IME input on them, the
+//! outside-press watch (a mouse hook on a thread of its own), the clipboard
+//! worker and the compositor-aligned frame timer are all reached through
+//! `Ui`.
+//!
 //! The menu is never opened by this crate on its own: the binary decides
 //! (a right click nothing else handled) and calls `Ui::show_menu`.
 //! `TrackPopupMenu` runs a modal loop: frames and wakes wait until the menu
@@ -28,7 +36,8 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use rsb_core::config::{FullscreenMode, Position};
@@ -38,31 +47,41 @@ use rsb_core::pixels::PixelsMut;
 use rsb_core::scene::BarGeometry;
 use rsb_core::style::{Backdrop, Cursor};
 use rsb_core::wake::Wake;
-use windows::Win32::Foundation::{POINT, RECT};
+use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HANDLE, POINT, RECT, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Dwm::{
     DWM_SYSTEMBACKDROP_TYPE, DWMSBT_MAINWINDOW, DWMSBT_NONE, DWMSBT_TRANSIENTWINDOW, DWMWA_SYSTEMBACKDROP_TYPE,
     DWMWA_USE_IMMERSIVE_DARK_MODE, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND, DwmExtendFrameIntoClientArea,
     DwmSetWindowAttribute,
 };
 use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
+use windows::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification, WTSUnRegisterSessionNotification,
+};
 use windows::Win32::UI::Controls::{MARGINS, WM_MOUSELEAVE};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 use windows::Win32::UI::WindowsAndMessaging::{
     DestroyWindow, DispatchMessageW, HWND_BOTTOM, HWND_TOPMOST, MSG, MWMO_INPUTAVAILABLE, MsgWaitForMultipleObjectsEx,
     PM_REMOVE, PeekMessageW, QS_ALLINPUT, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    SWP_NOZORDER, SetWindowPos, ShowWindow, TranslateMessage, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
-    UpdateLayeredWindowIndirect, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDOWN,
-    WM_MBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_POWERBROADCAST, WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP,
-    WM_SETTINGCHANGE, WM_TIMECHANGE,
+    SWP_NOZORDER, SetWindowPos, ShowWindow, ShowWindowAsync, TranslateMessage, ULW_ALPHA, UPDATELAYEREDWINDOWINFO,
+    UpdateLayeredWindowIndirect, WA_INACTIVE, WM_ACTIVATE, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_POWERBROADCAST,
+    WM_QUIT, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMECHANGE, WM_WTSSESSION_CHANGE,
 };
 
 mod appbar;
 mod bar;
+mod clip;
 mod dib;
 mod fullscreen;
+mod hook;
+mod keys;
 mod menu;
 mod monitor;
+mod pace;
+mod popups;
 pub mod probe;
+mod regions;
 mod shared;
 mod shell;
 mod sys;
@@ -71,17 +90,22 @@ mod tests;
 mod wnd;
 
 pub use fullscreen::spawn_fullscreen_test_window;
+pub use hook::remove_outside_press_hooks;
 
 /// Gives back the screen space of every bar this process reserved, from any
 /// thread, without the window loop. For the panic hook, which aborts, and for a console close that the
 /// window loop is too busy to answer.
 pub fn remove_all_appbars() {
     appbar::remove_all();
+    // The same two callers need the mouse watch gone too: a hook left behind
+    // by an aborting process is removed by Windows only after it times out.
+    hook::remove_outside_press_hooks();
 }
 
 use bar::{BarState, Metrics, window_in_grant};
 use dib::Dib;
-use shared::{Raw, Shared, WinState};
+use popups::PopupState;
+use shared::{Raw, Shared, Target, WinState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WinError {
@@ -108,6 +132,166 @@ impl std::error::Error for WinError {}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BarId(pub u32);
+
+/// A popup, menu, tooltip or overlay window.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PopupId(pub u32);
+
+/// What a popup window is for; decides its styles and z-order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum SurfaceRole {
+    /// An anchored panel (`rsb.popup`).
+    Popup,
+    /// A menu or submenu.
+    Menu,
+    /// Click-through (`WS_EX_TRANSPARENT`), never activated, above the rest.
+    Tooltip,
+    /// An overlay's content (the power menu's buttons): only as large as
+    /// what it draws, above its dim window, above every bar and popup.
+    Overlay,
+}
+
+/// Where and how a popup window sits.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PopupWindowSpec {
+    pub role: SurfaceRole,
+    /// Physical px, virtual-screen coordinates (from `rsb_core::popup::place`).
+    pub rect: RectPx,
+    /// `MonitorInfo::device` of the monitor it is on (DPI and scale).
+    pub monitor: String,
+    /// The bar it belongs to: the window is kept above that bar.
+    pub owner: Option<BarId>,
+    /// It may take keyboard focus when asked (`activate_popup`). A popup
+    /// that may not is `WS_EX_NOACTIVATE` like the bars.
+    pub focusable: bool,
+}
+
+/// The window under an overlay's content that dims (and, where Windows
+/// draws it, blurs) the whole monitor. It is painted with one colour once
+/// and faded with the window's alpha, so a 4K monitor costs no repaint per
+/// frame and no large DIB.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DimSpec {
+    /// The monitor rect, physical px, virtual-screen coordinates.
+    pub rect: RectPx,
+    pub monitor: String,
+    pub owner: Option<BarId>,
+    /// Ask for the system backdrop (`DWMSBT_TRANSIENTWINDOW`) behind the
+    /// dim: a plain, non-layered tool window with its frame extended over
+    /// the client area, under the dim window. Only when the caller found
+    /// it can work (Windows 11 22621+, not a remote session, transparency
+    /// effects on).
+    pub backdrop: bool,
+}
+
+/// A popup window's clickable shape for the outside-press watch: a
+/// polygon in popup-relative physical px (`Scene::root_outline`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HitRegion {
+    pub points: Vec<(f32, f32)>,
+}
+
+/// Numbers from the outside-press watch thread.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct HookStats {
+    /// Mouse events the hook saw since it was installed.
+    pub events: u64,
+    /// Longest time one event spent in the hook procedure, microseconds.
+    pub max_us: u32,
+    /// 99th percentile of the time from the event's own timestamp to the
+    /// hook procedure running (queueing on the hook thread), microseconds.
+    pub p99_delivery_us: u32,
+    /// Times the hook was installed again after it went quiet while the
+    /// pointer moved (Windows removes a hook that answers too slowly).
+    pub reinstalls: u32,
+}
+
+/// A loop turn this long is reported with `UiEvent::SlowTurn`.
+pub const SLOW_TURN: Duration = Duration::from_millis(1000);
+
+/// Lets another thread (the watchdog) see a UI thread that stopped
+/// answering and hide the overlays it holds, so a hung full-screen overlay
+/// never traps the user. `Send`, cheap to clone.
+#[derive(Clone, Debug, Default)]
+pub struct StallGuard {
+    inner: Arc<StallInner>,
+}
+
+#[derive(Debug, Default)]
+struct StallInner {
+    /// Milliseconds since `stall_base` when the current loop turn began, plus
+    /// 1 (0 = waiting for messages).
+    busy_since: AtomicU64,
+    /// Overlay and dim windows (HWND values) shown now.
+    overlays: Mutex<Vec<isize>>,
+}
+
+fn stall_base() -> Instant {
+    static BASE: OnceLock<Instant> = OnceLock::new();
+    *BASE.get_or_init(Instant::now)
+}
+
+impl StallGuard {
+    /// How long the UI thread has been busy with one turn of its loop
+    /// (zero while it waits for messages).
+    pub fn busy_for(&self, now: Instant) -> Duration {
+        let stamp = self.inner.busy_since.load(Ordering::Acquire);
+        if stamp == 0 {
+            return Duration::ZERO;
+        }
+        let began = stall_base() + Duration::from_millis(stamp - 1);
+        now.saturating_duration_since(began)
+    }
+
+    /// Hides every overlay window (`ShowWindowAsync(SW_HIDE)`, which does
+    /// not wait for the stuck thread). Returns how many were shown.
+    pub fn hide_overlays(&self) -> usize {
+        let shown: Vec<isize> = self.inner.overlays.lock().map(|v| v.clone()).unwrap_or_default();
+        for h in &shown {
+            // SAFETY: a plain handle argument; a window that is gone only
+            // makes the call fail.
+            unsafe {
+                let _ = ShowWindowAsync(sys::hwnd(*h), SW_HIDE);
+            }
+        }
+        shown.len()
+    }
+
+    /// The UI thread starts a loop turn.
+    pub(crate) fn mark_busy(&self, now: Instant) {
+        let ms = now.saturating_duration_since(stall_base()).as_millis() as u64;
+        self.inner.busy_since.store(ms + 1, Ordering::Release);
+    }
+
+    /// The UI thread waits for messages.
+    pub(crate) fn mark_idle(&self) {
+        self.inner.busy_since.store(0, Ordering::Release);
+    }
+
+    pub(crate) fn add_overlay(&self, hwnd: isize) {
+        if let Ok(mut v) = self.inner.overlays.lock()
+            && !v.contains(&hwnd)
+        {
+            v.push(hwnd);
+        }
+    }
+
+    pub(crate) fn remove_overlay(&self, hwnd: isize) {
+        if let Ok(mut v) = self.inner.overlays.lock() {
+            v.retain(|h| *h != hwnd);
+        }
+    }
+}
+
+/// Where the pointer was when a button went down outside every RSB
+/// window (seen by the low-level mouse watch while a popup that does not
+/// hold focus is open).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutsidePress {
+    /// Physical px, virtual-screen coordinates.
+    pub x: i32,
+    pub y: i32,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorInfo {
@@ -157,6 +341,11 @@ pub enum UiEvent {
     Wake,
     /// The deadline set with `set_frame_deadline` passed.
     FrameDue,
+    /// The loop turn that just ended ran for `ms` milliseconds (at least
+    /// `SLOW_TURN`): nothing was drawn or answered meanwhile.
+    SlowTurn {
+        ms: u64,
+    },
     Pointer {
         bar: BarId,
         event: PointerEvent,
@@ -175,7 +364,10 @@ pub enum UiEvent {
         dark: bool,
     },
     /// A fullscreen app came to the front of this bar's monitor or left.
-    /// The window layer already applied the bar's `FullscreenMode`.
+    /// The window layer already applied the bar's `FullscreenMode`. The
+    /// shell's notice is ignored while the foreground window is one of
+    /// ours (an overlay covers the monitor too, and must not hide or lower
+    /// its own bar).
     Fullscreen {
         bar: BarId,
         active: bool,
@@ -194,6 +386,53 @@ pub enum UiEvent {
     ClockChanged,
     /// WM_CLOSE / WM_ENDSESSION: shut down.
     CloseRequested,
+    /// Pointer input on a popup window (physical px, popup-relative).
+    PopupPointer {
+        popup: PopupId,
+        event: PointerEvent,
+    },
+    /// A popup window's surface size is new (after create, `move_popup`).
+    /// Draw a full frame.
+    PopupGeometry {
+        popup: PopupId,
+        geometry: BarGeometry,
+    },
+    /// `WM_DPICHANGED` on a popup window: the window was left as it was
+    /// (not resized); the popup manager closes the popup (`DisplayChange`).
+    PopupDpiChanged {
+        popup: PopupId,
+        dpi: u32,
+    },
+    /// A key on a popup window that holds keyboard focus.
+    Key {
+        popup: PopupId,
+        event: rsb_core::key::KeyEvent,
+    },
+    /// Typed text or IME composition on a focused popup window.
+    Text {
+        popup: PopupId,
+        input: rsb_core::key::TextInput,
+    },
+    /// A popup window got (true) or lost (false) keyboard focus. Losing it
+    /// to a window of another process closes focus-holding popups.
+    PopupFocus {
+        popup: PopupId,
+        focused: bool,
+    },
+    /// A button went down outside every RSB window (only while
+    /// `watch_outside_presses(true)`).
+    OutsidePress(OutsidePress),
+    /// Text read by `clipboard_read` (None: empty, not text, or the
+    /// clipboard stayed busy past its timeout).
+    Clipboard {
+        token: u64,
+        text: Option<String>,
+    },
+    /// The session was locked (true) or unlocked (false)
+    /// (`WTS_SESSION_LOCK` / `WTS_SESSION_UNLOCK`).
+    SessionLock {
+        locked: bool,
+    },
 }
 
 pub trait UiHandler {
@@ -228,6 +467,40 @@ pub enum TestInput {
     TimeChange,
     /// `WM_POWERBROADCAST` / `PBT_APMRESUMEAUTOMATIC` to the hidden window.
     Resume,
+    /// Mouse messages to a popup window.
+    PopupPointer {
+        popup: PopupId,
+        event: PointerEvent,
+    },
+    /// `WM_KEYDOWN` / `WM_KEYUP` (or the `SYS` forms with Alt) to a popup
+    /// window, built from the key and modifiers.
+    Key {
+        popup: PopupId,
+        event: rsb_core::key::KeyEvent,
+    },
+    /// `WM_CHAR` for each UTF-16 unit, or the IME messages, to a popup
+    /// window; composition text is taken from the event, not from the
+    /// system IME.
+    Text {
+        popup: PopupId,
+        input: rsb_core::key::TextInput,
+    },
+    /// `WM_ACTIVATE` with `WA_INACTIVE` (focus went to another process's
+    /// window) to a popup window.
+    Deactivate {
+        popup: PopupId,
+    },
+    /// `WM_DPICHANGED` to a popup window (sent, like `Dpi`).
+    PopupDpi {
+        popup: PopupId,
+        dpi: u32,
+    },
+    /// The low-level mouse watch's message for a press outside our windows.
+    OutsidePress(OutsidePress),
+    /// `WM_WTSSESSION_CHANGE` to the hidden window.
+    SessionLock {
+        locked: bool,
+    },
 }
 
 /// Cheap, cloneable, `Send` handle that wakes the UI thread. Many wakes
@@ -246,10 +519,16 @@ impl Wake for UiWaker {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct UiOptions {
     /// Run `probe::UiProbe` from the start.
     pub probe: bool,
+    /// Offscreen test runs only (ignored unless `set_offscreen(true)` comes
+    /// before the first `create_bar`): monitors added after the real ones,
+    /// as if connected, so per-monitor popup rules can be tested on a PC
+    /// with one monitor. Their bars and popups are placed offscreen like
+    /// every test window; `monitors()` lists them.
+    pub extra_monitors: Vec<MonitorInfo>,
 }
 
 pub struct Ui {
@@ -257,6 +536,22 @@ pub struct Ui {
     hidden: windows::Win32::Foundation::HWND,
     bars: HashMap<BarId, BarState>,
     next_bar: u32,
+    popups: HashMap<PopupId, PopupState>,
+    next_popup: u32,
+    /// Monitors added by `UiOptions::extra_monitors` (offscreen runs only).
+    extra_monitors: Vec<MonitorInfo>,
+    extras_on: bool,
+    pacer: pace::Pacer,
+    /// The frame timer ended the last wait.
+    timer_hit: bool,
+    hook_state: Arc<hook::HookShared>,
+    hook: Option<hook::Hook>,
+    clip: Option<clip::ClipClient>,
+    stall: StallGuard,
+    /// The shell accepted the registration for lock and unlock notices.
+    session_notices: bool,
+    /// `SetForegroundWindow` calls made (tests assert it stays 0).
+    foreground_calls: u32,
     /// Events produced by `Ui`'s own calls and by translating `Raw` ones,
     /// handed to the handler in order.
     pending: VecDeque<UiEvent>,
@@ -288,11 +583,40 @@ impl Ui {
         shared.taskbar_created.set(wnd::taskbar_created_message());
         shared.wake.hwnd.store(raw, std::sync::atomic::Ordering::Release);
         let probe = options.probe.then(|| probe::UiProbe::start(raw));
+        let pacer = match pace::Pacer::new() {
+            Ok(p) => p,
+            Err(e) => {
+                // SAFETY: the window was just created by this thread.
+                unsafe {
+                    let _ = DestroyWindow(hidden);
+                }
+                return Err(e);
+            }
+        };
+        // Lock and unlock notices for this session. A failure only means no
+        // notices (a service session has none).
+        // SAFETY: the window is ours.
+        let session_notices = unsafe { WTSRegisterSessionNotification(hidden, NOTIFY_FOR_THIS_SESSION) };
+        if let Err(e) = &session_notices {
+            log::debug!("session notices not registered: {e}");
+        }
         Ok(Ui {
             shared,
             hidden,
             bars: HashMap::new(),
             next_bar: 1,
+            popups: HashMap::new(),
+            next_popup: 1,
+            extra_monitors: options.extra_monitors,
+            extras_on: false,
+            pacer,
+            timer_hit: false,
+            hook_state: hook::HookShared::new(raw),
+            hook: None,
+            clip: None,
+            stall: StallGuard::default(),
+            session_notices: session_notices.is_ok(),
+            foreground_calls: 0,
             pending: VecDeque::new(),
             dark: sys::read_apps_dark(),
             offscreen: false,
@@ -308,8 +632,38 @@ impl Ui {
         UiWaker { inner: Arc::clone(&self.shared.wake) }
     }
 
+    /// The attached monitors, then (offscreen runs only) the simulated ones
+    /// from `UiOptions::extra_monitors`, placed side by side to the right of
+    /// the real ones: they have no pixels on any screen.
     pub fn monitors(&self) -> Vec<MonitorInfo> {
-        monitor::enumerate()
+        let mut all = monitor::enumerate();
+        if self.extras_on {
+            let mut x = all.iter().map(|m| m.rect.x1).max().unwrap_or(0);
+            for (i, extra) in self.extra_monitors.iter().enumerate() {
+                let (w, h) = (extra.rect.width().max(1), extra.rect.height().max(1));
+                let device = if extra.device.is_empty() {
+                    format!(r"\\.\DISPLAY{}", all.len() + 1)
+                } else {
+                    extra.device.clone()
+                };
+                let rect = RectPx::new(x, 0, x + w, h);
+                x += w;
+                all.push(MonitorInfo {
+                    index: all.len() as u32,
+                    handle: 0xE000_0000 + i as u64,
+                    device,
+                    primary: false,
+                    rect,
+                    work: rect,
+                    dpi: extra.dpi.clamp(48, 960),
+                });
+            }
+        }
+        all
+    }
+
+    pub(crate) fn find_monitor(&self, device: &str) -> Option<MonitorInfo> {
+        self.monitors().into_iter().find(|m| m.device.eq_ignore_ascii_case(device))
     }
 
     /// Windows' "app mode" is dark.
@@ -320,7 +674,7 @@ impl Ui {
     /// Creates, places and (when `reserve`) registers the bar; the window
     /// stays hidden until the first `present`. A `Geometry` event follows.
     pub fn create_bar(&mut self, spec: &BarWindowSpec) -> Result<BarId, WinError> {
-        let mon = monitor::find(&spec.monitor).ok_or_else(|| WinError::NoSuchMonitor(spec.monitor.clone()))?;
+        let mon = self.find_monitor(&spec.monitor).ok_or_else(|| WinError::NoSuchMonitor(spec.monitor.clone()))?;
         let dpi = mon.dpi.clamp(48, 960);
         let m = Metrics::new(spec, dpi);
         let grant = edge_strip(spec, &mon.rect, m);
@@ -339,17 +693,7 @@ impl Ui {
         let id = BarId(self.next_bar);
         self.next_bar += 1;
         let key = sys::raw(hwnd);
-        self.shared.wins.borrow_mut().insert(
-            key,
-            WinState {
-                bar: id,
-                cursor: Cursor::Default,
-                tracking: false,
-                hovered: false,
-                last: (0.0, 0.0),
-                captured: 0,
-            },
-        );
+        self.shared.wins.borrow_mut().insert(key, WinState::new(Target::Bar(id)));
         let mut state = BarState {
             hwnd,
             spec: spec.clone(),
@@ -370,7 +714,7 @@ impl Ui {
             loop_warned: false,
             backdrop: Backdrop::None,
         };
-        disable_dwm_rounding(&state);
+        disable_dwm_rounding(state.hwnd);
         if spec.reserve && !self.offscreen {
             if appbar::register(key) {
                 self.shared.registered.borrow_mut().insert(key);
@@ -387,6 +731,7 @@ impl Ui {
         if let Some(geometry) = self.geometry(id) {
             self.pending.push_back(UiEvent::Geometry { bar: id, geometry });
         }
+        self.publish_regions();
         Ok(id)
     }
 
@@ -402,6 +747,7 @@ impl Ui {
             let _ = DestroyWindow(state.hwnd);
         }
         self.shared.wins.borrow_mut().remove(&key);
+        self.publish_regions();
         // The DIB goes with `state`, after the window that used it.
     }
 
@@ -428,32 +774,7 @@ impl Ui {
         // The first update, and the first after a resize, must cover the whole
         // window: the layered surface has nothing valid to keep.
         let whole = b.needs_full || dirty == RectPx::new(0, 0, w, h);
-        let size = windows::Win32::Foundation::SIZE { cx: w, cy: h };
-        let src = POINT { x: 0, y: 0 };
-        let blend = BLENDFUNCTION {
-            BlendOp: AC_SRC_OVER as u8,
-            BlendFlags: 0,
-            SourceConstantAlpha: 255,
-            AlphaFormat: AC_SRC_ALPHA as u8,
-        };
-        let rc = RECT { left: dirty.x0, top: dirty.y0, right: dirty.x1, bottom: dirty.y1 };
-        let info = UPDATELAYEREDWINDOWINFO {
-            cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
-            hdcDst: Default::default(),
-            pptDst: std::ptr::null(),
-            psize: &size,
-            hdcSrc: b.dib.dc,
-            pptSrc: &src,
-            crKey: Default::default(),
-            pblend: &blend,
-            dwFlags: ULW_ALPHA,
-            prcDirty: if whole { std::ptr::null() } else { &rc },
-        };
-        // SAFETY: every pointer in `info` refers to a local that outlives the
-        // call, and the source DC holds the DIB section drawn into above.
-        if !unsafe { UpdateLayeredWindowIndirect(b.hwnd, &info) }.as_bool() {
-            return Err(sys::last_error("UpdateLayeredWindowIndirect"));
-        }
+        blit(b.hwnd, b.dib.dc, (w, h), dirty, whole)?;
         b.needs_full = false;
         b.presented = true;
         self.apply_visibility(bar);
@@ -524,14 +845,21 @@ impl Ui {
         self.bars.get(&bar).is_some_and(|b| b.want_visible)
     }
 
-    /// One `FrameDue` at or after `at`; None cancels. Timer resolution is
-    /// the system's (about 15.6 ms unless raised by another process).
+    /// One `FrameDue` at or after `at`; None cancels. Animation frames move to the compositor's next frame start at or
+    /// after `at` (period and phase from `DwmGetCompositionTimingInfo`),
+    /// fired by a high-resolution waitable timer the loop waits on, so they
+    /// line up with what the display shows instead of beating against it;
+    /// without timing info (some remote sessions) `at` is used as is.
     pub fn set_frame_deadline(&mut self, at: Option<Instant>) {
         self.shared.deadline.set(at);
-        let hidden = self.shared.hidden.get();
         match at {
-            None => sys::kill_timer(hidden, wnd::TIMER_FRAME),
-            Some(t) => wnd::arm_frame_timer(hidden, t),
+            None => {
+                self.pacer.cancel();
+                self.timer_hit = false;
+            }
+            Some(t) => {
+                self.pacer.arm(t, Instant::now());
+            }
         }
     }
 
@@ -574,9 +902,33 @@ impl Ui {
             TestInput::Pointer { bar, event } => self.bars.get(&bar).is_some_and(|b| inject_pointer(b, event)),
             TestInput::TimeChange => sys::post(hidden, WM_TIMECHANGE, 0, 0),
             TestInput::Resume => sys::post(hidden, WM_POWERBROADCAST, 0x12, 0),
+            TestInput::PopupPointer { popup, event } => self.inject_popup_pointer(popup, event),
+            TestInput::Key { popup, event } => self.inject_key(popup, event),
+            TestInput::Text { popup, input } => self.inject_text(popup, input),
+            TestInput::Deactivate { popup } => self.popups.get(&popup).is_some_and(|p| {
+                // Focus went to a window of another process: no window handle
+                // for the activated side.
+                sys::send(sys::raw(p.hwnd), WM_ACTIVATE, WA_INACTIVE as usize, 0);
+                true
+            }),
+            TestInput::PopupDpi { popup, dpi } => self.popups.get(&popup).is_some_and(|p| {
+                sys::send(sys::raw(p.hwnd), WM_DPICHANGED, (dpi as usize) << 16 | dpi as usize, 0);
+                true
+            }),
+            TestInput::OutsidePress(p) => {
+                sys::post(hidden, hook::WM_OUTSIDE_PRESS, p.x as u32 as usize, p.y as u32 as isize)
+            }
+            TestInput::SessionLock { locked } => sys::post(hidden, WM_WTSSESSION_CHANGE, if locked { 7 } else { 8 }, 0),
         };
         if !sent {
-            log::warn!("test input was not delivered: {input:?}");
+            log::warn!("a test input was not delivered");
+        }
+    }
+
+    /// The first bar frame was drawn: the probe keeps the worst gap from here apart.
+    pub fn probe_first_frame(&self) {
+        if let Some(p) = &self.probe {
+            p.first_frame_drawn();
         }
     }
 
@@ -587,7 +939,7 @@ impl Ui {
 
     /// The monitor's work area now, for checks.
     pub fn work_area(&self, monitor: &str) -> Option<RectPx> {
-        monitor::find(monitor).map(|m| m.work)
+        self.find_monitor(monitor).map(|m| m.work)
     }
 
     /// Runs the message loop until `quit`. Returns after every bar was
@@ -602,6 +954,8 @@ impl Ui {
             if self.quit {
                 break;
             }
+            let turn = Instant::now();
+            self.stall.mark_busy(turn);
             self.pump_messages();
             while let Some(event) = self.next_event() {
                 handler.handle(self, event);
@@ -612,12 +966,21 @@ impl Ui {
             if self.quit {
                 break;
             }
-            // SAFETY: no handles; waits for any queued message and nothing else.
-            unsafe {
-                MsgWaitForMultipleObjectsEx(None, u32::MAX, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            let took = turn.elapsed();
+            if took >= SLOW_TURN {
+                self.pending.push_back(UiEvent::SlowTurn { ms: took.as_millis() as u64 });
+                while let Some(event) = self.next_event() {
+                    handler.handle(self, event);
+                    if self.quit {
+                        break 'outer;
+                    }
+                }
             }
+            self.stall.mark_idle();
+            self.wait(u32::MAX);
             self.loop_wakes += 1;
         }
+        self.stall.mark_idle();
         self.destroy_all();
         // Let the destroy messages run before the caller moves on.
         self.pump_messages();
@@ -638,11 +1001,13 @@ impl Ui {
         self.loop_wakes
     }
 
-    /// Test runs on the owner's PC: place every bar window beyond the right
+    /// Test runs on a PC in use: place every bar window beyond the right
     /// edge of the virtual screen and never register an appbar, so nothing
     /// covers the desktop and no work area moves. Call before `create_bar`.
     pub fn set_offscreen(&mut self, on: bool) {
         self.offscreen = on;
+        // Simulated monitors exist only when this comes before the first bar.
+        self.extras_on = on && self.next_bar == 1 && !self.extra_monitors.is_empty();
     }
 
     /// Whether the bar's window currently holds an appbar registration.
@@ -668,6 +1033,35 @@ impl Ui {
 
     // ---- loop internals ----
 
+    /// Waits for a queued message or the frame timer, at most `ms`.
+    pub(crate) fn wait(&mut self, ms: u32) {
+        let handles: [HANDLE; 1] = [self.pacer.handle()];
+        // SAFETY: the handle is the frame timer owned by `self`, which
+        // outlives the call.
+        let r = unsafe { MsgWaitForMultipleObjectsEx(Some(&handles), ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE) };
+        if r == WAIT_OBJECT_0 {
+            self.timer_hit = true;
+        }
+    }
+
+    /// Hands out `FrameDue` when the timer fired at or after the deadline;
+    /// a timer that fired a little early arms again.
+    fn poll_frame_timer(&mut self) {
+        let hit = std::mem::take(&mut self.timer_hit) | self.pacer.take_signal();
+        if !hit {
+            return;
+        }
+        let now = Instant::now();
+        self.pacer.fired(now);
+        let Some(at) = self.shared.deadline.get() else { return };
+        if now >= at {
+            self.shared.deadline.set(None);
+            self.pending.push_back(UiEvent::FrameDue);
+        } else {
+            self.pacer.arm(at, now);
+        }
+    }
+
     fn pump_messages(&mut self) {
         let mut msg = MSG::default();
         // SAFETY: `msg` is a valid out pointer; messages go to window
@@ -685,6 +1079,7 @@ impl Ui {
     }
 
     fn next_event(&mut self) -> Option<UiEvent> {
+        self.poll_frame_timer();
         loop {
             if let Some(e) = self.pending.pop_front() {
                 return Some(e);
@@ -707,7 +1102,14 @@ impl Ui {
     fn translate(&mut self, raw: Raw) {
         match raw {
             Raw::Pointer { bar, event } => self.pending.push_back(UiEvent::Pointer { bar, event }),
-            Raw::FrameDue => self.pending.push_back(UiEvent::FrameDue),
+            Raw::PopupPointer { popup, event } => self.pending.push_back(UiEvent::PopupPointer { popup, event }),
+            Raw::PopupDpi { popup, dpi } => self.pending.push_back(UiEvent::PopupDpiChanged { popup, dpi }),
+            Raw::Key { popup, event } => self.pending.push_back(UiEvent::Key { popup, event }),
+            Raw::Text { popup, input } => self.pending.push_back(UiEvent::Text { popup, input }),
+            Raw::PopupFocus { popup, focused } => self.pending.push_back(UiEvent::PopupFocus { popup, focused }),
+            Raw::OutsidePress(p) => self.pending.push_back(UiEvent::OutsidePress(p)),
+            Raw::SessionLock { locked } => self.pending.push_back(UiEvent::SessionLock { locked }),
+            Raw::ClipboardReady => self.poll_clipboard(),
             Raw::Clock => self.pending.push_back(UiEvent::ClockChanged),
             Raw::Close | Raw::EndSession => self.pending.push_back(UiEvent::CloseRequested),
             Raw::Theme { dark } => {
@@ -734,6 +1136,10 @@ impl Ui {
                             let _ =
                                 SetWindowPos(b.hwnd, Some(after), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
                         }
+                        if !active {
+                            // The bar is on top again: its popups go back above it.
+                            self.raise_popups_of(bar);
+                        }
                     }
                     FullscreenMode::Hide => self.apply_visibility(bar),
                     FullscreenMode::Stay => {}
@@ -754,8 +1160,9 @@ impl Ui {
             Raw::Display => {
                 let ids: Vec<BarId> = self.bars.keys().copied().collect();
                 for id in ids {
+                    let found = self.bars.get(&id).and_then(|b| self.find_monitor(&b.spec.monitor));
                     if let Some(b) = self.bars.get_mut(&id)
-                        && let Some(m) = monitor::find(&b.spec.monitor)
+                        && let Some(m) = found
                         && m.dpi != b.monitor_dpi
                     {
                         b.monitor_dpi = m.dpi;
@@ -809,17 +1216,18 @@ impl Ui {
             Ok(false) => {}
             Err(e) => log::warn!("bar placement failed: {e}"),
         }
+        self.publish_regions();
     }
 
     /// Asks the shell for the bar's rectangle (when registered), claims it,
     /// moves the window there and swaps the surface when its size changed.
     /// Returns whether the surface size or scale changed.
     fn place(&mut self, bar: BarId, force: bool) -> Result<bool, WinError> {
+        let device = self.bars.get(&bar).ok_or(WinError::NoSuchBar(bar))?.spec.monitor.clone();
+        let mon = self.find_monitor(&device).ok_or(WinError::NoSuchMonitor(device))?;
+        let offscreen_x = self.offscreen.then(|| self.offscreen_x());
         let shared = &self.shared;
-        let offscreen_x =
-            self.offscreen.then(|| monitor::enumerate().iter().map(|m| m.rect.x1).max().unwrap_or(0) + 200);
         let b = self.bars.get_mut(&bar).ok_or(WinError::NoSuchBar(bar))?;
-        let mon = monitor::find(&b.spec.monitor).ok_or_else(|| WinError::NoSuchMonitor(b.spec.monitor.clone()))?;
         let m = Metrics::new(&b.spec, b.dpi);
         let key = sys::raw(b.hwnd);
         let mut grant = edge_strip(&b.spec, &mon.rect, m);
@@ -891,10 +1299,16 @@ impl Ui {
                 let _ = ShowWindow(b.hwnd, if want { SW_SHOWNOACTIVATE } else { SW_HIDE });
             }
             b.shown = want;
+            self.publish_regions();
         }
     }
 
     fn destroy_all(&mut self) {
+        self.watch_outside_presses(false);
+        let popups: Vec<PopupId> = self.popups.keys().copied().collect();
+        for id in popups {
+            self.destroy_popup(id);
+        }
         let ids: Vec<BarId> = self.bars.keys().copied().collect();
         for id in ids {
             self.destroy_bar(id);
@@ -908,9 +1322,11 @@ impl Drop for Ui {
         self.probe = None;
         self.destroy_all();
         self.shared.wake.hwnd.store(0, std::sync::atomic::Ordering::Release);
-        sys::kill_timer(sys::raw(self.hidden), wnd::TIMER_FRAME);
+        self.pacer.cancel();
+        sys::kill_timer(sys::raw(self.hidden), wnd::TIMER_CLIP);
         // SAFETY: the window belongs to this thread.
         unsafe {
+            let _ = WTSUnRegisterSessionNotification(self.hidden);
             let _ = DestroyWindow(self.hidden);
         }
     }
@@ -939,8 +1355,13 @@ fn pack(lo: i32, hi: i32) -> isize {
 /// The real mouse message for `event`, posted to the bar window and marked as
 /// injected (see `wnd::INJECTED`).
 fn inject_pointer(b: &BarState, event: PointerEvent) -> bool {
+    inject_pointer_at(sys::raw(b.hwnd), (b.window.x0, b.window.y0), event)
+}
+
+/// The same for any of our windows: `origin` is the window's top-left corner
+/// in screen px (the wheel message carries screen coordinates).
+fn inject_pointer_at(hwnd: isize, origin: (i32, i32), event: PointerEvent) -> bool {
     let (x, y) = (event.x.round() as i32, event.y.round() as i32);
-    let hwnd = sys::raw(b.hwnd);
     let down = |button: Button| match button {
         Button::Left => WM_LBUTTONDOWN,
         Button::Right => WM_RBUTTONDOWN,
@@ -959,19 +1380,62 @@ fn inject_pointer(b: &BarState, event: PointerEvent) -> bool {
         PointerKind::Wheel(notches) => {
             let delta = (notches * 120.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
             // The wheel message carries screen coordinates.
-            let screen = pack(b.window.x0 + x, b.window.y0 + y);
+            let screen = pack(origin.0 + x, origin.1 + y);
             sys::post(hwnd, WM_MOUSEWHEEL, ((delta as u16 as usize) << 16) | wnd::INJECTED, screen)
+        }
+        PointerKind::HWheel(notches) => {
+            let delta = (notches * 120.0).round().clamp(i16::MIN as f32, i16::MAX as f32) as i16;
+            let screen = pack(origin.0 + x, origin.1 + y);
+            sys::post(hwnd, WM_MOUSEHWHEEL, ((delta as u16 as usize) << 16) | wnd::INJECTED, screen)
         }
     }
 }
 
-fn disable_dwm_rounding(b: &BarState) {
+/// Copies the DIB selected into `dc` to a layered window with its per-pixel
+/// alpha: the whole surface, or just `dirty`.
+fn blit(
+    hwnd: HWND,
+    dc: windows::Win32::Graphics::Gdi::HDC,
+    (w, h): (i32, i32),
+    dirty: RectPx,
+    whole: bool,
+) -> Result<(), WinError> {
+    let size = windows::Win32::Foundation::SIZE { cx: w, cy: h };
+    let src = POINT { x: 0, y: 0 };
+    let blend = BLENDFUNCTION {
+        BlendOp: AC_SRC_OVER as u8,
+        BlendFlags: 0,
+        SourceConstantAlpha: 255,
+        AlphaFormat: AC_SRC_ALPHA as u8,
+    };
+    let rc = RECT { left: dirty.x0, top: dirty.y0, right: dirty.x1, bottom: dirty.y1 };
+    let info = UPDATELAYEREDWINDOWINFO {
+        cbSize: size_of::<UPDATELAYEREDWINDOWINFO>() as u32,
+        hdcDst: Default::default(),
+        pptDst: std::ptr::null(),
+        psize: &size,
+        hdcSrc: dc,
+        pptSrc: &src,
+        crKey: Default::default(),
+        pblend: &blend,
+        dwFlags: ULW_ALPHA,
+        prcDirty: if whole { std::ptr::null() } else { &rc },
+    };
+    // SAFETY: every pointer in `info` refers to a local that outlives the
+    // call, and the source DC holds the DIB section drawn into by the caller.
+    if !unsafe { UpdateLayeredWindowIndirect(hwnd, &info) }.as_bool() {
+        return Err(sys::last_error("UpdateLayeredWindowIndirect"));
+    }
+    Ok(())
+}
+
+fn disable_dwm_rounding(hwnd: HWND) {
     // The renderer draws its own corner radius; DWM rounding would clip a
     // second time.
     let pref = DWMWCP_DONOTROUND;
     // SAFETY: the attribute pointer refers to a live local of the size passed.
     let r = unsafe {
-        DwmSetWindowAttribute(b.hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const std::ffi::c_void, 4)
+        DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref as *const _ as *const std::ffi::c_void, 4)
     };
     if let Err(e) = r {
         log::debug!("corner preference not set: {e}");

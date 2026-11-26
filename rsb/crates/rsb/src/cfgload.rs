@@ -16,6 +16,7 @@ use rsb_core::io::limits::{FILE_SHARING_RETRIES, FILE_SHARING_RETRY_DELAY};
 use rsb_core::paths::{BAR_TOML, MAX_SOURCE_BYTES, STYLE_CSS};
 
 use crate::assets;
+use crate::fonts::{FontCache, FontFile, FontLoad};
 
 /// Most files an `@import` chain may pull in, and how deep it may go.
 pub const MAX_IMPORT_FILES: u32 = 8;
@@ -25,6 +26,14 @@ pub const MAX_IMPORT_DEPTH: u32 = 4;
 /// writing) is retried a few times. Text is lossy UTF-8 without a byte order
 /// mark. The error text never holds the path.
 pub fn read_capped(path: &Path, cap: usize) -> Result<Option<String>, String> {
+    Ok(read_bytes_capped(path, cap)?.map(|bytes| {
+        let text = String::from_utf8_lossy(&bytes);
+        text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()
+    }))
+}
+
+/// The same read for a binary file (a font): the bytes as they are.
+pub fn read_bytes_capped(path: &Path, cap: usize) -> Result<Option<Vec<u8>>, String> {
     let mut tries = 0;
     loop {
         match std::fs::File::open(path) {
@@ -42,8 +51,7 @@ pub fn read_capped(path: &Path, cap: usize) -> Result<Option<String>, String> {
                 if bytes.len() > cap {
                     return Err(format!("the file is larger than {} KiB", cap / 1024));
                 }
-                let text = String::from_utf8_lossy(&bytes);
-                return Ok(Some(text.strip_prefix('\u{feff}').unwrap_or(&text).to_string()));
+                return Ok(Some(bytes));
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) if sharing_violation(&e) && tries < FILE_SHARING_RETRIES => {
@@ -73,6 +81,11 @@ pub struct Built {
     pub diagnostics: Vec<Diagnostic>,
     /// Font names the new sheet asks for, to check against the installed ones.
     pub fonts: Vec<(String, SourcePos)>,
+    /// The font files the new sheet's `@font-face` rules name, read here so
+    /// the UI thread never opens one.
+    pub font_files: Vec<FontFile>,
+    /// Font files that could not be used (missing, too large, too many).
+    pub font_diagnostics: Vec<Diagnostic>,
 }
 
 /// Reads `bar.toml` and the style chain from `dir`. With `preset_override`
@@ -80,6 +93,12 @@ pub struct Built {
 /// `fallback_preset` names the preset whose sheet to build when `bar.toml`
 /// cannot be used.
 pub fn build(dir: &Path, preset_override: Option<&str>, fallback_preset: &str) -> Built {
+    build_cached(dir, preset_override, fallback_preset, &mut FontCache::default())
+}
+
+/// `build` for a caller that reads the folder again and again: a font file
+/// the cache says was already handed over travels without its bytes.
+pub fn build_cached(dir: &Path, preset_override: Option<&str>, fallback_preset: &str, fonts: &mut FontCache) -> Built {
     let mut diagnostics = Vec::new();
     let user_toml = match preset_override {
         Some(_) => None,
@@ -97,6 +116,8 @@ pub fn build(dir: &Path, preset_override: Option<&str>, fallback_preset: &str) -
                     base_sheet: base_only(fallback_preset),
                     diagnostics,
                     fonts: Vec::new(),
+                    font_files: Vec::new(),
+                    font_diagnostics: Vec::new(),
                 };
             }
         },
@@ -139,8 +160,20 @@ pub fn build(dir: &Path, preset_override: Option<&str>, fallback_preset: &str) -
             usable = false;
         }
     }
-    let fonts = sheet.font_families();
-    Built { config, sheet: usable.then(|| Arc::new(sheet)), base_sheet, diagnostics, fonts }
+    let families = sheet.font_families();
+    // Files are read only for a sheet that will be used, and only then does
+    // the cache learn what was handed over.
+    let loaded =
+        if usable && preset_override.is_none() { fonts.load(dir, &sheet.font_faces()) } else { FontLoad::default() };
+    Built {
+        config,
+        sheet: usable.then(|| Arc::new(sheet)),
+        base_sheet,
+        diagnostics,
+        fonts: families,
+        font_files: loaded.files,
+        font_diagnostics: loaded.diagnostics,
+    }
 }
 
 /// The base theme plus a preset's sheet, nothing of the user's.
@@ -234,7 +267,10 @@ mod tests {
         let dir = TempDir::new("cfg");
         let b = build(dir.path(), None, "default");
         let cfg = b.config.expect("a config");
-        assert_eq!((cfg.preset.as_str(), cfg.bars.len(), cfg.bars[0].height), ("default", 1, 32));
+        let preset_height: u32 = crate::assets::preset_toml("default")
+            .and_then(|t| t.lines().find_map(|l| l.trim().strip_prefix("height = ")?.parse().ok()))
+            .expect("the default preset sets a height");
+        assert_eq!((cfg.preset.as_str(), cfg.bars.len(), cfg.bars[0].height), ("default", 1, preset_height));
         assert!(b.diagnostics.is_empty(), "{:?}", b.diagnostics);
         assert!(b.sheet.is_some_and(|s| s.rule_count() > 10));
     }

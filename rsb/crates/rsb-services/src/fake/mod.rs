@@ -11,14 +11,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use rsb_core::services::{AudioCommand, MediaCommand, ServiceCommand, ServiceId, ServiceStatus, WorkspaceCommand};
+use rsb_core::pixels::RgbaImage;
+use rsb_core::services::{ServiceCommand, ServiceId, ServiceStatus, WorkspaceCommand};
 use rsb_core::value::Value;
 
 use crate::util::{map, text};
 use crate::{HubOptions, Publisher, Service, ServiceFactory, UrlOpener};
 
+mod apps;
+mod av;
+mod bluetooth;
 pub mod glazewm;
 pub mod komorebi;
+mod wifi;
 
 struct FakeSlot {
     value: Option<Value>,
@@ -144,12 +149,34 @@ impl FakeWorld {
         self.lock().slots.get(&id).and_then(|s| s.interval)
     }
 
+    /// Moves the media position on by `seconds`, as playing would. The fake
+    /// has no clock of its own, so a test says when time passes.
+    pub fn advance_media(&self, seconds: f64) {
+        let mut st = self.lock();
+        let slot = st.slots.entry(ServiceId::Media).or_default();
+        if let Some(v) = slot.value.as_mut() {
+            av::advance_media(v, seconds);
+        }
+        push(slot);
+    }
+
+    /// Publishes an image for the service's value to refer to, as the real
+    /// service does for cover art and icons. The hub drops a key that does
+    /// not start with the service's own `rsb-image:<name>/`.
+    pub fn publish_image(&self, id: ServiceId, key: &str, image: RgbaImage) {
+        if let Some(p) = self.lock().slots.entry(id).or_default().publisher.as_ref() {
+            p.publish_image(key.into(), image);
+        }
+    }
+
     /// Addresses `rsb.open_url` asked to open, oldest first. Nothing is opened.
     pub fn opened_urls(&self) -> Vec<String> {
         self.lock().opened.clone()
     }
 
-    /// Commands received so far, oldest first.
+    /// Commands the fakes accepted so far, oldest first. A command a fake
+    /// refuses (an unknown device id, a seek the player cannot do) is not
+    /// listed.
     pub fn commands(&self) -> Vec<ServiceCommand> {
         self.lock().commands.clone()
     }
@@ -180,10 +207,7 @@ impl FakeWorld {
                 ("seconds_left", Value::Int(14_400)),
             ]),
         );
-        w.set(
-            ServiceId::Audio,
-            map([("available", Value::Bool(true)), ("volume", Value::Num(35.0)), ("muted", Value::Bool(false))]),
-        );
+        w.set(ServiceId::Audio, av::sample_audio());
         w.set(
             ServiceId::Network,
             map([
@@ -196,20 +220,7 @@ impl FakeWorld {
                 ("up_bps", Value::Int(40_000)),
             ]),
         );
-        w.set(
-            ServiceId::Media,
-            map([
-                ("available", Value::Bool(true)),
-                ("playing", Value::Bool(true)),
-                ("title", text("Sample Track")),
-                ("artist", text("Sample Artist")),
-                ("album", text("Sample Album")),
-                ("source", text("sample.player")),
-                ("can_play_pause", Value::Bool(true)),
-                ("can_next", Value::Bool(true)),
-                ("can_previous", Value::Bool(true)),
-            ]),
-        );
+        w.set(ServiceId::Media, av::sample_media());
         w.set(
             ServiceId::Window,
             map([
@@ -219,6 +230,11 @@ impl FakeWorld {
             ]),
         );
         w.set(ServiceId::Workspaces, sample_workspaces(1));
+        w.set(ServiceId::Microphone, av::sample_microphone());
+        w.set(ServiceId::Power, av::sample_power());
+        w.set(ServiceId::Bluetooth, bluetooth::sample());
+        w.set(ServiceId::Apps, apps::sample());
+        w.set(ServiceId::Wifi, wifi::sample());
         w
     }
 }
@@ -295,38 +311,27 @@ fn set_field(value: &mut Value, key: &str, new: Value) {
 }
 
 /// The fake behaves like the real thing for the commands it receives, so a
-/// demo run with fake services reacts to the wheel and the clicks.
-fn apply(slot: &mut FakeSlot, command: &ServiceCommand) {
-    let Some(value) = slot.value.as_mut() else { return };
+/// demo run with fake services reacts to the wheel and the clicks. An `Err`
+/// is what the real service would refuse with, before any effect.
+fn apply(slot: &mut FakeSlot, command: &ServiceCommand) -> Result<(), String> {
+    let Some(value) = slot.value.as_mut() else { return Ok(()) };
     match command {
-        ServiceCommand::Audio(a) => {
-            let volume = value.get("volume").and_then(Value::as_f64).unwrap_or(0.0);
-            let muted = value.get("muted").and_then(Value::as_bool).unwrap_or(false);
-            match a {
-                AudioCommand::SetVolume(v) => set_field(value, "volume", Value::Num(f64::from(*v).clamp(0.0, 100.0))),
-                AudioCommand::ChangeVolume(d) => {
-                    set_field(value, "volume", Value::Num((volume + f64::from(*d)).clamp(0.0, 100.0)))
-                }
-                AudioCommand::SetMute(m) => set_field(value, "muted", Value::Bool(*m)),
-                AudioCommand::ToggleMute => set_field(value, "muted", Value::Bool(!muted)),
-            }
-        }
-        ServiceCommand::Media(m) => {
-            let playing = value.get("playing").and_then(Value::as_bool).unwrap_or(false);
-            match m {
-                MediaCommand::PlayPause => set_field(value, "playing", Value::Bool(!playing)),
-                MediaCommand::Play => set_field(value, "playing", Value::Bool(true)),
-                MediaCommand::Pause => set_field(value, "playing", Value::Bool(false)),
-                MediaCommand::Next | MediaCommand::Previous => {}
-            }
-        }
+        ServiceCommand::Audio(a) => av::apply_audio(value, a),
+        ServiceCommand::Media(m) => return av::apply_media(value, m),
         ServiceCommand::Workspaces(WorkspaceCommand::Focus(name)) => {
             if let Some(index) = (0..5).find(|i| (i + 1).to_string() == *name) {
                 *value = sample_workspaces(index);
             }
         }
         ServiceCommand::Workspaces(_) => {}
+        ServiceCommand::AudioDevice(c) => return av::apply_audio_device(value, c),
+        ServiceCommand::Microphone(c) => av::apply_microphone(value, c),
+        ServiceCommand::Power(c) => return av::apply_power(value, c),
+        ServiceCommand::Bluetooth(c) => return bluetooth::apply(value, c),
+        ServiceCommand::Apps(c) => return apps::apply(value, c),
+        ServiceCommand::Wifi(c) => return wifi::apply(value, c),
     }
+    Ok(())
 }
 
 impl Service for FakeService {
@@ -353,10 +358,10 @@ impl Service for FakeService {
 
     fn command(&mut self, command: ServiceCommand) -> Result<(), String> {
         let mut st = self.world.lock();
-        st.commands.push(command.clone());
         let slot = st.slots.entry(self.id).or_default();
-        apply(slot, &command);
+        apply(slot, &command)?;
         push(slot);
+        st.commands.push(command);
         Ok(())
     }
 

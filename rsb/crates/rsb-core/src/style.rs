@@ -71,6 +71,8 @@ pub enum Cursor {
     #[default]
     Default,
     Pointer,
+    /// The I-beam, over editable text.
+    Text,
 }
 
 /// System backdrop behind the bar's transparent pixels (Windows 11 only;
@@ -121,6 +123,171 @@ pub struct TransitionSpec {
     pub easing: Easing,
 }
 
+/// How a corner is cut: round (the usual arc) or bevel (a straight line
+/// between the two points the radius marks on the edges).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CornerShape {
+    #[default]
+    Round,
+    Bevel,
+}
+
+/// A length made of a share of the box and px: `50%`, `13px`,
+/// `calc(100% - 13px)`. Both parts interpolate, so any two lengths animate.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LengthPct {
+    /// Logical px.
+    pub px: f32,
+    /// 0..=100 of the box side the length runs along.
+    pub pct: f32,
+}
+
+impl LengthPct {
+    pub const ZERO: LengthPct = LengthPct { px: 0.0, pct: 0.0 };
+
+    /// Physical px along a side `side_px` long.
+    pub fn resolve(self, side_px: f32, scale: f32) -> f32 {
+        self.px * scale + self.pct / 100.0 * side_px
+    }
+}
+
+/// `clip-path: polygon(...)`: points in the border box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipPolygon {
+    pub points: Vec<(LengthPct, LengthPct)>,
+    /// `evenodd` fill rule written (`nonzero` otherwise).
+    pub evenodd: bool,
+}
+
+/// `translate(tx, ty) scale(sx, sy)` about `transform-origin`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Transform2 {
+    pub tx: LengthPct,
+    pub ty: LengthPct,
+    pub sx: f32,
+    pub sy: f32,
+}
+
+impl Transform2 {
+    pub const IDENTITY: Transform2 = Transform2 { tx: LengthPct::ZERO, ty: LengthPct::ZERO, sx: 1.0, sy: 1.0 };
+
+    pub fn is_identity(&self) -> bool {
+        *self == Transform2::IDENTITY
+    }
+}
+
+impl Default for Transform2 {
+    fn default() -> Self {
+        Transform2::IDENTITY
+    }
+}
+
+/// `transform-origin`: the point the transform is about, in the border box.
+pub const ORIGIN_CENTER: (LengthPct, LengthPct) = (LengthPct { px: 0.0, pct: 50.0 }, LengthPct { px: 0.0, pct: 50.0 });
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Overflow {
+    #[default]
+    Visible,
+    Hidden,
+    Auto,
+    Scroll,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ScrollbarWidth {
+    #[default]
+    Auto,
+    Thin,
+    None,
+}
+
+/// `outline`: drawn outside the border box, following its shape. Width 0 =
+/// none.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Outline {
+    /// Logical px.
+    pub width: f32,
+    pub color: Color,
+    /// Logical px between the border box and the outline (may be negative).
+    pub offset: f32,
+}
+
+impl Default for Outline {
+    fn default() -> Self {
+        Outline { width: 0.0, color: Color::WHITE, offset: 0.0 }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnimDirection {
+    #[default]
+    Normal,
+    Reverse,
+    Alternate,
+    AlternateReverse,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnimFill {
+    #[default]
+    None,
+    Forwards,
+    Backwards,
+    Both,
+}
+
+/// One entry of `animation`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnimationSpec {
+    pub name: Arc<str>,
+    pub duration: Duration,
+    /// Seconds; negative starts the animation part way through.
+    pub delay_s: f64,
+    /// Between keyframes that give none of their own.
+    pub easing: Easing,
+    /// `f64::INFINITY` for `infinite`.
+    pub iterations: f64,
+    pub direction: AnimDirection,
+    pub fill: AnimFill,
+    pub paused: bool,
+    /// The keyframes with their styles worked out; None when the style sheet
+    /// has no `@keyframes` of this name.
+    pub frames: Option<Arc<KeyframeSet>>,
+}
+
+/// An `@keyframes` rule worked out for one element: the element's own style
+/// with each keyframe's declarations on top.
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyframeSet {
+    /// Sorted by offset, 0 and 1 always present.
+    pub frames: Vec<KeyframeStyle>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyframeStyle {
+    /// 0..=1.
+    pub offset: f32,
+    /// `animation-timing-function` of this keyframe: the curve towards the next.
+    pub easing: Option<Easing>,
+    pub style: Arc<ComputedStyle>,
+}
+
+/// What a `::placeholder` or `::selection` rule sets.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PseudoStyle {
+    pub color: Option<Color>,
+    pub background: Option<Color>,
+    pub opacity: Option<f32>,
+    pub italic: Option<bool>,
+}
+
+impl PseudoStyle {
+    pub fn is_empty(&self) -> bool {
+        *self == PseudoStyle::default()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct ComputedStyle {
     pub display_none: bool,
@@ -165,6 +332,28 @@ pub struct ComputedStyle {
     pub transitions: Vec<TransitionSpec>,
     pub cursor: Cursor,
     pub backdrop: Backdrop,
+    /// Top left, top right, bottom right, bottom left.
+    pub corner_shape: [CornerShape; 4],
+    pub clip_path: Option<ClipPolygon>,
+    pub transform: Transform2,
+    pub transform_origin: (LengthPct, LengthPct),
+    pub animations: Vec<AnimationSpec>,
+    pub overflow_x: Overflow,
+    pub overflow_y: Overflow,
+    pub scrollbar_width: ScrollbarWidth,
+    /// Thumb and track; None = `auto`.
+    pub scrollbar_color: Option<(Color, Color)>,
+    /// None = `auto` (the text colour).
+    pub caret_color: Option<Color>,
+    /// None = `auto` (the theme's own).
+    pub accent_color: Option<Color>,
+    pub outline: Outline,
+    /// False = `pointer-events: none`: the element and its subtree are
+    /// skipped by hit testing.
+    pub pointer_events: bool,
+    /// `::placeholder` and `::selection` rules (inputs only).
+    pub placeholder: PseudoStyle,
+    pub selection: PseudoStyle,
 }
 
 impl Default for ComputedStyle {
@@ -207,6 +396,21 @@ impl Default for ComputedStyle {
             transitions: Vec::new(),
             cursor: Cursor::Default,
             backdrop: Backdrop::None,
+            corner_shape: [CornerShape::Round; 4],
+            clip_path: None,
+            transform: Transform2::IDENTITY,
+            transform_origin: ORIGIN_CENTER,
+            animations: Vec::new(),
+            overflow_x: Overflow::Visible,
+            overflow_y: Overflow::Visible,
+            scrollbar_width: ScrollbarWidth::Auto,
+            scrollbar_color: None,
+            caret_color: None,
+            accent_color: None,
+            outline: Outline::default(),
+            pointer_events: true,
+            placeholder: PseudoStyle::default(),
+            selection: PseudoStyle::default(),
         }
     }
 }

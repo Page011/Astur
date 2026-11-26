@@ -11,7 +11,10 @@ use rsb_core::diag::{Diagnostic, Severity, SourcePos};
 use rsb_core::element::Element;
 use rsb_core::geom::Edges;
 use rsb_core::scene::Scene;
-use rsb_core::style::{Align, Background, ComputedStyle, Cursor, Dim, FlexDirection, Justify, TextAlign};
+use rsb_core::style::{
+    Align, Background, ComputedStyle, CornerShape, Cursor, Dim, FlexDirection, Justify, Overflow, ScrollbarWidth,
+    TextAlign,
+};
 
 fn parse(css: &str) -> (Stylesheet, Vec<String>) {
     let (s, d) = Stylesheet::parse(css, "style.css");
@@ -193,6 +196,68 @@ fn good_cases() -> Vec<(&'static str, &'static str, Check)> {
             |s| s.transitions[0].easing == rsb_core::anim::Easing::CubicBezier(0.1, 0.2, 0.3, 1.0),
         ),
         ("cursor", "cursor: pointer", |s| s.cursor == Cursor::Pointer),
+        ("cursor", "cursor: text", |s| s.cursor == Cursor::Text),
+        ("overflow", "overflow: auto hidden", |s| s.overflow_x == Overflow::Auto && s.overflow_y == Overflow::Hidden),
+        ("overflow-x", "overflow-x: scroll", |s| s.overflow_x == Overflow::Scroll && s.clip),
+        ("overflow-y", "overflow-y: auto", |s| s.overflow_y == Overflow::Auto && s.overflow_x == Overflow::Visible),
+        ("corner-shape", "border-radius: 4px; corner-shape: bevel round", |s| {
+            s.corner_shape == [CornerShape::Bevel, CornerShape::Round, CornerShape::Bevel, CornerShape::Round]
+        }),
+        ("clip-path", "clip-path: polygon(13px 0, calc(100% - 13px) 0, 100% 50%, 0 100%)", |s| {
+            s.clip_path.as_ref().is_some_and(|c| {
+                c.points.len() == 4 && !c.evenodd && c.points[1].0.pct == 100.0 && c.points[1].0.px == -13.0
+            })
+        }),
+        ("clip-path", "clip-path: polygon(evenodd, 0 0, 10px 0, 5px 8px)", |s| {
+            s.clip_path.as_ref().is_some_and(|c| c.evenodd)
+        }),
+        ("transform", "transform: translateX(4px) scale(2)", |s| {
+            s.transform.tx.px == 4.0 && s.transform.sx == 2.0 && s.transform.sy == 2.0
+        }),
+        ("transform", "transform: scale(2) translate(4px, 3px)", |s| {
+            s.transform.tx.px == 8.0 && s.transform.ty.px == 6.0 && s.transform.sx == 2.0
+        }),
+        ("transform-origin", "transform-origin: left top", |s| {
+            s.transform_origin.0.pct == 0.0 && s.transform_origin.1.pct == 0.0
+        }),
+        ("transform-origin", "transform-origin: 10px 25%", |s| {
+            s.transform_origin.0.px == 10.0 && s.transform_origin.1.pct == 25.0
+        }),
+        ("animation", "animation: pulse 300ms ease-out 50ms 3 alternate forwards", |s| {
+            let a = &s.animations[0];
+            &*a.name == "pulse"
+                && a.duration.as_millis() == 300
+                && a.delay_s == 0.05
+                && a.iterations == 3.0
+                && a.direction == rsb_core::style::AnimDirection::Alternate
+                && a.fill == rsb_core::style::AnimFill::Forwards
+        }),
+        ("animation-name", "animation-name: a, b; animation-duration: 1s", |s| s.animations.len() == 2),
+        ("animation-duration", "animation: a 1s; animation-duration: 2s", |s| s.animations[0].duration.as_secs() == 2),
+        ("animation-timing-function", "animation: a 1s; animation-timing-function: steps(4, start)", |s| {
+            s.animations[0].easing == rsb_core::anim::Easing::Steps(4, true)
+        }),
+        ("animation-delay", "animation: a 1s; animation-delay: -250ms", |s| s.animations[0].delay_s == -0.25),
+        ("animation-iteration-count", "animation: a 1s; animation-iteration-count: infinite", |s| {
+            s.animations[0].iterations.is_infinite()
+        }),
+        ("animation-direction", "animation: a 1s; animation-direction: reverse", |s| {
+            s.animations[0].direction == rsb_core::style::AnimDirection::Reverse
+        }),
+        ("animation-fill-mode", "animation: a 1s; animation-fill-mode: both", |s| {
+            s.animations[0].fill == rsb_core::style::AnimFill::Both
+        }),
+        ("animation-play-state", "animation: a 1s; animation-play-state: paused", |s| s.animations[0].paused),
+        ("scrollbar-width", "scrollbar-width: thin", |s| s.scrollbar_width == ScrollbarWidth::Thin),
+        ("scrollbar-color", "scrollbar-color: #ff0000 #00ff00", |s| {
+            s.scrollbar_color == Some((rgb(255, 0, 0), rgb(0, 255, 0)))
+        }),
+        ("caret-color", "caret-color: #ff0000", |s| s.caret_color == Some(rgb(255, 0, 0))),
+        ("accent-color", "accent-color: #00ff00", |s| s.accent_color == Some(rgb(0, 255, 0))),
+        ("outline", "outline: 2px solid #0000ff", |s| s.outline.width == 2.0 && s.outline.color == rgb(0, 0, 255)),
+        ("outline", "outline: none", |s| s.outline.width == 0.0),
+        ("outline-offset", "outline: 1px solid red; outline-offset: -2px", |s| s.outline.offset == -2.0),
+        ("pointer-events", "pointer-events: none", |s| !s.pointer_events),
     ]
 }
 
@@ -247,7 +312,7 @@ fn bad_values_say_what_is_wrong_with_the_declarations_position() {
         ("width: 10pt", "bad value for 'width': unit 'pt' is not supported; use px"),
         ("width: 1rem", "bad value for 'width': unit 'rem' is not supported; use em"),
         ("width: 5vw", "unknown unit 'vw'"),
-        ("width: calc(1px + 2px)", "calc() is not supported"),
+        ("width: calc(1px + 2px)", "calc() only works inside polygon(): use a length or a percentage"),
         ("width: -3px", "must not be negative"),
         ("width: none", "use 'auto'"),
         ("max-width: auto", "use 'none'"),
@@ -263,7 +328,8 @@ fn bad_values_say_what_is_wrong_with_the_declarations_position() {
         ("font-size: large", "bad value for 'font-size'"),
         ("font-style: oblique", "bad value for 'font-style'"),
         ("text-align: justify", "bad value for 'text-align'"),
-        ("overflow: scroll", "bad value for 'overflow'"),
+        ("overflow: clip", "bad value for 'overflow'"),
+        ("overflow: auto hidden scroll", "expected one or two values"),
         ("visibility: collapse", "bad value for 'visibility'"),
         ("cursor: grab", "bad value for 'cursor'"),
         ("border: 1px dashed red", "only solid borders are supported"),
@@ -310,11 +376,11 @@ fn a_bad_declaration_drops_only_itself() {
 #[test]
 fn unsupported_features_are_reported_with_the_alternative() {
     let css = "/* c */\n\
-        .a { text-shadow: 1px 1px red; transform: scale(2); color: red !important; animation: x 1s; flex: 1; line-height: 2 }\n\
+        .a { text-shadow: 1px 1px red; transform: rotate(5deg); color: red !important; z-index: 3; flex: 1; line-height: 2 }\n\
         @define-color accent #fff;\n\
-        @keyframes spin { from { opacity: 0 } to { opacity: 1 } }\n\
+        @starting-style { .a { opacity: 0 } }\n\
         @font-face { src: url(x) }\n\
-        .a:focus { color: red }\n\
+        .a:visited { color: red }\n\
         .a[x] { color: red }\n\
         .a + .b { color: red }\n\
         .a ~ .b { color: red }\n\
@@ -329,15 +395,15 @@ fn unsupported_features_are_reported_with_the_alternative() {
         );
     };
     has(2, "'text-shadow' is not supported in this version");
-    has(2, "'transform' is not supported in this version");
+    has(2, "rotate, skew and matrix are not supported");
     has(2, "'!important' is not supported; raise the selector's specificity instead");
-    has(2, "'animation' is not supported: animations come in a later version");
+    has(2, "'z-index' is not supported: later siblings draw on top; reorder the elements");
     has(2, "'flex' is not supported; use flex-grow and flex-shrink");
     has(2, "'line-height' is not supported");
     has(3, "@define-color is not supported; use a custom property: --name: value");
-    has(4, "animations come in a later version; @keyframes is not supported");
-    has(5, "unsupported at-rule '@font-face'");
-    has(6, ":focus is not supported; supported: :hover, :active");
+    has(4, "@starting-style is not supported");
+    has(5, "@font-face needs font-family and src");
+    has(6, ":visited is not supported; supported: :hover, :active, :focus");
     has(7, "attribute selectors are not supported");
     has(8, "'+' combinator is not supported");
     has(9, "'~' combinator is not supported");
@@ -395,10 +461,10 @@ fn selector_lists_split_and_count_per_selector() {
     assert!(d.is_empty(), "{d:?}");
     assert_eq!(s.rule_count(), 4);
     // A bad selector in a list drops only itself.
-    let (s, d) = parse(".a, .b:focus, .c { color: red }");
+    let (s, d) = parse(".a, .b:visited, .c { color: red }");
     assert_eq!(s.rule_count(), 2);
     assert_eq!(d.len(), 1);
-    assert!(d[0].starts_with("warning: style.css:1:7: :focus is not supported"), "{d:?}");
+    assert!(d[0].starts_with("warning: style.css:1:7: :visited is not supported"), "{d:?}");
 }
 
 fn colour_of(css: &str) -> Color {

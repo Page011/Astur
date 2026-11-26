@@ -18,7 +18,11 @@ use rsb_core::io::{
 use rsb_core::msg::HubRequest;
 use rsb_core::paths::resolve_require;
 use rsb_core::permissions::{Need, check_path_text, check_program_name, parse_url};
-use rsb_core::services::{AudioCommand, MediaCommand, ServiceCommand, ServiceId, WorkspaceCommand};
+use rsb_core::popup::PopupAction;
+use rsb_core::services::{
+    AppsCommand, AudioCommand, AudioDeviceCommand, BluetoothCommand, MediaCommand, MicrophoneCommand, PowerCommand,
+    PowerMode, ServiceCommand, ServiceId, WifiCommand, WorkspaceCommand,
+};
 use rsb_core::time::{LocalTime, Precision, TimeZone, format_time, precision_of, until_boundary};
 use rsb_core::value::Value;
 
@@ -162,6 +166,177 @@ fn value_bytes(v: &Value) -> usize {
 fn is_abs_text(t: &str) -> bool {
     let b = t.as_bytes();
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
+/// Longest list `rsb.fuzzy` ranks, and the longest text it looks at per item.
+const MAX_FUZZY_ITEMS: usize = 20_000;
+const MAX_FUZZY_CHARS: usize = 256;
+/// Longest id or name a service command takes.
+const MAX_ID_CHARS: usize = 1024;
+
+/// A device, app or network name that a command may carry: not empty, short, no control characters. The service
+/// checks it again against what it published.
+fn check_id(text: &str, what: &str) -> mlua::Result<()> {
+    if text.is_empty() || text.chars().count() > MAX_ID_CHARS || text.chars().any(char::is_control) {
+        return Err(rt(format!("no {what} with that id")));
+    }
+    Ok(())
+}
+
+fn word<'a>(args: &'a [Lv], i: usize, what: &str) -> mlua::Result<std::borrow::Cow<'a, str>> {
+    match args.get(i) {
+        Some(Lv::String(s)) => Ok(std::borrow::Cow::Owned(s.to_string_lossy())),
+        other => Err(rt(format!("{what} must be a string, got {}", other.map_or("nil", lua_type)))),
+    }
+}
+
+fn number(args: &[Lv], i: usize, what: &str) -> mlua::Result<f64> {
+    match args.get(i) {
+        Some(Lv::Integer(v)) => Ok(*v as f64),
+        Some(Lv::Number(v)) if v.is_finite() => Ok(*v),
+        other => Err(rt(format!("{what} must be a number, got {}", other.map_or("nil", lua_type)))),
+    }
+}
+
+fn flag(args: &[Lv], i: usize, what: &str) -> mlua::Result<bool> {
+    match args.get(i) {
+        Some(Lv::Boolean(b)) => Ok(*b),
+        other => Err(rt(format!("{what} must be a boolean, got {}", other.map_or("nil", lua_type)))),
+    }
+}
+
+/// The Luau method call as a service command; arguments are checked here, before anything reaches the hub.
+fn parse_command(svc: ServiceId, method: &str, rest: &[Lv]) -> mlua::Result<ServiceCommand> {
+    let opt_monitor = || -> mlua::Result<Option<u32>> {
+        match rest.first() {
+            None | Some(Lv::Nil) => Ok(None),
+            Some(Lv::Integer(v)) if *v >= 0 => Ok(Some(*v as u32)),
+            Some(Lv::Number(v)) if *v >= 0.0 => Ok(Some(*v as u32)),
+            other => Err(rt(format!("monitor must be a number, got {}", other.map_or("nil", lua_type)))),
+        }
+    };
+    Ok(match (svc, method) {
+        (ServiceId::Audio, "set_volume") => {
+            ServiceCommand::Audio(AudioCommand::SetVolume((number(rest, 0, "percent")? as f32).clamp(0.0, 100.0)))
+        }
+        (ServiceId::Audio, "change_volume") => {
+            ServiceCommand::Audio(AudioCommand::ChangeVolume(number(rest, 0, "delta")? as f32))
+        }
+        (ServiceId::Audio, "set_muted") => ServiceCommand::Audio(AudioCommand::SetMute(flag(rest, 0, "muted")?)),
+        (ServiceId::Audio, "toggle_mute") => ServiceCommand::Audio(AudioCommand::ToggleMute),
+        (ServiceId::Audio, "set_default") => {
+            let id = word(rest, 0, "id")?;
+            check_id(&id, "device")?;
+            ServiceCommand::AudioDevice(AudioDeviceCommand::SetDefault(id.into_owned()))
+        }
+        (ServiceId::Audio, "set_device_volume") => {
+            let id = word(rest, 0, "id")?;
+            check_id(&id, "device")?;
+            let percent = (number(rest, 1, "percent")? as f32).clamp(0.0, 100.0);
+            ServiceCommand::AudioDevice(AudioDeviceCommand::SetVolume(id.into_owned(), percent))
+        }
+        (ServiceId::Audio, "set_device_muted") => {
+            let id = word(rest, 0, "id")?;
+            check_id(&id, "device")?;
+            ServiceCommand::AudioDevice(AudioDeviceCommand::SetMuted(id.into_owned(), flag(rest, 1, "muted")?))
+        }
+        (ServiceId::Media, "play_pause") => ServiceCommand::Media(MediaCommand::PlayPause),
+        (ServiceId::Media, "play") => ServiceCommand::Media(MediaCommand::Play),
+        (ServiceId::Media, "pause") => ServiceCommand::Media(MediaCommand::Pause),
+        (ServiceId::Media, "next") => ServiceCommand::Media(MediaCommand::Next),
+        (ServiceId::Media, "previous") => ServiceCommand::Media(MediaCommand::Previous),
+        (ServiceId::Media, "seek") => {
+            let secs = number(rest, 0, "seconds")?;
+            if !(0.0..=360_000.0).contains(&secs) {
+                return Err(rt("seconds must be between 0 and 360000"));
+            }
+            ServiceCommand::Media(MediaCommand::Seek((secs * 1000.0).round() as u64))
+        }
+        (ServiceId::Workspaces, "focus") => match rest.first() {
+            Some(Lv::String(name)) => ServiceCommand::Workspaces(WorkspaceCommand::Focus(name.to_string_lossy())),
+            other => {
+                return Err(rt(format!("the workspace name must be a string, got {}", other.map_or("nil", lua_type))));
+            }
+        },
+        (ServiceId::Workspaces, "focus_next") => {
+            ServiceCommand::Workspaces(WorkspaceCommand::FocusNext(opt_monitor()?))
+        }
+        (ServiceId::Workspaces, "focus_previous") => {
+            ServiceCommand::Workspaces(WorkspaceCommand::FocusPrevious(opt_monitor()?))
+        }
+        (ServiceId::Microphone, "set_muted") => {
+            ServiceCommand::Microphone(MicrophoneCommand::SetMuted(flag(rest, 0, "muted")?))
+        }
+        (ServiceId::Microphone, "toggle_mute") => ServiceCommand::Microphone(MicrophoneCommand::ToggleMute),
+        (ServiceId::Bluetooth, "set_enabled") => {
+            ServiceCommand::Bluetooth(BluetoothCommand::SetEnabled(flag(rest, 0, "on")?))
+        }
+        (ServiceId::Bluetooth, m @ ("connect" | "disconnect" | "forget")) => {
+            let id = word(rest, 0, "id")?;
+            check_id(&id, "device")?;
+            let id = id.into_owned();
+            ServiceCommand::Bluetooth(match m {
+                "connect" => BluetoothCommand::Connect(id),
+                "disconnect" => BluetoothCommand::Disconnect(id),
+                _ => BluetoothCommand::Forget(id),
+            })
+        }
+        (ServiceId::Bluetooth, "open_settings") => ServiceCommand::Bluetooth(BluetoothCommand::OpenSettings),
+        (ServiceId::Bluetooth, "rescan") => ServiceCommand::Bluetooth(BluetoothCommand::Rescan),
+        (ServiceId::Apps, "launch") => {
+            let id = word(rest, 0, "id")?;
+            check_id(&id, "app")?;
+            ServiceCommand::Apps(AppsCommand::Launch(id.into_owned()))
+        }
+        (ServiceId::Apps, "open_uri") => {
+            let uri = word(rest, 0, "uri")?;
+            let lower = uri.to_ascii_lowercase();
+            if uri.chars().any(char::is_control)
+                || !(lower.starts_with("ms-settings:") || lower.starts_with("ms-screenclip:"))
+            {
+                return Err(rt("only ms-settings: and ms-screenclip: pages can be opened"));
+            }
+            ServiceCommand::Apps(AppsCommand::OpenUri(uri.into_owned()))
+        }
+        (ServiceId::Power, "set_mode") => {
+            let mode = word(rest, 0, "mode")?;
+            let Some(mode) = PowerMode::from_name(&mode).filter(|m| m.name() != "unknown") else {
+                return Err(rt("mode must be \"efficiency\", \"balanced\" or \"performance\""));
+            };
+            ServiceCommand::Power(PowerCommand::SetMode(mode))
+        }
+        (ServiceId::Power, "lock") => ServiceCommand::Power(PowerCommand::Lock),
+        (ServiceId::Power, "sleep") => ServiceCommand::Power(PowerCommand::Sleep),
+        (ServiceId::Power, "restart") => ServiceCommand::Power(PowerCommand::Restart),
+        (ServiceId::Power, "shut_down") => ServiceCommand::Power(PowerCommand::ShutDown),
+        (ServiceId::Power, "sign_out") => ServiceCommand::Power(PowerCommand::SignOut),
+        (ServiceId::Wifi, "scan") => ServiceCommand::Wifi(WifiCommand::Scan),
+        (ServiceId::Wifi, "connect") => {
+            let ssid = word(rest, 0, "ssid")?;
+            if ssid.is_empty() || ssid.chars().count() > 256 || ssid.chars().any(char::is_control) {
+                return Err(rt("no network with that name"));
+            }
+            ServiceCommand::Wifi(WifiCommand::Connect(ssid.into_owned()))
+        }
+        (ServiceId::Wifi, "disconnect") => ServiceCommand::Wifi(WifiCommand::Disconnect),
+        (_, other) => return Err(rt(format!("{} has no command '{other}'", svc.name()))),
+    })
+}
+
+/// The commands that do something the user must have asked for with a click or a key: they raise outside a handler.
+/// Returns the method name for the message.
+fn gesture_only(command: &ServiceCommand) -> Option<&'static str> {
+    let gated = match command {
+        ServiceCommand::AudioDevice(AudioDeviceCommand::SetDefault(_)) => true,
+        ServiceCommand::Bluetooth(_) => true,
+        ServiceCommand::Apps(_) => true,
+        ServiceCommand::Power(c) => {
+            matches!(c, PowerCommand::Sleep | PowerCommand::Restart | PowerCommand::ShutDown | PowerCommand::SignOut)
+        }
+        ServiceCommand::Wifi(c) => matches!(c, WifiCommand::Connect(_) | WifiCommand::Disconnect),
+        _ => false,
+    };
+    gated.then(|| command.kind())
 }
 
 impl Shared {
@@ -427,9 +602,21 @@ impl Shared {
         ServiceId::from_name(name).ok_or_else(|| rt(format!("unknown service '{name}'")))
     }
 
-    fn subscribe(&self, inst: InstanceId, svc: ServiceId, interval: Option<Duration>) -> mlua::Result<()> {
+    /// Reading a service (or an image one published) needs its `read` permission. Device names, the app list and
+    /// network names are private: they must be declared, whatever the services `read` may name say.
+    pub(crate) fn require_read(&self, inst: InstanceId, svc: ServiceId) -> mlua::Result<()> {
         let grant = self.grant(inst)?;
         grant.permissions.check_read(svc).map_err(|n| self.deny(n))?;
+        if matches!(svc, ServiceId::Bluetooth | ServiceId::Apps | ServiceId::Wifi)
+            && !grant.permissions.read.contains(&svc)
+        {
+            return Err(self.deny(Need::Read(svc)));
+        }
+        Ok(())
+    }
+
+    fn subscribe(&self, inst: InstanceId, svc: ServiceId, interval: Option<Duration>) -> mlua::Result<()> {
+        self.require_read(inst, svc)?;
         let fresh = {
             let mut st = self.st.borrow_mut();
             let i = st.instances.get_mut(&inst).ok_or_else(|| rt("no such widget"))?;
@@ -438,6 +625,59 @@ impl Shared {
         if fresh || interval.is_some() {
             self.hub.send(HubRequest::Subscribe { service: svc, owner: inst, interval });
         }
+        Ok(())
+    }
+}
+
+impl Shared {
+    /// A command that needs a user's click or key: raises outside one, and lets one through per widget every 2
+    /// seconds. `Ok(false)` = dropped by the rate limit (logged).
+    fn gesture_gate(&self, inst: InstanceId, what: &str) -> mlua::Result<bool> {
+        if self.st.borrow().gesture.is_none() {
+            return Err(rt(format!("{what} only works inside a click or key handler")));
+        }
+        let now = self.mono();
+        let mut st = self.st.borrow_mut();
+        let i = st.instances.get_mut(&inst).ok_or_else(|| rt("no such widget"))?;
+        if i.gesture_cmd_at.is_some_and(|t| now.saturating_duration_since(t) < OPEN_URL_GAP) {
+            drop(st);
+            self.script_log(Some(inst), log::Level::Warn, &format!("{what} runs at most once every 2 seconds"));
+            return Ok(false);
+        }
+        i.gesture_cmd_at = Some(now);
+        Ok(true)
+    }
+
+    /// `rsb.popups.open / close / toggle`: finds the popup by name on the caller's monitor, checks what the caller
+    /// may do to it, and queues the change for the instance that owns it.
+    fn popup_command(&self, caller: InstanceId, action: PopupAction, name: &str) -> mlua::Result<()> {
+        let (monitor, caller_builtin, gesture) = {
+            let st = self.st.borrow();
+            let i = st.instances.get(&caller).ok_or_else(|| rt("no such widget"))?;
+            (i.spec.monitor.handle, i.builtin, st.gesture)
+        };
+        let target = {
+            let st = self.st.borrow();
+            st.popups
+                .iter()
+                .filter(|(_, r)| r.monitor == monitor && r.names.iter().any(|n| n == name))
+                .map(|(pid, r)| (*pid, r.inst, st.instances.get(&r.inst).is_some_and(|i| i.builtin)))
+                .min_by_key(|(pid, _, builtin)| (!*builtin, *pid))
+        };
+        let Some((pid, owner, owner_builtin)) = target else { return Ok(()) };
+        if !caller_builtin && owner != caller && !owner_builtin {
+            let grant = self.grant(caller)?;
+            grant.permissions.check_popup(name).map_err(|n| self.deny(n))?;
+        }
+        if action != PopupAction::Close && !caller_builtin && owner != caller && gesture.is_none() {
+            return Err(rt(format!("rsb.popups.{} only works inside a click or key handler", action.name())));
+        }
+        self.st.borrow_mut().ready.entry(owner).or_default().push_back(Work::Popup {
+            pid,
+            action,
+            name: name.to_string(),
+            gesture,
+        });
         Ok(())
     }
 }
@@ -689,56 +929,23 @@ pub(crate) fn install(lua: &Lua, sh: &Rc<Shared>, load_fn: &Rc<RefCell<Option<Fu
             return Err(rt("bad service command"));
         };
         let svc = Shared::service_arg(&name.to_string_lossy())?;
+        let method = cmd.to_string_lossy();
         let grant = s.grant(inst)?;
-        grant.permissions.check_control(svc).map_err(|n| s.deny(n))?;
+        // Restart, shut down and sign out have a permission of their own, so a widget that may only lock the PC
+        // can never end the session.
+        let session = svc == ServiceId::Power && matches!(method.as_str(), "restart" | "shut_down" | "sign_out");
+        if session {
+            grant.permissions.check_session().map_err(|n| s.deny(n))?;
+        } else {
+            grant.permissions.check_control(svc).map_err(|n| s.deny(n))?;
+        }
         let rest: Vec<Lv> = it.collect();
-        let num = |i: usize, what: &str| -> mlua::Result<f32> {
-            match rest.get(i) {
-                Some(Lv::Integer(v)) => Ok(*v as f32),
-                Some(Lv::Number(v)) => Ok(*v as f32),
-                other => Err(rt(format!("{what} must be a number, got {}", other.map_or("nil", lua_type)))),
-            }
-        };
-        let opt_monitor = || -> mlua::Result<Option<u32>> {
-            match rest.first() {
-                None | Some(Lv::Nil) => Ok(None),
-                Some(Lv::Integer(v)) if *v >= 0 => Ok(Some(*v as u32)),
-                Some(Lv::Number(v)) if *v >= 0.0 => Ok(Some(*v as u32)),
-                other => Err(rt(format!("monitor must be a number, got {}", other.map_or("nil", lua_type)))),
-            }
-        };
-        let command = match (svc, cmd.to_string_lossy().as_str()) {
-            (ServiceId::Audio, "set_volume") => {
-                ServiceCommand::Audio(AudioCommand::SetVolume(num(0, "percent")?.clamp(0.0, 100.0)))
-            }
-            (ServiceId::Audio, "change_volume") => ServiceCommand::Audio(AudioCommand::ChangeVolume(num(0, "delta")?)),
-            (ServiceId::Audio, "set_muted") => match rest.first() {
-                Some(Lv::Boolean(b)) => ServiceCommand::Audio(AudioCommand::SetMute(*b)),
-                other => return Err(rt(format!("muted must be a boolean, got {}", other.map_or("nil", lua_type)))),
-            },
-            (ServiceId::Audio, "toggle_mute") => ServiceCommand::Audio(AudioCommand::ToggleMute),
-            (ServiceId::Media, "play_pause") => ServiceCommand::Media(MediaCommand::PlayPause),
-            (ServiceId::Media, "play") => ServiceCommand::Media(MediaCommand::Play),
-            (ServiceId::Media, "pause") => ServiceCommand::Media(MediaCommand::Pause),
-            (ServiceId::Media, "next") => ServiceCommand::Media(MediaCommand::Next),
-            (ServiceId::Media, "previous") => ServiceCommand::Media(MediaCommand::Previous),
-            (ServiceId::Workspaces, "focus") => match rest.first() {
-                Some(Lv::String(name)) => ServiceCommand::Workspaces(WorkspaceCommand::Focus(name.to_string_lossy())),
-                other => {
-                    return Err(rt(format!(
-                        "the workspace name must be a string, got {}",
-                        other.map_or("nil", lua_type)
-                    )));
-                }
-            },
-            (ServiceId::Workspaces, "focus_next") => {
-                ServiceCommand::Workspaces(WorkspaceCommand::FocusNext(opt_monitor()?))
-            }
-            (ServiceId::Workspaces, "focus_previous") => {
-                ServiceCommand::Workspaces(WorkspaceCommand::FocusPrevious(opt_monitor()?))
-            }
-            (_, other) => return Err(rt(format!("{} has no command '{other}'", svc.name()))),
-        };
+        let command = parse_command(svc, method.as_str(), &rest)?;
+        if let Some(gate) = gesture_only(&command)
+            && !s.gesture_gate(inst, &format!("{}:{gate}", svc.name()))?
+        {
+            return Ok(());
+        }
         s.hub.send(HubRequest::Command { owner: inst, command });
         Ok(())
     });
@@ -887,8 +1094,8 @@ pub(crate) fn install(lua: &Lua, sh: &Rc<Shared>, load_fn: &Rc<RefCell<Option<Fu
         rsb_core::permissions::open_url_text_ok(&url).map_err(rt)?;
         let grant = s.grant(inst)?;
         grant.permissions.check_net(&parsed).map_err(|n| s.deny(n))?;
-        if !s.st.borrow().in_click {
-            return Err(rt("rsb.open_url only works while a click is being handled"));
+        if s.st.borrow().gesture.is_none() {
+            return Err(rt("rsb.open_url only works inside a click or key handler"));
         }
         // One page every two seconds, however many widgets click at once.
         let now = s.mono();
@@ -1008,6 +1215,104 @@ pub(crate) fn install(lua: &Lua, sh: &Rc<Shared>, load_fn: &Rc<RefCell<Option<Fu
         Ok(())
     });
 
+    // ---- popups, fuzzy search
+    native!("is_builtin", |s, _l, _a: ()| {
+        let inst = s.inst_or_err()?;
+        Ok(s.st.borrow().instances.get(&inst).is_some_and(|i| i.builtin))
+    });
+    // The widget's own name (`clock` for `clock#utc`): a copy of a built-in widget in the user's folder
+    // replaces it, so it may keep the popup names that built-in had.
+    native!("widget_base", |s, _l, _a: ()| {
+        let inst = s.inst_or_err()?;
+        let st = s.st.borrow();
+        let text = st.instances.get(&inst).map(|i| i.ref_text.as_str()).unwrap_or("");
+        Ok(text.split('#').next().unwrap_or("").to_string())
+    });
+    native!("need_overlay", |s, _l, _a: ()| {
+        let inst = s.inst_or_err()?;
+        let grant = s.grant(inst)?;
+        grant
+            .permissions
+            .check_overlay()
+            .map_err(|_| rt("placement = \"screen\" needs overlay = true in the widget's permissions"))
+    });
+    native!("untouch", |s, _l, name: String| {
+        let inst = s.inst_or_err()?;
+        let svc = Shared::service_arg(&name)?;
+        let had = s.st.borrow_mut().instances.get_mut(&inst).is_some_and(|i| i.subs.remove(&svc));
+        if had {
+            s.hub.send(HubRequest::Unsubscribe { service: svc, owner: inst });
+        }
+        Ok(())
+    });
+    native!("popup_register", |s, _l, names: Table| {
+        s.guard()?;
+        let inst = s.inst_or_err()?;
+        let list: Vec<String> = names.sequence_values::<String>().filter_map(Result::ok).collect();
+        let mut st = s.st.borrow_mut();
+        let monitor = st.instances.get(&inst).map(|i| i.spec.monitor.handle).ok_or_else(|| rt("no such widget"))?;
+        st.next_popup += 1;
+        let pid = st.next_popup;
+        st.popups.insert(pid, PopReg { inst, monitor, names: list, open: false });
+        Ok(pid)
+    });
+    native!("popup_unregister", |s, _l, pid: u64| {
+        let me = s.current_instance();
+        let mut st = s.st.borrow_mut();
+        if st.popups.get(&pid).is_some_and(|r| Some(r.inst) == me) {
+            st.popup_drop(pid);
+        }
+        Ok(())
+    });
+    native!("popup_state", |s, _l, (pid, open): (u64, bool)| {
+        let me = s.current_instance();
+        let mut st = s.st.borrow_mut();
+        let Some(reg) = st.popups.get_mut(&pid).filter(|r| Some(r.inst) == me) else { return Ok(()) };
+        reg.open = open;
+        let (names, monitor) = (reg.names.clone(), reg.monitor);
+        st.popup_sync(&names, monitor);
+        Ok(())
+    });
+    native!("popup_is_open", |s, _l, key: String| Ok(s.st.borrow().popup_open.contains(&key)));
+    native!("popup_cmd", |s, _l, (action, name): (String, String)| {
+        s.guard()?;
+        let inst = s.inst_or_err()?;
+        let action = PopupAction::from_name(&action).ok_or_else(|| rt("unknown popup action"))?;
+        s.popup_command(inst, action, &name)
+    });
+    native!("fuzzy_rank", |s, l, (query, items, limit): (String, Table, f64)| {
+        s.guard()?;
+        let mut texts: Vec<String> = Vec::new();
+        for v in items.sequence_values::<mlua::LuaString>() {
+            if texts.len() >= MAX_FUZZY_ITEMS {
+                return Err(rt(format!("rsb.fuzzy takes at most {MAX_FUZZY_ITEMS} items")));
+            }
+            texts.push(v?.to_string_lossy().chars().take(MAX_FUZZY_CHARS).collect());
+            if texts.len().is_multiple_of(1024) {
+                s.check_limits(Some(l))?;
+            }
+        }
+        let query: String = query.chars().take(MAX_FUZZY_CHARS).collect();
+        let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+        let ranked = rsb_core::fuzzy::rank(&query, &refs, limit.max(0.0) as usize);
+        let out = l.create_table_with_capacity(ranked.len(), 0)?;
+        for (n, i) in ranked.into_iter().enumerate() {
+            out.raw_set(n + 1, i + 1)?;
+        }
+        Ok(out)
+    });
+    native!("fuzzy_positions", |s, l, (query, text): (String, String)| {
+        s.guard()?;
+        let query: String = query.chars().take(MAX_FUZZY_CHARS).collect();
+        let text: String = text.chars().take(MAX_FUZZY_CHARS).collect();
+        let Some(found) = rsb_core::fuzzy::positions(&query, &text) else { return Ok(None) };
+        let out = l.create_table_with_capacity(found.len(), 0)?;
+        for (n, i) in found.into_iter().enumerate() {
+            out.raw_set(n + 1, i + 1)?;
+        }
+        Ok(Some(out))
+    });
+
     // ---- modules
     {
         let s = sh.clone();
@@ -1112,6 +1417,98 @@ mod tests {
         assert_eq!(suggest("font_sise", &names).as_deref(), Some("font_size"));
         assert_eq!(suggest("zzzzzz", &names), None);
         assert_eq!(suggest("x", &names), None);
+    }
+
+    /// Every command of every service schema, with arguments that pass, and whether it needs a click or key.
+    fn table(lua: &Lua) -> Vec<(ServiceId, &'static str, Vec<Lv>, bool)> {
+        let st = |s: &str| Lv::String(lua.create_string(s).unwrap());
+        let i = Lv::Integer;
+        let b = Lv::Boolean;
+        vec![
+            (ServiceId::Audio, "set_volume", vec![i(50)], false),
+            (ServiceId::Audio, "change_volume", vec![i(-5)], false),
+            (ServiceId::Audio, "set_muted", vec![b(true)], false),
+            (ServiceId::Audio, "toggle_mute", vec![], false),
+            (ServiceId::Audio, "set_default", vec![st("d")], true),
+            (ServiceId::Audio, "set_device_volume", vec![st("d"), i(10)], false),
+            (ServiceId::Audio, "set_device_muted", vec![st("d"), b(true)], false),
+            (ServiceId::Media, "play_pause", vec![], false),
+            (ServiceId::Media, "play", vec![], false),
+            (ServiceId::Media, "pause", vec![], false),
+            (ServiceId::Media, "next", vec![], false),
+            (ServiceId::Media, "previous", vec![], false),
+            (ServiceId::Media, "seek", vec![i(5)], false),
+            (ServiceId::Workspaces, "focus", vec![st("1")], false),
+            (ServiceId::Workspaces, "focus_next", vec![], false),
+            (ServiceId::Workspaces, "focus_previous", vec![], false),
+            (ServiceId::Microphone, "set_muted", vec![b(true)], false),
+            (ServiceId::Microphone, "toggle_mute", vec![], false),
+            (ServiceId::Bluetooth, "set_enabled", vec![b(true)], true),
+            (ServiceId::Bluetooth, "connect", vec![st("d")], true),
+            (ServiceId::Bluetooth, "disconnect", vec![st("d")], true),
+            (ServiceId::Bluetooth, "forget", vec![st("d")], true),
+            (ServiceId::Bluetooth, "open_settings", vec![], true),
+            (ServiceId::Bluetooth, "rescan", vec![], true),
+            (ServiceId::Apps, "launch", vec![st("a")], true),
+            (ServiceId::Apps, "open_uri", vec![st("ms-settings:bluetooth")], true),
+            (ServiceId::Power, "set_mode", vec![st("balanced")], false),
+            (ServiceId::Power, "lock", vec![], false),
+            (ServiceId::Power, "sleep", vec![], true),
+            (ServiceId::Power, "restart", vec![], true),
+            (ServiceId::Power, "shut_down", vec![], true),
+            (ServiceId::Power, "sign_out", vec![], true),
+            (ServiceId::Wifi, "scan", vec![], false),
+            (ServiceId::Wifi, "connect", vec![st("home")], true),
+            (ServiceId::Wifi, "disconnect", vec![], true),
+        ]
+    }
+
+    #[test]
+    fn every_schema_command_maps_to_a_service_command_and_the_click_only_ones_are_marked() {
+        let lua = Lua::new();
+        let rows = table(&lua);
+        for s in rsb_core::services::SERVICE_SCHEMAS {
+            for c in s.commands {
+                assert!(
+                    rows.iter().any(|(id, m, ..)| *id == s.id && *m == c.name),
+                    "{}:{} has no row",
+                    s.id.name(),
+                    c.name
+                );
+            }
+        }
+        for (svc, method, args, gated) in &rows {
+            let cmd = parse_command(*svc, method, args).unwrap_or_else(|e| panic!("{}:{method}: {e}", svc.name()));
+            assert_eq!(cmd.service(), *svc, "{method}");
+            assert_eq!(gesture_only(&cmd).is_some(), *gated, "{}:{method}", svc.name());
+            if *gated {
+                assert_eq!(gesture_only(&cmd), Some(cmd.kind()));
+            }
+        }
+    }
+
+    #[test]
+    fn command_arguments_are_checked_before_anything_reaches_the_hub() {
+        let lua = Lua::new();
+        let st = |s: &str| Lv::String(lua.create_string(s).unwrap());
+        let err = |svc, m: &str, a: Vec<Lv>| parse_command(svc, m, &a).unwrap_err().to_string();
+        assert!(
+            err(ServiceId::Apps, "open_uri", vec![st("https://example.com")])
+                .contains("ms-settings: and ms-screenclip:")
+        );
+        assert!(
+            err(ServiceId::Apps, "open_uri", vec![st("ms-settings:\nx")]).contains("ms-settings: and ms-screenclip:")
+        );
+        assert!(err(ServiceId::Apps, "launch", vec![st("a\nb")]).contains("no app with that id"));
+        assert!(err(ServiceId::Apps, "launch", vec![st(&"x".repeat(1025))]).contains("no app with that id"));
+        assert!(err(ServiceId::Power, "set_mode", vec![st("turbo")]).contains("mode must be"));
+        assert!(err(ServiceId::Power, "set_mode", vec![st("unknown")]).contains("mode must be"));
+        assert!(err(ServiceId::Media, "seek", vec![Lv::Integer(-1)]).contains("between 0 and 360000"));
+        assert!(err(ServiceId::Wifi, "connect", vec![st("")]).contains("no network with that name"));
+        assert!(err(ServiceId::Bluetooth, "set_enabled", vec![st("yes")]).contains("on must be a boolean"));
+        assert!(err(ServiceId::Power, "reboot", vec![]).contains("power has no command 'reboot'"));
+        let ok = parse_command(ServiceId::Audio, "set_device_volume", &[st("d"), Lv::Integer(300)]).unwrap();
+        assert_eq!(ok, ServiceCommand::AudioDevice(AudioDeviceCommand::SetVolume("d".into(), 100.0)));
     }
 
     #[test]

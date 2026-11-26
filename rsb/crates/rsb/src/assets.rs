@@ -15,6 +15,11 @@ pub fn file(rel: &str) -> Option<&'static str> {
     EMBEDDED.iter().find(|(name, _)| *name == rel).and_then(|(_, bytes)| std::str::from_utf8(bytes).ok())
 }
 
+/// An embedded file as raw bytes (the font and the icons are not text).
+pub fn bytes(rel: &str) -> Option<&'static [u8]> {
+    EMBEDDED.iter().find(|(name, _)| *name == rel).map(|(_, bytes)| *bytes)
+}
+
 /// `clock`, `cpu`, ...: every `widgets/<name>.luau` (the `lib/` helpers are not widgets).
 pub fn builtin_widget_names() -> Vec<String> {
     let mut names: Vec<String> = EMBEDDED
@@ -119,7 +124,8 @@ mod tests {
 
     #[test]
     fn every_embedded_text_file_is_utf8_and_the_templates_exist() {
-        for (name, bytes) in EMBEDDED {
+        // Font files are the one binary kind under assets.
+        for (name, bytes) in EMBEDDED.iter().filter(|(name, _)| !name.starts_with("fonts/") || name.ends_with(".txt")) {
             assert!(std::str::from_utf8(bytes).is_ok(), "{name} is not UTF-8");
         }
         for must in ["config/bar.toml", "config/style.css", "themes/base.css", "widgets/clock.luau"] {
@@ -128,15 +134,36 @@ mod tests {
     }
 
     #[test]
-    fn the_eleven_builtins_are_listed_and_lib_files_are_not_widgets() {
+    fn the_builtins_are_the_luau_files_in_the_widgets_folder_and_lib_files_are_not_widgets() {
         let names = builtin_widget_names();
-        for w in
-            ["workspaces", "title", "clock", "date", "cpu", "memory", "battery", "volume", "network", "media", "text"]
-        {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/widgets");
+        let mut on_disk: Vec<String> = std::fs::read_dir(&dir)
+            .expect("assets/widgets")
+            .filter_map(|e| e.ok()?.path().file_name()?.to_str()?.strip_suffix(".luau").map(str::to_string))
+            .collect();
+        on_disk.sort();
+        assert!(!on_disk.is_empty());
+        assert_eq!(names, on_disk, "the embedded list follows the folder");
+        for w in ["workspaces", "clock", "date", "cpu", "memory", "battery", "media", "text"] {
             assert!(names.iter().any(|n| n == w), "{w} missing from {names:?}");
         }
-        assert_eq!(names.len(), 11, "{names:?}");
         assert!(!names.iter().any(|n| n.contains("lib") || n == "format"));
+    }
+
+    #[test]
+    fn the_default_config_is_the_default_presets_bar() {
+        let preset = load_config(None, &|n| preset_toml(n).map(str::to_string)).config.expect("config");
+        let built_in = rsb_core::config::default_config();
+        let names = |b: &rsb_core::config::BarSpec| {
+            [&b.left, &b.center, &b.right].map(|z| z.iter().map(|i| i.widget.to_string()).collect::<Vec<_>>())
+        };
+        let (p, d) = (&preset.bars[0], &built_in.bars[0]);
+        assert_eq!(names(p), names(d));
+        assert_eq!(
+            (p.height, p.margin, p.floating, p.reserve, p.center_on.clone()),
+            (36, 8, false, true, d.center_on.clone())
+        );
+        assert_eq!((&p.name, p.position, p.fullscreen), (&d.name, d.position, d.fullscreen));
     }
 
     #[test]

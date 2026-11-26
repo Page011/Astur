@@ -7,6 +7,28 @@ pub struct PointF {
     pub y: f32,
 }
 
+/// Whether `p` is inside the polygon (non-zero winding, or even-odd). The same
+/// rule decides what a click hits, what a clip shows, and what counts as inside
+/// a popup for a press that reaches no window of ours.
+pub fn polygon_contains(points: &[PointF], p: PointF, evenodd: bool) -> bool {
+    if points.len() < 3 {
+        return false;
+    }
+    let mut winding = 0i32;
+    let mut crossings = 0u32;
+    for i in 0..points.len() {
+        let (a, b) = (points[i], points[(i + 1) % points.len()]);
+        if (a.y <= p.y) != (b.y <= p.y) {
+            let x = a.x + (p.y - a.y) / (b.y - a.y) * (b.x - a.x);
+            if x > p.x {
+                crossings += 1;
+                winding += if b.y > a.y { 1 } else { -1 };
+            }
+        }
+    }
+    if evenodd { crossings % 2 == 1 } else { winding != 0 }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct SizeF {
     pub w: f32,
@@ -153,6 +175,59 @@ pub struct Edges<T> {
 impl<T: Copy> Edges<T> {
     pub const fn all(v: T) -> Edges<T> {
         Edges { top: v, right: v, bottom: v, left: v }
+    }
+}
+
+/// One step of a path outline, physical px.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PathEl {
+    MoveTo(PointF),
+    LineTo(PointF),
+    QuadTo(PointF, PointF),
+    CubicTo(PointF, PointF, PointF),
+    Close,
+}
+
+/// A closed outline (one or more contours), filled with the non-zero rule
+/// unless a command says otherwise. Shapes that are not a rounded
+/// rectangle (`corner-shape: bevel`, `clip-path: polygon()`) reach the
+/// renderer as paths.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PathF {
+    pub els: Vec<PathEl>,
+}
+
+impl PathF {
+    /// A polygon through `points`, closed.
+    pub fn polygon(points: &[PointF]) -> PathF {
+        let mut els = Vec::with_capacity(points.len() + 1);
+        for (i, p) in points.iter().enumerate() {
+            els.push(if i == 0 { PathEl::MoveTo(*p) } else { PathEl::LineTo(*p) });
+        }
+        if !points.is_empty() {
+            els.push(PathEl::Close);
+        }
+        PathF { els }
+    }
+
+    /// Smallest rectangle holding every point of the path (control points
+    /// included, so it may be a little larger than the shape).
+    pub fn bounds(&self) -> RectF {
+        let mut pts = self.els.iter().flat_map(|e| match *e {
+            PathEl::MoveTo(a) | PathEl::LineTo(a) => vec![a],
+            PathEl::QuadTo(a, b) => vec![a, b],
+            PathEl::CubicTo(a, b, c) => vec![a, b, c],
+            PathEl::Close => Vec::new(),
+        });
+        let Some(first) = pts.next() else { return RectF::default() };
+        let (mut x0, mut y0, mut x1, mut y1) = (first.x, first.y, first.x, first.y);
+        for p in pts {
+            x0 = x0.min(p.x);
+            y0 = y0.min(p.y);
+            x1 = x1.max(p.x);
+            y1 = y1.max(p.y);
+        }
+        RectF::new(x0, y0, x1 - x0, y1 - y0)
     }
 }
 

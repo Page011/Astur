@@ -59,6 +59,24 @@ impl ImageCache {
         })
     }
 
+    /// Drops the image stored under exactly `key`; true when there was one.
+    pub(crate) fn remove(&mut self, key: &str) -> bool {
+        let Some(e) = self.map.remove(key) else { return false };
+        self.bytes -= e.image.data.len();
+        true
+    }
+
+    /// Drops every image whose key starts with `prefix`; returns how many.
+    pub(crate) fn remove_prefix(&mut self, prefix: &str) -> usize {
+        let gone: Vec<Arc<str>> = self.map.keys().filter(|k| k.starts_with(prefix)).cloned().collect();
+        for k in &gone {
+            if let Some(e) = self.map.remove(k) {
+                self.bytes -= e.image.data.len();
+            }
+        }
+        gone.len()
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.map.len()
     }
@@ -112,6 +130,28 @@ mod tests {
         );
         assert_eq!(c.len(), 0);
         assert_eq!(c.bytes(), 0);
+    }
+
+    #[test]
+    fn removing_one_key_leaves_a_longer_key_that_starts_with_it() {
+        let mut c = ImageCache::default();
+        c.set("rsb-image:media/1".into(), img(10));
+        c.set("rsb-image:media/10".into(), img(10));
+        assert!(c.remove("rsb-image:media/1"));
+        assert!(!c.remove("rsb-image:media/1"), "already gone");
+        assert!(c.has("rsb-image:media/10"));
+        assert_eq!((c.len(), c.bytes()), (1, 10 * 10 * 4));
+    }
+
+    #[test]
+    fn removing_by_prefix_frees_only_those_keys() {
+        let mut c = ImageCache::default();
+        c.set("rsb-image:apps/1".into(), img(10));
+        c.set("rsb-image:apps/2".into(), img(10));
+        c.set("rsb-image:media/1".into(), img(10));
+        assert_eq!(c.remove_prefix("rsb-image:apps/"), 2);
+        assert_eq!((c.len(), c.bytes()), (1, 10 * 10 * 4));
+        assert!(c.has("rsb-image:media/1"));
     }
 
     #[test]

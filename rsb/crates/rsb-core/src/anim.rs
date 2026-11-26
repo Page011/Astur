@@ -14,6 +14,8 @@ pub enum Easing {
     EaseInOut,
     /// `cubic-bezier(x1, y1, x2, y2)`, x1 and x2 in 0..=1.
     CubicBezier(f32, f32, f32, f32),
+    /// `steps(n, end)` (`start` when the flag is true): n equal jumps.
+    Steps(u32, bool),
 }
 
 impl Easing {
@@ -23,6 +25,11 @@ impl Easing {
         let t = if t.is_nan() { 0.0 } else { t.clamp(0.0, 1.0) };
         let (x1, y1, x2, y2) = match self {
             Easing::Linear => return t,
+            Easing::Steps(n, jump_start) => {
+                let n = n.max(1) as f32;
+                let k = if jump_start { (t * n).ceil() } else { (t * n).floor() };
+                return (k / n).clamp(0.0, 1.0);
+            }
             Easing::Ease => (0.25, 0.1, 0.25, 1.0),
             Easing::EaseIn => (0.42, 0.0, 1.0, 1.0),
             Easing::EaseOut => (0.0, 0.0, 0.58, 1.0),
@@ -133,6 +140,18 @@ mod tests {
             let got = e.apply(t);
             assert!((got - want).abs() < 0.001, "{e:?}({t}) = {got}, want {want}");
         }
+    }
+
+    #[test]
+    fn steps_jump_at_the_end_or_the_start_of_each_step() {
+        assert_eq!(Easing::Steps(4, false).apply(0.0), 0.0);
+        assert_eq!(Easing::Steps(4, false).apply(0.24), 0.0);
+        assert_eq!(Easing::Steps(4, false).apply(0.25), 0.25);
+        assert_eq!(Easing::Steps(4, false).apply(0.99), 0.75);
+        assert_eq!(Easing::Steps(4, false).apply(1.0), 1.0);
+        assert_eq!(Easing::Steps(4, true).apply(0.01), 0.25);
+        assert_eq!(Easing::Steps(4, true).apply(0.5), 0.5);
+        assert_eq!(Easing::Steps(1, true).apply(0.5), 1.0);
     }
 
     #[test]

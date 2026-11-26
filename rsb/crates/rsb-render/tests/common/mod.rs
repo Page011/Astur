@@ -11,6 +11,25 @@ use rsb_core::geom::{Edges, PointF, Radii, RectF};
 use rsb_core::style::TextAlign;
 use rsb_render::{FontConfig, Image, Renderer};
 
+mod outlines;
+#[allow(unused_imports)]
+pub use outlines::*;
+mod pages;
+#[allow(unused_imports)]
+pub use pages::*;
+
+/// "rdp" in a Remote Desktop session, else "console": the label every timing
+/// printed by a test carries, since an rdp session paces frames differently.
+pub fn session_name() -> &'static str {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    const SM_REMOTESESSION: i32 = 0x1000;
+    // SAFETY: a plain query with no pointers.
+    if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 { "rdp" } else { "console" }
+}
+
 /// One renderer for the whole test binary: loading the system fonts is the
 /// expensive part, and tests that share it also exercise cache reuse.
 pub fn renderer() -> MutexGuard<'static, Renderer> {
@@ -125,11 +144,13 @@ pub struct Scene {
     /// recorded ones).
     pub text: bool,
     pub images: Vec<(&'static str, Image)>,
+    /// SVG sources installed under their key before drawing.
+    pub svgs: Vec<(&'static str, &'static str)>,
 }
 
 const SANS: &[&str] = &["Segoe UI"];
 
-fn background(w: u32, h: u32, c: &str) -> DrawItem {
+pub fn background(w: u32, h: u32, c: &str) -> DrawItem {
     fill(0, rect(0.0, 0.0, w as f32, h as f32), 0.0, col(c))
 }
 
@@ -150,7 +171,7 @@ pub fn scene_shapes() -> Scene {
         fill_radii(12, rect(280.0, 70.0, 80.0, 40.0), Radii { tl: 4.0, tr: 16.0, br: 4.0, bl: 16.0 }, col("#E79B25")),
         fill(13, rect(10.0, 130.0, 380.0, 30.0), 15.0, col("#366382")),
     ];
-    Scene { name: "shapes", list: list(400, 170, items), text: false, images: vec![] }
+    Scene { name: "shapes", list: list(400, 170, items), text: false, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_borders() -> Scene {
@@ -185,7 +206,7 @@ pub fn scene_borders() -> Scene {
             col("#7D5168"),
         ),
     ];
-    Scene { name: "borders", list: list(400, 170, items), text: false, images: vec![] }
+    Scene { name: "borders", list: list(400, 170, items), text: false, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_gradients() -> Scene {
@@ -248,7 +269,7 @@ pub fn scene_gradients() -> Scene {
             &[(0.0, "#000000"), (1.0, "#ffffff")],
         ),
     ];
-    Scene { name: "gradients", list: list(400, 170, items), text: false, images: vec![] }
+    Scene { name: "gradients", list: list(400, 170, items), text: false, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_shadows() -> Scene {
@@ -272,7 +293,7 @@ pub fn scene_shadows() -> Scene {
         shadow(10, box_f, 4.0, 2.5, col("#366382")),
         fill(11, box_f, 4.0, col("#366382")),
     ];
-    Scene { name: "shadows", list: list(400, 190, items), text: false, images: vec![] }
+    Scene { name: "shadows", list: list(400, 190, items), text: false, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_clips() -> Scene {
@@ -308,7 +329,7 @@ pub fn scene_clips() -> Scene {
         fill(13, rect(20.0, 95.0, 300.0, 10.0), 0.0, col("#ff0000")),
         pop_clip(12, rect(19.0, 94.0, 2.0, 12.0)),
     ];
-    Scene { name: "clips", list: list(400, 120, items), text: false, images: vec![] }
+    Scene { name: "clips", list: list(400, 120, items), text: false, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_opacity() -> Scene {
@@ -339,7 +360,7 @@ pub fn scene_opacity() -> Scene {
         fill(14, rect(130.0, 90.0, 100.0, 10.0), 0.0, col("#366382")),
         pop_opacity(13, rect(130.0, 90.0, 100.0, 10.0)),
     ];
-    Scene { name: "opacity", list: list(400, 110, items), text: false, images: vec![] }
+    Scene { name: "opacity", list: list(400, 110, items), text: false, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_images() -> Scene {
@@ -359,6 +380,7 @@ pub fn scene_images() -> Scene {
         list: list(400, 120, items),
         text: false,
         images: vec![("ramp16", test_image(16)), ("ramp64", test_image(64))],
+        svgs: vec![],
     }
 }
 
@@ -408,7 +430,7 @@ pub fn scene_text_latin() -> Scene {
             TextAlign::Start,
         ),
     ];
-    Scene { name: "text-latin", list: list(360, 190, items), text: true, images: vec![] }
+    Scene { name: "text-latin", list: list(360, 190, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_text_light() -> Scene {
@@ -439,7 +461,7 @@ pub fn scene_text_light() -> Scene {
             TextAlign::Start,
         ),
     ];
-    Scene { name: "text-light", list: list(360, 90, items), text: true, images: vec![] }
+    Scene { name: "text-light", list: list(360, 90, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_text_arabic() -> Scene {
@@ -480,7 +502,7 @@ pub fn scene_text_arabic() -> Scene {
             TextAlign::Start,
         ),
     ];
-    Scene { name: "text-arabic", list: list(360, 130, items), text: true, images: vec![] }
+    Scene { name: "text-arabic", list: list(360, 130, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_text_ligature() -> Scene {
@@ -499,7 +521,7 @@ pub fn scene_text_ligature() -> Scene {
         ),
         text(3, rect(10.0, 70.0, 340.0, 26.0), "Segoe: office fi fl", &style(SANS, 20.0, 400), ink, TextAlign::Start),
     ];
-    Scene { name: "text-ligature", list: list(360, 100, items), text: true, images: vec![] }
+    Scene { name: "text-ligature", list: list(360, 100, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_text_spacing() -> Scene {
@@ -520,7 +542,7 @@ pub fn scene_text_spacing() -> Scene {
         text(3, r(58.0), "SPACING 6 Delta", &s6, ink, TextAlign::Start),
         text(4, r(84.0), "SPACING -1 Delta", &sneg, ink, TextAlign::Start),
     ];
-    Scene { name: "text-spacing", list: list(360, 120, items), text: true, images: vec![] }
+    Scene { name: "text-spacing", list: list(360, 120, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_text_tabular() -> Scene {
@@ -541,7 +563,7 @@ pub fn scene_text_tabular() -> Scene {
         text(3, r(62.0), "1111111111 0000000000", &seg_tab, ink, TextAlign::Start),
         text(4, r(90.0), "12:08:15 11:11:11", &seg_tab, ink, TextAlign::Start),
     ];
-    Scene { name: "text-tabular", list: list(360, 130, items), text: true, images: vec![] }
+    Scene { name: "text-tabular", list: list(360, 130, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn scene_emoji() -> Scene {
@@ -574,7 +596,7 @@ pub fn scene_emoji() -> Scene {
             TextAlign::Start,
         ),
     ];
-    Scene { name: "emoji", list: list(360, 120, items), text: true, images: vec![] }
+    Scene { name: "emoji", list: list(360, 120, items), text: true, images: vec![], svgs: vec![] }
 }
 
 /// Code points the icon golden draws: all present in Segoe MDL2 Assets and
@@ -604,7 +626,7 @@ pub fn scene_icons() -> Scene {
         ink,
         TextAlign::Start,
     ));
-    Scene { name: "icons", list: list(360, 100, items), text: true, images: vec![] }
+    Scene { name: "icons", list: list(360, 100, items), text: true, images: vec![], svgs: vec![] }
 }
 
 pub fn all_scenes() -> Vec<Scene> {
@@ -624,11 +646,21 @@ pub fn all_scenes() -> Vec<Scene> {
         scene_text_tabular(),
         scene_emoji(),
         scene_icons(),
+        scene_paths(),
+        scene_chevrons(),
+        scene_svg(),
+        scene_mono(),
     ]
 }
 
 pub fn install_images(r: &mut Renderer, scene: &Scene) {
     for (k, img) in &scene.images {
         r.set_image(Arc::<str>::from(*k), img.clone());
+    }
+    if scene.name == "mono" {
+        r.register_font(bundled_mono(), None).expect("bundled font");
+    }
+    for (k, src) in &scene.svgs {
+        r.set_svg(Arc::<str>::from(*k), src.as_bytes()).expect("test svg");
     }
 }

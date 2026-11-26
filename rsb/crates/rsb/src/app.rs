@@ -3,7 +3,7 @@
 //! blocks or reads a file lives on another thread; this one only drains its
 //! inbox (`UiMsg`) and draws.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
@@ -13,23 +13,31 @@ use rsb_core::config::{Config, FullscreenMode, default_config};
 use rsb_core::css::{MediaEnv, Stylesheet};
 use rsb_core::diag::{DiagKind, Diagnostic, Plate, Severity};
 use rsb_core::draw::DrawList;
-use rsb_core::element::{Element, ElementKind, InstanceId, WidgetTree};
-use rsb_core::hit::{Button, HandlerCall, InputKind};
+use rsb_core::element::{InstanceId, WidgetTree};
+use rsb_core::hit::{Button, HandlerCall, InputKind, PointerKind};
 use rsb_core::ipc::{Command, Reply};
 use rsb_core::msg::{InstanceSpec, ScriptIn, ScriptOut};
+use rsb_core::popup::CloseReason;
 use rsb_core::scene::{BarGeometry, Scene, SceneEnv};
 use rsb_core::style::{Backdrop, Cursor};
 use rsb_core::value::Value;
 use rsb_render::Renderer;
-use rsb_win::{BarId, BarWindowSpec, MenuItem, TestInput, Ui, UiEvent, UiHandler};
+use rsb_win::{BarId, BarWindowSpec, MenuItem, OutsidePress, TestInput, Ui, UiEvent, UiHandler};
 use serde_json::json;
 
+use crate::capture::Capture;
+use crate::clock;
 use crate::fallback;
-use crate::images::{ImageLoader, ImageRequests};
-use crate::msg::{BarInfo, ConfigUpdate, ReloadKind, SimAction, UiMsg};
+use crate::fonts::FontRegistry;
+use crate::icons::BundledIcons;
+use crate::images::{ImageLoader, ImageRequests, files_of};
+use crate::msg::{BarInfo, ConfigUpdate, ReloadKind, SimAction, SimSurface, UiMsg};
 use crate::plan::{BarInstances, BarPlan, InstanceTable, build_instances, plan_bars};
+use crate::popups::{Env, OverlayWatch, PopupOptions, Popups, SLOW_STEP, SlowStep};
 use crate::reader::Reader;
+use crate::service_images::ServiceImages;
 use crate::stats::{Stats, since_process_start_ms, wall_ms};
+use crate::winlayer::{CaptureState, Live, Win};
 
 /// A bar is first drawn when all of its widgets have reported, or this long
 /// after it was created, whichever comes first.
@@ -46,6 +54,14 @@ pub struct AppOptions {
     pub offscreen: bool,
     /// `--simulate-pointer`: a right click does not open the native menu.
     pub simulated_pointer: bool,
+    /// `--no-hook`: the outside-press hook is never installed.
+    pub no_hook: bool,
+    /// `--no-activate`: no popup takes real keyboard focus.
+    pub no_activate: bool,
+    /// A test flag drives this run: the clipboard is a stand-in.
+    pub gated: bool,
+    /// Shared with the watchdog thread: an overlay is up, and the UI thread stalled.
+    pub overlays: Arc<OverlayWatch>,
 }
 
 /// The window a bar plan asks for.
@@ -62,18 +78,18 @@ fn window_spec(plan: &BarPlan, no_reserve: bool) -> BarWindowSpec {
     }
 }
 
-struct BarRt {
+pub(crate) struct BarRt {
     key: String,
-    id: BarId,
-    plan: BarPlan,
+    pub(crate) id: BarId,
+    pub(crate) plan: BarPlan,
     win: BarWindowSpec,
-    scene: Scene,
-    insts: BarInstances,
+    pub(crate) scene: Scene,
+    pub(crate) insts: BarInstances,
     /// Instances that have not yet sent a first tree or plate.
     awaiting: HashSet<InstanceId>,
     created: Instant,
     presented: bool,
-    scale: f32,
+    pub(crate) scale: f32,
     cursor: Cursor,
     backdrop: Backdrop,
     next_frame: Option<Instant>,
@@ -109,15 +125,43 @@ pub struct App {
     font_diags: Vec<Diagnostic>,
     scene_diags: Vec<Diagnostic>,
     script_diags: Vec<Diagnostic>,
+    /// Widgets in their error state (a handler, an effect or a popup's content failed lately).
+    script_errors: BTreeMap<InstanceId, Diagnostic>,
     stall: Option<Diagnostic>,
+    /// The slowest bar draw since the last slow-turn report.
+    slow_bar: Option<SlowStep>,
     pipe_diag: Option<Diagnostic>,
     bar_plate: Option<Plate>,
     trees: HashMap<InstanceId, Arc<WidgetTree>>,
     widget_plates: HashMap<InstanceId, Plate>,
     names: HashMap<InstanceId, String>,
     images_requested: ImageRequests,
+    fonts: FontRegistry,
+    bundled_icons: BundledIcons,
+    service_images: ServiceImages,
+    /// Natural size of every image the renderer holds, for bars made later.
+    image_sizes: HashMap<Arc<str>, (u32, u32)>,
     pending: Option<Pending>,
     first_frame_done: bool,
+    popups: Popups,
+    /// `--capture`: every present is written out (offscreen runs with fake services only).
+    capture: Option<CaptureState>,
+}
+
+/// The parts of the app the popup manager borrows for one call.
+macro_rules! popup_env {
+    ($s:ident, $ui:expr, $now:expr) => {
+        Env {
+            ui: $ui,
+            renderer: &mut $s.renderer,
+            bars: &mut $s.bars,
+            icons: &mut $s.bundled_icons,
+            sheet: &$s.sheet,
+            dark: $s.dark,
+            image_sizes: &$s.image_sizes,
+            now: $now,
+        }
+    };
 }
 
 fn log_diag(d: &Diagnostic) {
@@ -137,6 +181,12 @@ impl App {
         renderer: Renderer,
         dark: bool,
     ) -> App {
+        let popups = Popups::new(
+            PopupOptions { no_hook: o.no_hook, no_activate: o.no_activate, offscreen: o.offscreen, gated: o.gated },
+            Arc::clone(&stats),
+            script_tx.clone(),
+            Arc::clone(&o.overlays),
+        );
         App {
             o,
             stats,
@@ -155,15 +205,59 @@ impl App {
             font_diags: Vec::new(),
             scene_diags: Vec::new(),
             script_diags: Vec::new(),
+            script_errors: BTreeMap::new(),
             stall: None,
+            slow_bar: None,
             pipe_diag: None,
             bar_plate: None,
             trees: HashMap::new(),
             widget_plates: HashMap::new(),
             names: HashMap::new(),
             images_requested: ImageRequests::default(),
+            fonts: FontRegistry::default(),
+            bundled_icons: BundledIcons::default(),
+            service_images: ServiceImages::default(),
+            image_sizes: HashMap::new(),
             pending: None,
             first_frame_done: false,
+            popups,
+            capture: None,
+        }
+    }
+
+    /// Starts writing every presented frame (`--capture`).
+    pub fn set_capture(&mut self, capture: Capture) {
+        self.capture = Some(CaptureState::new(capture));
+    }
+
+    /// Runs `f` against the real window layer, wrapped to capture frames when a capture is on. When the capture
+    /// reaches a limit the run ends (and says so): a test run that went on without recording would look healthy.
+    fn with_live<R>(&mut self, ui: &mut Ui, f: impl FnOnce(&mut App, &mut dyn Win) -> R) -> R {
+        let Some(mut state) = self.capture.take() else { return f(self, ui) };
+        let result = {
+            let mut live = Live { ui: &mut *ui, state: &mut state };
+            f(self, &mut live)
+        };
+        state.flush();
+        if let Some(limit) = state.stopped.take()
+            && !state.reported
+        {
+            state.reported = true;
+            log::warn!("the capture reached its {} limit; stopping", limit.name());
+            self.stats.emit("capture", json!({"frames": state.capture.frames(), "limit": limit.name()}));
+            ui.quit();
+        }
+        self.capture = Some(state);
+        result
+    }
+
+    /// The frame count of a capture that is on, once the run is over.
+    pub fn finish_capture(&mut self) {
+        if let Some(state) = self.capture.as_mut() {
+            state.capture.finish();
+            if !state.reported {
+                self.stats.emit("capture", json!({"frames": state.capture.frames(), "limit": null}));
+            }
         }
     }
 
@@ -186,6 +280,11 @@ impl App {
 
     /// Applies the first config and creates the bars (before the loop runs).
     pub fn start(&mut self, ui: &mut Ui, first: ConfigUpdate) {
+        self.with_live(ui, |app, win| app.start_in(win, first));
+    }
+
+    /// `start` on any window layer.
+    pub fn start_in(&mut self, ui: &mut dyn Win, first: ConfigUpdate) {
         ui.set_offscreen(self.o.offscreen);
         self.emit_workarea(ui, "start");
         self.apply_update(ui, first, true);
@@ -194,7 +293,7 @@ impl App {
     }
 
     /// One `workarea` stats line per monitor: its work area right now.
-    pub fn emit_workarea(&self, ui: &Ui, when: &str) {
+    pub fn emit_workarea(&self, ui: &dyn Win, when: &str) {
         if !self.stats.enabled() {
             return;
         }
@@ -204,7 +303,7 @@ impl App {
         }
     }
 
-    pub fn bars_info(&self, ui: &Ui) -> Vec<BarInfo> {
+    pub fn bars_info(&self, ui: &dyn Win) -> Vec<BarInfo> {
         self.bars
             .iter()
             .map(|b| BarInfo {
@@ -220,13 +319,13 @@ impl App {
 
     // ---------------------------------------------------------------- inbox
 
-    fn drain(&mut self, ui: &mut Ui) {
+    fn drain(&mut self, ui: &mut dyn Win) {
         while let Ok(msg) = self.rx.try_recv() {
             self.on_msg(ui, msg);
         }
     }
 
-    fn on_msg(&mut self, ui: &mut Ui, msg: UiMsg) {
+    fn on_msg(&mut self, ui: &mut dyn Win, msg: UiMsg) {
         match msg {
             UiMsg::Script(out) => self.on_script(out),
             UiMsg::Config(update) => self.apply_update(ui, update, false),
@@ -238,6 +337,20 @@ impl App {
                 let _ = reply.send(self.bars_info(ui));
             }
             UiMsg::Image { key, result } => self.on_image(&key, result),
+            UiMsg::Svg { key, result } => self.on_svg(&key, result),
+            UiMsg::ServiceImage { key, image } => {
+                let (w, h) = self.service_images.add(&mut self.renderer, Arc::clone(&key), &image);
+                self.learn_image_size(&key, w, h);
+            }
+            UiMsg::PowerError => self.power_error(ui),
+            UiMsg::DropAppImages => {
+                self.remove_app_images();
+            }
+            UiMsg::DropServiceImage { key } => {
+                if self.service_images.remove(&mut self.renderer, &key) {
+                    self.image_sizes.remove(&key);
+                }
+            }
             UiMsg::Stalled { instance, for_ms } => {
                 let name = self.name_of(instance);
                 log::error!("script call in {name} running for {:.1} s", for_ms as f64 / 1000.0);
@@ -257,7 +370,9 @@ impl App {
             UiMsg::WidgetFile { notified_wall_ms } => {
                 self.pending = Some(Pending { kind: "luau", notified: notified_wall_ms, armed: false });
             }
-            UiMsg::Sim(action) => self.on_sim(ui, action),
+            UiMsg::Sim(action) => {
+                let _ = self.on_sim(ui, action);
+            }
             UiMsg::Quit => ui.quit(),
         }
     }
@@ -303,6 +418,13 @@ impl App {
                     bar.scene.set_widget_plate(instance, plate.clone());
                 }
             }
+            ScriptOut::ErrorNote { instance, note } => {
+                match note {
+                    Some(d) => self.script_errors.insert(instance, d),
+                    None => self.script_errors.remove(&instance),
+                };
+                self.refresh_plate();
+            }
             ScriptOut::Diagnostics(list) => {
                 // Logged by the script thread when it made them.
                 for d in list {
@@ -318,46 +440,70 @@ impl App {
     // ---------------------------------------------------------------- images
 
     fn request_images(&mut self, tree: &Arc<WidgetTree>) {
-        fn walk(e: &Element, out: &mut Vec<Arc<str>>) {
-            if e.kind == ElementKind::Image
-                && let Some(img) = &e.image
-            {
-                out.push(img.path.clone());
-            }
-            for c in &e.children {
-                walk(c, out);
-            }
-        }
-        let mut paths = Vec::new();
+        let mut files = Vec::new();
         if let Some(root) = &tree.root {
-            walk(root, &mut paths);
+            files_of(root, &mut files);
         }
-        for path in paths {
-            if !self.images_requested.should_request(&path, Instant::now()) {
+        for (path, kind) in files {
+            if !self.images_requested.should_request(&path, clock::now()) {
                 continue;
             }
             match &tree.grant {
-                Some(grant) => self.images.request(path, grant.clone()),
-                None => self.on_image(&path, Err("the widget has no file permission".into())),
+                Some(grant) => self.images.request(path, grant.clone(), kind),
+                None => self.fail_image(&path, "the widget has no file permission"),
             }
         }
+    }
+
+    /// Every scene needs an image's size to lay it out; a bar made later
+    /// (a monitor plugged in) is told the sizes already known.
+    fn learn_image_size(&mut self, key: &Arc<str>, width: u32, height: u32) {
+        self.image_sizes.insert(Arc::clone(key), (width, height));
+        for bar in &mut self.bars {
+            bar.scene.set_image_size(key, width, height);
+        }
+        self.popups.image_size(key, width, height);
+    }
+
+    fn fail_image(&mut self, key: &Arc<str>, why: &str) {
+        log::warn!("an image could not be loaded: {why}");
+        self.images_requested.failed(key, clock::now());
+        for bar in &mut self.bars {
+            bar.scene.image_failed(key);
+        }
+        self.popups.image_failed(key);
+    }
+
+    /// A user's `.svg` was parsed on the loader thread; the renderer keeps
+    /// it and the scene learns its size.
+    fn on_svg(&mut self, key: &Arc<str>, result: Result<rsb_render::ParsedSvg, String>) {
+        match result {
+            Ok(svg) => {
+                let (w, h) = self.renderer.set_parsed_svg(key.clone(), svg);
+                self.learn_image_size(key, w.ceil() as u32, h.ceil() as u32);
+            }
+            Err(e) => self.fail_image(key, &e),
+        }
+    }
+
+    /// Drops every launcher icon from the renderer. The launcher popup calls
+    /// this when no open popup uses them any more. Returns how many it held.
+    pub fn remove_app_images(&mut self) -> usize {
+        let held = self.service_images.remove_apps(&mut self.renderer);
+        self.image_sizes.retain(|k, _| !k.starts_with(crate::service_images::APPS_PREFIX));
+        log::debug!("dropped {held} launcher icons");
+        self.stats.emit("apps_icons", json!({"dropped": held}));
+        rsb_services::trim_heap_soon();
+        held
     }
 
     fn on_image(&mut self, key: &Arc<str>, result: Result<rsb_render::Image, String>) {
         match result {
             Ok(image) => {
-                for bar in &mut self.bars {
-                    bar.scene.set_image_size(key, image.width, image.height);
-                }
+                self.learn_image_size(key, image.width, image.height);
                 self.renderer.set_image(key.clone(), image);
             }
-            Err(e) => {
-                log::warn!("an image could not be loaded: {e}");
-                self.images_requested.failed(key, Instant::now());
-                for bar in &mut self.bars {
-                    bar.scene.image_failed(key);
-                }
-            }
+            Err(e) => self.fail_image(key, &e),
         }
     }
 
@@ -372,6 +518,7 @@ impl App {
         all.extend(self.plan_diags.iter().cloned());
         all.extend(self.font_diags.iter().cloned());
         all.extend(self.script_diags.iter().cloned());
+        all.extend(self.script_errors.values().cloned());
         all.extend(self.scene_diags.iter().cloned());
         let plate = Plate::from_diagnostics(&all);
         if plate == self.bar_plate {
@@ -388,7 +535,7 @@ impl App {
 
     // ---------------------------------------------------------------- config
 
-    fn apply_update(&mut self, ui: &mut Ui, update: ConfigUpdate, first: bool) {
+    fn apply_update(&mut self, ui: &mut dyn Win, update: ConfigUpdate, first: bool) {
         let ConfigUpdate { kind, built, notified_wall_ms } = update;
         for d in &built.diagnostics {
             log_diag(d);
@@ -405,18 +552,27 @@ impl App {
             for bar in &mut self.bars {
                 bar.scene.set_stylesheet(self.sheet.clone());
             }
-            self.font_diags = built
-                .fonts
-                .into_iter()
-                .filter(|(name, _)| !self.renderer.has_family(name))
-                .map(|(name, pos)| {
-                    Diagnostic::warning(
+            self.popups.set_stylesheet(&self.sheet);
+            // Fonts first, so the warning below knows every family that is registered.
+            let applied = self.fonts.apply(&mut self.renderer, &built.font_files);
+            if applied.added > 0 {
+                for bar in &mut self.bars {
+                    bar.scene.fonts_changed();
+                }
+                self.popups.fonts_changed();
+            }
+            let mut font_diags = built.font_diagnostics;
+            font_diags.extend(applied.diagnostics);
+            for (name, pos) in built.fonts {
+                if !self.renderer.has_family(&name) {
+                    font_diags.push(Diagnostic::warning(
                         DiagKind::Style,
                         Some(pos),
                         format!("font '{name}' is not installed; using Segoe UI"),
-                    )
-                })
-                .collect();
+                    ));
+                }
+            }
+            self.font_diags = font_diags;
             for d in &self.font_diags {
                 log_diag(d);
             }
@@ -438,7 +594,7 @@ impl App {
     /// are already right are kept (a style edit never recreates a window),
     /// the rest are destroyed first and then created, and the script thread
     /// gets the new set of widget instances.
-    fn reconcile(&mut self, ui: &mut Ui) {
+    fn reconcile(&mut self, ui: &mut dyn Win) {
         let monitors = ui.monitors();
         let (plans, plan_diags) = plan_bars(&self.config, &monitors);
         for d in &plan_diags {
@@ -495,6 +651,7 @@ impl App {
             }
         }
         self.bars = bars;
+        self.drop_orphan_popups(ui);
         self.names.clear();
         for bar in &self.bars {
             for p in bar.insts.all() {
@@ -507,7 +664,13 @@ impl App {
         self.send_instances();
     }
 
-    fn create_bar(&mut self, ui: &mut Ui, plan: BarPlan, win: BarWindowSpec, insts: BarInstances) -> Option<BarRt> {
+    fn create_bar(
+        &mut self,
+        ui: &mut dyn Win,
+        plan: BarPlan,
+        win: BarWindowSpec,
+        insts: BarInstances,
+    ) -> Option<BarRt> {
         let id = match ui.create_bar(&win) {
             Ok(id) => id,
             Err(e) => {
@@ -541,6 +704,9 @@ impl App {
             }
         }
         scene.set_bar_plate(self.bar_plate.clone());
+        for (key, (w, h)) in &self.image_sizes {
+            scene.set_image_size(key, *w, *h);
+        }
         Some(BarRt {
             key: plan.key(),
             id,
@@ -548,7 +714,7 @@ impl App {
             scene,
             insts,
             awaiting,
-            created: Instant::now(),
+            created: clock::now(),
             presented: false,
             scale: geometry.scale,
             cursor: Cursor::Default,
@@ -576,12 +742,13 @@ impl App {
 
     // ---------------------------------------------------------------- frames
 
-    fn frame_all(&mut self, ui: &mut Ui) {
-        let now = Instant::now();
+    fn frame_all(&mut self, ui: &mut dyn Win) {
+        let now = clock::now();
         for i in 0..self.bars.len() {
             self.frame_bar(ui, i, now);
         }
-        let next = self.bars.iter().filter_map(|b| b.next_frame).min();
+        let popup_next = self.frame_popups(ui, now);
+        let next = self.bars.iter().filter_map(|b| b.next_frame).chain(popup_next).min();
         ui.set_frame_deadline(next);
         if let Some(p) = self.pending.take_if(|p| p.armed) {
             self.stats.emit(
@@ -592,14 +759,77 @@ impl App {
         }
     }
 
-    fn frame_bar(&mut self, ui: &mut Ui, i: usize, now: Instant) {
+    /// The popup surfaces: opened, closed, drawn and placed after the bars
+    /// drew. A bar whose anchor changed state draws again in the same turn,
+    /// so the strip and its panel start their transitions on one clock.
+    fn frame_popups(&mut self, ui: &mut dyn Win, now: Instant) -> Option<Instant> {
+        let result = self.popups.frame(&mut popup_env!(self, ui, now));
+        let mut next = result.next;
+        for bar in result.bars {
+            if let Some(i) = self.bars.iter().position(|b| b.id == bar) {
+                self.frame_bar(ui, i, now);
+                next = next.into_iter().chain(self.bars[i].next_frame).min();
+            }
+        }
+        let diags = self.popups.take_diagnostics();
+        self.after_frame(diags);
+        if self.popups.take_apps_released() {
+            self.remove_app_images();
+        }
+        next
+    }
+
+    /// Bars whose windows are gone take their popups with them.
+    fn drop_orphan_popups(&mut self, ui: &mut dyn Win) {
+        let now = clock::now();
+        self.popups.drop_orphans(&mut popup_env!(self, ui, now));
+    }
+
+    /// The power service reported an error: an overlay that was waiting for
+    /// its action (the lock curtain) must not stay up.
+    fn power_error(&mut self, ui: &mut dyn Win) {
+        let now = clock::now();
+        self.popups.close_overlays(&mut popup_env!(self, ui, now), CloseReason::Command);
+        self.frame_all(ui);
+    }
+
+    /// Draws one bar; a draw that took a long time is remembered for the
+    /// slow-turn report.
+    fn frame_bar(&mut self, ui: &mut dyn Win, i: usize, now: Instant) {
+        let started = Instant::now();
+        self.frame_bar_inner(ui, i, now);
+        let took = started.elapsed();
+        if took >= SLOW_STEP && self.slow_bar.as_ref().is_none_or(|s| took > s.took) {
+            let label = format!("bar {}", self.bars[i].plan.spec.name);
+            self.slow_bar = Some(SlowStep { label, took, at: started });
+        }
+    }
+
+    /// A loop turn that ran for a second or more drew nothing and answered
+    /// nothing: say so, and name the slowest draw inside it when there was one.
+    fn on_slow_turn(&mut self, ms: u64) {
+        let began = Instant::now().checked_sub(Duration::from_millis(ms));
+        let step = [self.slow_bar.take(), self.popups.take_slow_step()]
+            .into_iter()
+            .flatten()
+            .filter(|s| began.is_none_or(|b| s.at >= b))
+            .max_by_key(|s| s.took);
+        let what = step.as_ref().map(|s| s.label.as_str());
+        match what {
+            Some(w) => log::warn!("the bar did not draw for {ms} ms; the slowest draw in it was {w}"),
+            None => log::warn!("the bar did not draw for {ms} ms"),
+        }
+        self.stats.emit("stalled", json!({"ui_ms": ms, "drawing": what}));
+    }
+
+    fn frame_bar_inner(&mut self, ui: &mut dyn Win, i: usize, now: Instant) {
         // Recovery from an injected failure.
         if self.bars[i].recover_at.is_some_and(|t| now >= t) {
             let bar = &mut self.bars[i];
             bar.recover_at = None;
             bar.need_full = true;
         }
-        let App { bars, renderer, stats, first_frame_done, .. } = self;
+        let App { bars, renderer, stats, first_frame_done, bundled_icons, .. } = self;
         let bar = &mut bars[i];
         if bar.recover_at.is_some() {
             bar.next_frame = bar.recover_at;
@@ -609,9 +839,12 @@ impl App {
             bar.next_frame = Some(bar.created + FIRST_FRAME_WAIT);
             return;
         }
+        let built = Instant::now();
         let out = bar.scene.frame(now, renderer);
+        let build_us = built.elapsed().as_micros() as u64;
         bar.next_frame = out.next_frame;
         let diags = bar.scene.take_diagnostics();
+        let events = bar.scene.take_events();
         if out.cursor != bar.cursor {
             bar.cursor = out.cursor;
             ui.set_cursor(bar.id, out.cursor);
@@ -626,6 +859,7 @@ impl App {
             let mut failure: Option<String> = None;
             let mut presented = None;
             let draw: &DrawList = &out.draw;
+            bundled_icons.ensure(renderer, draw);
             let result = ui.present(bar.id, &mut |px| match renderer.render(draw, px, region) {
                 Ok(rect) => {
                     presented = rect;
@@ -642,6 +876,11 @@ impl App {
             match failure {
                 None => {
                     bar.need_full = false;
+                    if renderer.svg_pending() {
+                        // a user's picture waits for a frame with time to spare
+                        bar.need_full = true;
+                        bar.next_frame = Some(now);
+                    }
                     if bar.render_failed {
                         bar.render_failed = false;
                         log::info!("drawing the bar works again");
@@ -651,16 +890,23 @@ impl App {
                         bar.presented = true;
                         if !*first_frame_done {
                             *first_frame_done = true;
+                            ui.first_frame_drawn();
                             stats.emit("first_frame", json!({"ms": since_process_start_ms()}));
                         }
+                    }
+                    if presented.is_some() {
+                        stats.note_present();
                     }
                     if stats.frames
                         && let Some(r) = presented
                     {
                         stats.emit(
                             "frame",
-                            json!({"dirty": [r.x0, r.y0, r.x1, r.y1], "render_us": started.elapsed().as_micros() as u64,
-                                   "style_us": out.stats.style_us, "layout_us": out.stats.layout_us}),
+                            json!({"surface": format!("bar:{}", bar.plan.spec.name),
+                                   "dirty": [r.x0, r.y0, r.x1, r.y1], "render_us": started.elapsed().as_micros() as u64,
+                                   "build_us": build_us, "style_us": out.stats.style_us, "layout_us": out.stats.layout_us,
+                                   "paint_us": out.stats.draw_us,
+                                   "compositor_frame": ui.compositor_frame()}),
                         );
                     }
                 }
@@ -668,6 +914,7 @@ impl App {
             }
         }
         self.after_frame(diags);
+        self.popups.send_bar_events(events, 0);
     }
 
     /// Logs scene warnings once and keeps them for the plate.
@@ -689,7 +936,7 @@ impl App {
 
     /// The failure path: the last good frame stays and the fixed plate is
     /// drawn over its left corner.
-    fn fail_bar(ui: &mut Ui, renderer: &mut Renderer, stats: &Stats, bar: &mut BarRt, why: &str) {
+    fn fail_bar(ui: &mut dyn Win, renderer: &mut Renderer, stats: &Stats, bar: &mut BarRt, why: &str) {
         if !bar.render_failed {
             log::error!("could not draw the bar: {why}");
             stats.emit("plate", json!({"kind": "Render", "shown": true}));
@@ -698,19 +945,26 @@ impl App {
         bar.need_full = true;
         let scale = bar.scale;
         let _ = ui.present(bar.id, &mut |px| fallback::draw(renderer, px, scale));
-        bar.next_frame = Some(Instant::now() + Duration::from_secs(1));
+        bar.next_frame = Some(clock::now() + Duration::from_secs(1));
     }
 
     // ---------------------------------------------------------------- input
 
-    fn on_pointer(&mut self, ui: &mut Ui, bar_id: BarId, event: rsb_core::hit::PointerEvent) {
-        let now = Instant::now();
+    fn on_pointer(&mut self, ui: &mut dyn Win, bar_id: BarId, event: rsb_core::hit::PointerEvent) {
+        let now = clock::now();
         let Some(i) = self.bars.iter().position(|b| b.id == bar_id) else { return };
+        let gesture = self.popups.pointer_gesture(event.kind, now);
+        if matches!(event.kind, PointerKind::Down(_)) {
+            // A press on a bar is outside every open popup unless it is on the popup's anchor.
+            self.popups.on_bar_press(&mut popup_env!(self, ui, now), bar_id, event.x, event.y, gesture);
+        }
         let result = self.bars[i].scene.pointer(event, now);
         for call in &result.calls {
-            let _ = self.script_tx.send(ScriptIn::Input(*call));
-            self.stats.emit("handler", json!({"widget": self.name_of(call.instance), "kind": call_kind(call)}));
+            self.stats.emit_with("handler", || json!({"widget": self.name_of(call.instance), "kind": call_kind(call)}));
         }
+        self.popups.send_calls(result.calls.clone(), gesture);
+        let events = self.bars[i].scene.take_events();
+        self.popups.send_bar_events(events, gesture);
         if result.plate_click.is_some() {
             ui.open_path(&self.o.log_file);
         }
@@ -720,12 +974,13 @@ impl App {
                 ui.show_menu(bar_id, event.x as i32, event.y as i32);
             }
         }
+        self.popups.bar_pointer_done(&mut popup_env!(self, ui, now), bar_id, event.kind);
         self.frame_all(ui);
     }
 
     // ---------------------------------------------------------------- commands
 
-    fn on_command(&mut self, ui: &mut Ui, command: Command) -> Reply {
+    fn on_command(&mut self, ui: &mut dyn Win, command: Command) -> Reply {
         match command {
             Command::Reload => {
                 if let Some(r) = &self.reader {
@@ -748,10 +1003,18 @@ impl App {
                     return Reply::Err(format!("no bar named '{}'", name.unwrap_or_default()));
                 }
                 let show = !ids.iter().any(|id| ui.is_visible(*id));
+                let now = clock::now();
                 for id in ids {
+                    if !show {
+                        self.popups.close_bar(&mut popup_env!(self, ui, now), id, CloseReason::BarHidden);
+                    }
                     ui.set_visible(id, show);
                 }
                 Reply::Ok(if show { "shown" } else { "hidden" }.into())
+            }
+            Command::Popup { name, action } => {
+                let now = clock::now();
+                self.popups.command(&mut popup_env!(self, ui, now), &name, action)
             }
             Command::Trigger { event, json } => {
                 let data = json
@@ -766,7 +1029,14 @@ impl App {
 
     // ---------------------------------------------------------------- test flags
 
-    fn on_sim(&mut self, ui: &mut Ui, action: SimAction) {
+    /// Plays one test action. A target that is not there (no such bar, no open popup of that name) is logged and
+    /// also returned, so a scripted run can say so instead of looking healthy.
+    pub fn on_sim(&mut self, ui: &mut dyn Win, action: SimAction) -> Option<String> {
+        let mut problem: Option<String> = None;
+        let warn = |m: &str| {
+            log::warn!("{m}");
+            Some(m.to_string())
+        };
         let ids: Vec<BarId> = self.bars.iter().map(|b| b.id).collect();
         match action {
             SimAction::Quit => ui.quit(),
@@ -793,22 +1063,71 @@ impl App {
                     }
                 }
             }
-            SimAction::Pointer { bar, event } => {
-                if let Some(b) = self.bars.iter().find(|b| b.plan.spec.name == bar) {
-                    ui.inject(TestInput::Pointer { bar: b.id, event });
-                } else {
-                    log::warn!("the pointer script names a bar that does not exist");
+            SimAction::Pointer { surface, event } => match surface {
+                SimSurface::Bar(bar) => {
+                    if let Some(b) = self.bars.iter().find(|b| b.plan.spec.name == bar) {
+                        ui.inject(TestInput::Pointer { bar: b.id, event });
+                    } else {
+                        problem = warn("the pointer script names a bar that does not exist");
+                    }
                 }
+                SimSurface::Popup(name) => match self.popups.popup_window(&name) {
+                    Some(popup) => ui.inject(TestInput::PopupPointer { popup, event }),
+                    None => problem = warn("the pointer script names a popup that is not open"),
+                },
+                SimSurface::Dim(name) => match self.popups.dim_window(&name) {
+                    Some(popup) => ui.inject(TestInput::PopupPointer { popup, event }),
+                    None => problem = warn("the pointer script names an overlay that is not open"),
+                },
+            },
+            SimAction::Key { popup, event } => match self.popups.popup_window(&popup) {
+                Some(popup) => ui.inject(TestInput::Key { popup, event }),
+                None => problem = warn("the key script names a popup that is not open"),
+            },
+            SimAction::Text { popup, input } => match self.popups.popup_window(&popup) {
+                Some(popup) => ui.inject(TestInput::Text { popup, input }),
+                None => problem = warn("the key script names a popup that is not open"),
+            },
+            SimAction::Popup { name, action } => {
+                let now = clock::now();
+                if let Reply::Err(e) = self.popups.command(&mut popup_env!(self, ui, now), &name, action) {
+                    problem = warn(&format!("simulated rsb popup: {e}"));
+                }
+            }
+            SimAction::OutsidePress => ui.inject(TestInput::OutsidePress(OutsidePress { x: -32000, y: -32000 })),
+            SimAction::Deactivate { popup } => match self.popups.popup_window(&popup) {
+                Some(popup) => ui.inject(TestInput::Deactivate { popup }),
+                None => problem = warn("the deactivate flag names a popup that is not open"),
+            },
+            SimAction::Session { locked } => ui.inject(TestInput::SessionLock { locked }),
+            SimAction::PopupDpi { popup, dpi } => match self.popups.popup_window(&popup) {
+                Some(popup) => ui.inject(TestInput::PopupDpi { popup, dpi }),
+                None => problem = warn("the popup dpi flag names a popup that is not open"),
+            },
+            SimAction::UiStall { for_ms } => {
+                log::info!("the UI thread stops for {for_ms} ms (test flag)");
+                std::thread::sleep(Duration::from_millis(for_ms));
             }
             SimAction::Panic => panic!("panic injected by a test flag"),
             SimAction::RenderFailure => {
                 let App { bars, renderer, stats, .. } = self;
                 for bar in bars.iter_mut() {
                     Self::fail_bar(ui, renderer, stats, bar, "injected by a test flag");
-                    bar.recover_at = Some(Instant::now() + INJECTED_FAILURE_FOR);
+                    bar.recover_at = Some(clock::now() + INJECTED_FAILURE_FOR);
                 }
             }
         }
+        problem
+    }
+
+    /// Widgets that have not yet reported a tree or a plate, over every bar.
+    pub fn awaiting(&self) -> usize {
+        self.bars.iter().map(|b| b.awaiting.len()).sum()
+    }
+
+    /// Every bar has drawn at least once.
+    pub fn all_presented(&self) -> bool {
+        self.bars.iter().all(|b| b.presented)
     }
 }
 
@@ -823,12 +1142,20 @@ fn call_kind(call: &HandlerCall) -> String {
 
 impl UiHandler for App {
     fn handle(&mut self, ui: &mut Ui, event: UiEvent) {
+        self.with_live(ui, |app, win| app.handle_in(win, event));
+    }
+}
+
+impl App {
+    /// One event from the window layer, on any window layer.
+    pub fn handle_in(&mut self, ui: &mut dyn Win, event: UiEvent) {
         match event {
             UiEvent::Wake => {
                 self.drain(ui);
                 self.frame_all(ui);
             }
             UiEvent::FrameDue => self.frame_all(ui),
+            UiEvent::SlowTurn { ms } => self.on_slow_turn(ms),
             UiEvent::Pointer { bar, event } => self.on_pointer(ui, bar, event),
             UiEvent::Geometry { bar, geometry } => {
                 let mut resend = false;
@@ -845,11 +1172,15 @@ impl UiHandler for App {
                 }
                 if resend {
                     self.send_instances();
+                    let now = clock::now();
+                    self.popups.close_bar(&mut popup_env!(self, ui, now), bar, CloseReason::DisplayChange);
                 }
                 self.frame_all(ui);
             }
             UiEvent::MonitorsChanged => {
                 log::info!("monitors changed; rebuilding the bars");
+                let now = clock::now();
+                self.popups.close_all(&mut popup_env!(self, ui, now), CloseReason::DisplayChange);
                 self.reconcile(ui);
                 self.refresh_plate();
                 self.frame_all(ui);
@@ -863,6 +1194,7 @@ impl UiHandler for App {
                     let fullscreen = b.plan.spec.fullscreen == FullscreenMode::Stay && b.fullscreen;
                     b.scene.set_env(SceneEnv { media: MediaEnv { dark }, icon_font, fullscreen });
                 }
+                self.popups.set_env(dark, icon_font);
                 let _ = self.script_tx.send(ScriptIn::Theme { dark });
                 self.frame_all(ui);
             }
@@ -870,11 +1202,15 @@ impl UiHandler for App {
                 log::info!("a fullscreen app {} this bar's monitor", if active { "came to" } else { "left" });
                 let icon_font = self.renderer.icon_font();
                 let dark = self.dark;
+                let mut stay = false;
                 if let Some(b) = self.bars.iter_mut().find(|b| b.id == bar) {
-                    let fullscreen = active && b.plan.spec.fullscreen == FullscreenMode::Stay;
+                    stay = b.plan.spec.fullscreen == FullscreenMode::Stay;
+                    let fullscreen = active && stay;
                     b.fullscreen = active;
                     b.scene.set_env(SceneEnv { media: MediaEnv { dark }, icon_font, fullscreen });
                 }
+                let now = clock::now();
+                self.popups.on_fullscreen(&mut popup_env!(self, ui, now), bar, active, stay);
                 self.frame_all(ui);
             }
             UiEvent::TaskbarCreated => {
@@ -896,6 +1232,50 @@ impl UiHandler for App {
                 let _ = self.script_tx.send(ScriptIn::ClockChanged);
             }
             UiEvent::CloseRequested => ui.quit(),
+            UiEvent::PopupPointer { popup, event } => {
+                let now = clock::now();
+                self.popups.on_popup_pointer(&mut popup_env!(self, ui, now), popup, event);
+                self.frame_all(ui);
+            }
+            UiEvent::PopupGeometry { popup, geometry } => {
+                self.popups.on_popup_geometry(popup, geometry);
+                self.frame_all(ui);
+            }
+            UiEvent::PopupDpiChanged { popup, .. } => {
+                let now = clock::now();
+                self.popups.on_popup_dpi(&mut popup_env!(self, ui, now), popup);
+                self.frame_all(ui);
+            }
+            UiEvent::Key { popup, event } => {
+                let now = clock::now();
+                self.popups.on_key(&mut popup_env!(self, ui, now), popup, event);
+                self.frame_all(ui);
+            }
+            UiEvent::Text { popup, input } => {
+                let now = clock::now();
+                self.popups.on_text(&mut popup_env!(self, ui, now), popup, input);
+                self.frame_all(ui);
+            }
+            UiEvent::PopupFocus { popup, focused } => {
+                let now = clock::now();
+                self.popups.on_focus(&mut popup_env!(self, ui, now), popup, focused);
+                self.frame_all(ui);
+            }
+            UiEvent::OutsidePress(_) => {
+                let now = clock::now();
+                self.popups.on_outside_press(&mut popup_env!(self, ui, now));
+                self.frame_all(ui);
+            }
+            UiEvent::Clipboard { token, text } => {
+                let now = clock::now();
+                self.popups.on_clipboard(&mut popup_env!(self, ui, now), token, text);
+                self.frame_all(ui);
+            }
+            UiEvent::SessionLock { locked } => {
+                let now = clock::now();
+                self.popups.on_session(&mut popup_env!(self, ui, now), locked);
+                self.frame_all(ui);
+            }
         }
     }
 }

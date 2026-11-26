@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::color::Color;
 use crate::element::NodeKey;
-use crate::geom::{Edges, PointF, Radii, RectF, RectPx};
+use crate::geom::{Edges, PathF, PointF, Radii, RectF, RectPx};
 use crate::style::TextAlign;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -27,7 +27,7 @@ pub struct DrawItem {
     /// anti-aliasing; for `Shadow`, `shadow_bounds`; for `Text`, its rect
     /// (the renderer clips every leaf item, text included, to its bounds,
     /// so overhangs never leave pixels a partial redraw would miss). For
-    /// `PushClip` / `PushOpacity`: the whole group it opens. Renderers skip
+    /// `PushClip` / `PushClipPath` / `PushOpacity`: the whole group it opens. Renderers skip
     /// leaf items whose bounds miss the redraw region but always process
     /// push and pop items so the stacks stay balanced.
     pub bounds: RectF,
@@ -80,6 +80,43 @@ pub enum DrawCmd {
     /// Group opacity 0..=1 (drawn to a layer, then blended).
     PushOpacity(f32),
     PopOpacity,
+    /// A filled outline: a box with bevelled corners (`corner-shape`), or
+    /// any shape that is not a rounded rectangle.
+    FillPath {
+        path: Arc<PathF>,
+        fill: Fill,
+    },
+    /// A border that follows an outline: the area between `outer` and
+    /// `inner` (even-odd), uniform colour.
+    BorderPath {
+        outer: Arc<PathF>,
+        inner: Arc<PathF>,
+        color: Color,
+    },
+    /// Outer shadow of an outline already offset and spread, blurred like
+    /// `Shadow` (standard deviation `blur / 2`, kernel cut at 3).
+    ShadowPath {
+        path: Arc<PathF>,
+        blur: f32,
+        color: Color,
+    },
+    /// Clips everything up to the matching `PopClip` to an outline
+    /// (`clip-path: polygon()`, `overflow: hidden` on a bevelled box),
+    /// anti-aliased. `even_odd`: the even-odd fill rule (`polygon(evenodd, ...)`),
+    /// else non-zero.
+    PushClipPath {
+        path: Arc<PathF>,
+        even_odd: bool,
+    },
+    /// An SVG from the renderer's cache (`Renderer::set_svg`) scaled into
+    /// `rect` keeping its aspect ratio, centred. `tint` Some: every painted
+    /// pixel takes this colour, its coverage kept (icons follow `color`);
+    /// None: the SVG's own colours (`rsb.image` with an `.svg`).
+    Svg {
+        rect: RectF,
+        key: Arc<str>,
+        tint: Option<Color>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,9 +173,14 @@ fn groups(list: &DrawList) -> (Vec<NodeKey>, HashMap<NodeKey, Group<'_>>) {
 /// as a change; leaf items compare whole.
 fn same_item(a: &DrawItem, b: &DrawItem) -> bool {
     match (&a.cmd, &b.cmd) {
-        (DrawCmd::PushClip { .. } | DrawCmd::PopClip | DrawCmd::PushOpacity(_) | DrawCmd::PopOpacity, _) => {
-            a.cmd == b.cmd
-        }
+        (
+            DrawCmd::PushClip { .. }
+            | DrawCmd::PushClipPath { .. }
+            | DrawCmd::PopClip
+            | DrawCmd::PushOpacity(_)
+            | DrawCmd::PopOpacity,
+            _,
+        ) => a.cmd == b.cmd,
         _ => a == b,
     }
 }

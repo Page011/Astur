@@ -7,14 +7,16 @@ use std::time::{Duration, Instant};
 use crate::anim::{AnimValue, Easing, interpolate};
 use crate::css::PropertyId;
 use crate::geom::Edges;
-use crate::style::{Background, ComputedStyle, Dim, RadiusDims, Shadow, TransitionProperty};
+use crate::style::{
+    Background, ClipPolygon, ComputedStyle, Dim, LengthPct, RadiusDims, Shadow, Transform2, TransitionProperty,
+};
 
 /// How often frames are asked for while something animates (about 60 Hz).
 pub(super) const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// The style values a transition can run on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Slot {
+pub(crate) enum Slot {
     Color,
     Background,
     Opacity,
@@ -34,9 +36,19 @@ pub(super) enum Slot {
     FontWeight,
     LetterSpacing,
     BoxShadow,
+    Transform,
+    TransformOrigin,
+    ClipPath,
+    OutlineWidth,
+    OutlineColor,
+    OutlineOffset,
+    CaretColor,
+    AccentColor,
+    ScrollbarColor,
 }
 
-const ALL: [Slot; 19] = [
+/// Every slot an animation can move.
+pub(super) const ALL: [Slot; 28] = [
     Slot::Color,
     Slot::Background,
     Slot::Opacity,
@@ -56,6 +68,15 @@ const ALL: [Slot; 19] = [
     Slot::FontWeight,
     Slot::LetterSpacing,
     Slot::BoxShadow,
+    Slot::Transform,
+    Slot::TransformOrigin,
+    Slot::ClipPath,
+    Slot::OutlineWidth,
+    Slot::OutlineColor,
+    Slot::OutlineOffset,
+    Slot::CaretColor,
+    Slot::AccentColor,
+    Slot::ScrollbarColor,
 ];
 
 #[derive(Clone, Debug)]
@@ -108,7 +129,31 @@ fn covers(slot: Slot, prop: TransitionProperty) -> bool {
         Slot::FontWeight => id == P::FontWeight,
         Slot::LetterSpacing => id == P::LetterSpacing,
         Slot::BoxShadow => id == P::BoxShadow,
+        Slot::Transform => id == P::Transform,
+        Slot::TransformOrigin => id == P::TransformOrigin,
+        Slot::ClipPath => id == P::ClipPath,
+        Slot::OutlineWidth | Slot::OutlineColor => id == P::Outline,
+        Slot::OutlineOffset => id == P::OutlineOffset,
+        Slot::CaretColor => id == P::CaretColor,
+        Slot::AccentColor => id == P::AccentColor,
+        Slot::ScrollbarColor => id == P::ScrollbarColor,
     }
+}
+
+fn lp_list(v: &[LengthPct]) -> AnimValue {
+    AnimValue::List(v.iter().flat_map(|l| [AnimValue::Num(l.px), AnimValue::Num(l.pct)]).collect())
+}
+
+fn unlp_list(v: &AnimValue) -> Option<Vec<LengthPct>> {
+    let AnimValue::List(l) = v else { return None };
+    let mut out = Vec::new();
+    for pair in l.chunks(2) {
+        match pair {
+            [AnimValue::Num(px), AnimValue::Num(pct)] => out.push(LengthPct { px: *px, pct: *pct }),
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 fn num4(e: [f32; 4]) -> AnimValue {
@@ -146,7 +191,7 @@ fn set_dim(d: &mut Dim, v: &AnimValue) {
 
 /// The animatable value of `slot`, None when it cannot be interpolated in the
 /// style's current state (a gradient, `auto`, a percentage).
-fn get(s: &ComputedStyle, slot: Slot) -> Option<AnimValue> {
+pub(super) fn get(s: &ComputedStyle, slot: Slot) -> Option<AnimValue> {
     Some(match slot {
         Slot::Color => AnimValue::Color(s.color),
         Slot::Background => match &s.background {
@@ -197,10 +242,38 @@ fn get(s: &ComputedStyle, slot: Slot) -> Option<AnimValue> {
                 })
                 .collect(),
         ),
+        Slot::Transform => {
+            let t = s.transform;
+            let mut l = match lp_list(&[t.tx, t.ty]) {
+                AnimValue::List(l) => l,
+                _ => Vec::new(),
+            };
+            l.push(AnimValue::Num(t.sx));
+            l.push(AnimValue::Num(t.sy));
+            AnimValue::List(l)
+        }
+        Slot::TransformOrigin => lp_list(&[s.transform_origin.0, s.transform_origin.1]),
+        Slot::ClipPath => {
+            let c = s.clip_path.as_ref()?;
+            let mut l = vec![AnimValue::Num(f32::from(u8::from(c.evenodd)))];
+            for (x, y) in &c.points {
+                l.push(lp_list(&[*x, *y]));
+            }
+            AnimValue::List(l)
+        }
+        Slot::OutlineWidth => AnimValue::Num(s.outline.width),
+        Slot::OutlineColor => AnimValue::Color(s.outline.color),
+        Slot::OutlineOffset => AnimValue::Num(s.outline.offset),
+        Slot::CaretColor => AnimValue::Color(s.caret_color?),
+        Slot::AccentColor => AnimValue::Color(s.accent_color?),
+        Slot::ScrollbarColor => {
+            let (a, b) = s.scrollbar_color?;
+            AnimValue::List(vec![AnimValue::Color(a), AnimValue::Color(b)])
+        }
     })
 }
 
-fn set(s: &mut ComputedStyle, slot: Slot, v: &AnimValue) {
+pub(super) fn set(s: &mut ComputedStyle, slot: Slot, v: &AnimValue) {
     match (slot, v) {
         (Slot::Color, AnimValue::Color(c)) => s.color = *c,
         (Slot::Background, AnimValue::Color(c)) => s.background = Background::Color(*c),
@@ -258,8 +331,54 @@ fn set(s: &mut ComputedStyle, slot: Slot, v: &AnimValue) {
             }
             s.box_shadow = out;
         }
+        (Slot::Transform, v) => {
+            if let AnimValue::List(l) = v
+                && let [a, b, c, d, AnimValue::Num(sx), AnimValue::Num(sy)] = l.as_slice()
+                && let Some(p) = unlp_list(&AnimValue::List(vec![a.clone(), b.clone(), c.clone(), d.clone()]))
+            {
+                s.transform = Transform2 { tx: p[0], ty: p[1], sx: sx.max(0.0), sy: sy.max(0.0) };
+            }
+        }
+        (Slot::TransformOrigin, v) => {
+            if let Some(p) = unlp_list(v)
+                && p.len() == 2
+            {
+                s.transform_origin = (p[0], p[1]);
+            }
+        }
+        (Slot::ClipPath, AnimValue::List(l)) => {
+            if let Some((AnimValue::Num(eo), rest)) = l.split_first() {
+                let points: Option<Vec<_>> =
+                    rest.iter().map(|p| unlp_list(p).filter(|v| v.len() == 2).map(|v| (v[0], v[1]))).collect();
+                if let Some(points) = points {
+                    s.clip_path = Some(ClipPolygon { points, evenodd: *eo >= 0.5 });
+                }
+            }
+        }
+        (Slot::OutlineWidth, AnimValue::Num(n)) => s.outline.width = n.max(0.0),
+        (Slot::OutlineColor, AnimValue::Color(c)) => s.outline.color = *c,
+        (Slot::OutlineOffset, AnimValue::Num(n)) => s.outline.offset = *n,
+        (Slot::CaretColor, AnimValue::Color(c)) => s.caret_color = Some(*c),
+        (Slot::AccentColor, AnimValue::Color(c)) => s.accent_color = Some(*c),
+        (Slot::ScrollbarColor, AnimValue::List(l)) => {
+            if let [AnimValue::Color(a), AnimValue::Color(b)] = l.as_slice() {
+                s.scrollbar_color = Some((*a, *b));
+            }
+        }
         _ => {}
     }
+}
+
+/// The transition that covers `id` on a style (the last one written).
+pub(super) fn transition_for(s: &ComputedStyle, id: PropertyId) -> Option<crate::style::TransitionSpec> {
+    s.transitions
+        .iter()
+        .rev()
+        .find(|t| match t.property {
+            TransitionProperty::All => true,
+            TransitionProperty::One(p) => p == id,
+        })
+        .copied()
 }
 
 /// Starts, retargets or cancels transitions for the slots that differ
@@ -273,7 +392,9 @@ pub(super) fn detect(
     runs: &mut Vec<Running>,
     start: Instant,
 ) {
-    for slot in ALL {
+    // Width and height are tracked by the layout (their used size, `auto`
+    // included), not here.
+    for slot in ALL.into_iter().filter(|s| !matches!(s, Slot::Width | Slot::Height)) {
         let (a, b) = (get(old_target, slot), get(new_target, slot));
         if a == b {
             continue;

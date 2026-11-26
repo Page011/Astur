@@ -223,6 +223,7 @@ fn http_get_and_post_resume_with_a_response() {
         kind: rsb_core::hit::InputKind::Click(rsb_core::hit::Button::Right),
         x: 0.0,
         y: 0.0,
+        gesture: 1,
     }));
     let reqs = io_requests(&h);
     let IoRequest::Http(req) = &reqs[0].2 else { panic!() };
@@ -462,6 +463,7 @@ fn open_url_needs_https_and_net() {
         kind: rsb_core::hit::InputKind::Click(rsb_core::hit::Button::Right),
         x: 0.0,
         y: 0.0,
+        gesture: 1,
     }));
     assert!(io_requests(&h).is_empty());
     assert_eq!(h.plate(1).unwrap(), "PERMISSION - open needs net:elsewhere.example; add it to permissions");
@@ -546,6 +548,7 @@ fn sleep_spawn_and_cancel() {
         kind: rsb_core::hit::InputKind::Click(rsb_core::hit::Button::Right),
         x: 0.0,
         y: 0.0,
+        gesture: 1,
     }));
     h.advance(1000);
     h.advance(1000);

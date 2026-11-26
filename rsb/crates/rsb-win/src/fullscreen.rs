@@ -16,7 +16,7 @@ use windows::core::w;
 use crate::{WinError, monitor, sys};
 
 /// The window takes the foreground while it is open, which is what Windows
-/// needs before it sends `ABN_FULLSCREENAPP`, and the owner may be using the
+/// needs before it sends `ABN_FULLSCREENAPP`, and the user may be using the
 /// PC: never longer than this.
 const MAX_OPEN: Duration = Duration::from_secs(1);
 
@@ -125,5 +125,54 @@ fn pump() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+    }
+}
+
+/// Whether a window of process `window_pid` belongs to us (`own_pid`). No
+/// process id (no such window, or one we cannot see) is not ours.
+pub(crate) fn is_own_process(window_pid: Option<u32>, own_pid: u32) -> bool {
+    window_pid == Some(own_pid)
+}
+
+/// The class of the stand-in window `spawn_fullscreen_test_window` opens: it
+/// plays another app's fullscreen window, so it does not count as ours even
+/// though this process made it.
+const STAND_IN_CLASS: &str = "RsbFullscreenTest";
+
+/// The foreground window is one of ours (an overlay, a popup): the shell's
+/// fullscreen notice then describes our own window, not another app.
+pub(crate) fn foreground_is_ours() -> bool {
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId};
+    // SAFETY: no arguments; the handle may be null (no foreground window).
+    let fg = unsafe { GetForegroundWindow() };
+    if fg.0.is_null() {
+        return false;
+    }
+    let mut pid = 0u32;
+    // SAFETY: a live out pointer; a stale handle only fails the call.
+    let thread = unsafe { GetWindowThreadProcessId(fg, Some(&mut pid)) };
+    // SAFETY: no arguments.
+    let own = unsafe { GetCurrentProcessId() };
+    if !is_own_process((thread != 0).then_some(pid), own) {
+        return false;
+    }
+    let mut name = [0u16; 64];
+    // SAFETY: the buffer length is the slice length.
+    let len = unsafe { GetClassNameW(fg, &mut name) }.max(0) as usize;
+    String::from_utf16_lossy(&name[..len.min(name.len())]) != STAND_IN_CLASS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_window_is_ours_only_when_its_process_id_is_ours() {
+        assert!(is_own_process(Some(4242), 4242));
+        assert!(!is_own_process(Some(4243), 4242));
+        assert!(!is_own_process(None, 4242));
+        assert!(!is_own_process(Some(0), 4242));
+        assert!(is_own_process(Some(0), 0), "equal ids are equal, whatever they are");
     }
 }

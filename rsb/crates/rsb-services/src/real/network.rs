@@ -10,6 +10,7 @@
 //! lack the location permission; RSB never asks for it. Then `ssid` is nil
 //! and `signal` comes from the radio's RSSI instead.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use rsb_core::services::{ServiceCommand, ServiceId};
 use rsb_core::value::Value;
+use windows::Security::Authorization::AppCapabilityAccess::{AppCapability, AppCapabilityAccessStatus};
 use windows::Win32::Foundation::{ERROR_SUCCESS, HANDLE, WAIT_OBJECT_0};
 use windows::Win32::NetworkManagement::IpHelper::{
     CancelMibChangeNotify2, FreeMibTable, GetBestInterface, GetIfTable2, MIB_IF_TABLE2, MIB_IPINTERFACE_ROW,
@@ -36,7 +38,7 @@ use windows::Win32::System::Com::{
     CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx, CoUninitialize, IConnectionPointContainer,
 };
 use windows::Win32::System::Threading::{SetEvent, WaitForMultipleObjects};
-use windows::core::{GUID, Interface, implement};
+use windows::core::{GUID, HSTRING, Interface, implement};
 
 use super::Worker;
 use crate::util::{map, text};
@@ -164,9 +166,22 @@ pub(crate) fn connectivity(flags: i32) -> (bool, bool) {
 /// The WLAN client handle.
 struct Wlan {
     handle: HANDLE,
+    access: Cell<Option<(Instant, bool)>>,
 }
 
 impl Wlan {
+    /// `wifi_control_allowed`, asked at most once per `ACCESS_CACHE`.
+    fn access_allowed(&self) -> bool {
+        if let Some((at, allowed)) = self.access.get()
+            && at.elapsed() < ACCESS_CACHE
+        {
+            return allowed;
+        }
+        let allowed = wifi_control_allowed();
+        self.access.set(Some((Instant::now(), allowed)));
+        allowed
+    }
+
     fn open(shared: &Arc<Shared>) -> Option<(Wlan, *const Shared)> {
         let mut negotiated = 0u32;
         let mut handle = HANDLE::default();
@@ -191,7 +206,7 @@ impl Wlan {
         if r != 0 {
             log::debug!("network: no Wi-Fi notifications ({r}); the radio is read at each sample");
         }
-        Some((Wlan { handle }, context))
+        Some((Wlan { handle, access: Cell::new(None) }, context))
     }
 
     /// (ssid, signal 0..=100) of the first connected Wi-Fi interface.
@@ -209,37 +224,106 @@ impl Wlan {
         // SAFETY: the list came from WlanEnumInterfaces and is freed once.
         unsafe { WlanFreeMemory(list.cast()) };
         let guid = connected.first()?;
+        let probe = WlanProbe { wlan: self, guid: *guid, allowed: Cell::new(None) };
+        Some(read_connection(&probe))
+    }
+}
 
+/// The three questions a connection read asks Windows, behind a seam so a
+/// test can count which ones were made.
+trait ConnectionProbe {
+    /// Whether the app may read network names (`wiFiControl` is `Allowed`).
+    fn location_allowed(&self) -> bool;
+    /// (ssid, signal quality 0..=100) from the current-connection query.
+    fn current_connection(&self) -> Option<(Option<String>, f64)>;
+    /// Signal 0..=100 from the radio's RSSI, which needs no permission.
+    fn rssi(&self) -> Option<f64>;
+}
+
+/// The current-connection query is made only when the location permission
+/// is `Allowed`: a blocked call can raise Windows' one-time prompt (and each
+/// test executable counts as a new app for it). Without it the name stays
+/// nil and the signal comes from the RSSI.
+fn read_connection(probe: &dyn ConnectionProbe) -> (Option<String>, Option<f64>) {
+    if probe.location_allowed()
+        && let Some((name, quality)) = probe.current_connection()
+    {
+        return (name, Some(quality));
+    }
+    (None, probe.rssi())
+}
+
+/// How long a permission check is trusted.
+const ACCESS_CACHE: Duration = Duration::from_secs(10);
+
+/// Whether `wiFiControl` is `Allowed` for this app. Never asks for it. A
+/// failure to ask reads as "not allowed".
+fn wifi_control_allowed() -> bool {
+    AppCapability::Create(&HSTRING::from("wiFiControl"))
+        .and_then(|c| c.CheckAccess())
+        .is_ok_and(|status| status == AppCapabilityAccessStatus::Allowed)
+}
+
+struct WlanProbe<'a> {
+    wlan: &'a Wlan,
+    guid: GUID,
+    allowed: Cell<Option<bool>>,
+}
+
+impl ConnectionProbe for WlanProbe<'_> {
+    fn location_allowed(&self) -> bool {
+        if let Some(a) = self.allowed.get() {
+            return a;
+        }
+        let a = self.wlan.access_allowed();
+        self.allowed.set(Some(a));
+        a
+    }
+
+    fn current_connection(&self) -> Option<(Option<String>, f64)> {
         let mut size = 0u32;
         let mut data: *mut c_void = std::ptr::null_mut();
         // SAFETY: live out pointers; `data` is freed below.
         let r = unsafe {
-            WlanQueryInterface(self.handle, guid, wlan_intf_opcode_current_connection, None, &mut size, &mut data, None)
+            WlanQueryInterface(
+                self.wlan.handle,
+                &self.guid,
+                wlan_intf_opcode_current_connection,
+                None,
+                &mut size,
+                &mut data,
+                None,
+            )
         };
-        if r == 0 && !data.is_null() {
-            // SAFETY: a successful current-connection query returns a WLAN_CONNECTION_ATTRIBUTES.
-            let attrs = unsafe { &*data.cast::<WLAN_CONNECTION_ATTRIBUTES>() };
-            let ssid = &attrs.wlanAssociationAttributes.dot11Ssid;
-            let len = (ssid.uSSIDLength as usize).min(ssid.ucSSID.len());
-            let name = (len > 0).then(|| String::from_utf8_lossy(&ssid.ucSSID[..len]).into_owned());
-            let quality = f64::from(attrs.wlanAssociationAttributes.wlanSignalQuality);
-            // SAFETY: freeing the query result once.
-            unsafe { WlanFreeMemory(data) };
-            return Some((name, Some(quality)));
+        if r != 0 || data.is_null() {
+            return None;
         }
-        // Refused (location permission): the radio's RSSI still answers.
+        // SAFETY: a successful current-connection query returns a WLAN_CONNECTION_ATTRIBUTES.
+        let attrs = unsafe { &*data.cast::<WLAN_CONNECTION_ATTRIBUTES>() };
+        let ssid = &attrs.wlanAssociationAttributes.dot11Ssid;
+        let len = (ssid.uSSIDLength as usize).min(ssid.ucSSID.len());
+        let name = (len > 0).then(|| String::from_utf8_lossy(&ssid.ucSSID[..len]).into_owned());
+        let quality = f64::from(attrs.wlanAssociationAttributes.wlanSignalQuality);
+        // SAFETY: freeing the query result once.
+        unsafe { WlanFreeMemory(data) };
+        Some((name, quality))
+    }
+
+    fn rssi(&self) -> Option<f64> {
+        let mut size = 0u32;
         let mut data: *mut c_void = std::ptr::null_mut();
         // SAFETY: live out pointers; `data` is freed below.
-        let r =
-            unsafe { WlanQueryInterface(self.handle, guid, wlan_intf_opcode_rssi, None, &mut size, &mut data, None) };
-        if r == 0 && !data.is_null() {
-            // SAFETY: the RSSI query returns a LONG in dBm.
-            let rssi = unsafe { *data.cast::<i32>() };
-            // SAFETY: freeing the query result once.
-            unsafe { WlanFreeMemory(data) };
-            return Some((None, Some(f64::from(2 * (rssi + 100)).clamp(0.0, 100.0))));
+        let r = unsafe {
+            WlanQueryInterface(self.wlan.handle, &self.guid, wlan_intf_opcode_rssi, None, &mut size, &mut data, None)
+        };
+        if r != 0 || data.is_null() {
+            return None;
         }
-        Some((None, None))
+        // SAFETY: the RSSI query returns a LONG in dBm.
+        let rssi = unsafe { *data.cast::<i32>() };
+        // SAFETY: freeing the query result once.
+        unsafe { WlanFreeMemory(data) };
+        Some(f64::from(2 * (rssi + 100)).clamp(0.0, 100.0))
     }
 }
 
@@ -464,5 +548,44 @@ mod tests {
         println!("interface counters: {first:?} then {second:?}");
         assert!(second.0 >= first.0 && second.1 >= first.1, "{first:?} -> {second:?}");
         assert!(!read_links().is_empty(), "this PC has interfaces");
+    }
+
+    /// Counts the questions asked, and answers as configured.
+    struct Counting {
+        allowed: bool,
+        asked: std::cell::RefCell<Vec<&'static str>>,
+    }
+
+    impl ConnectionProbe for Counting {
+        fn location_allowed(&self) -> bool {
+            self.asked.borrow_mut().push("access");
+            self.allowed
+        }
+        fn current_connection(&self) -> Option<(Option<String>, f64)> {
+            self.asked.borrow_mut().push("current");
+            Some((Some("net".into()), 70.0))
+        }
+        fn rssi(&self) -> Option<f64> {
+            self.asked.borrow_mut().push("rssi");
+            Some(55.0)
+        }
+    }
+
+    #[test]
+    fn without_location_access_the_current_connection_is_never_asked_for() {
+        let probe = Counting { allowed: false, asked: Default::default() };
+        let (ssid, signal) = read_connection(&probe);
+        assert_eq!(ssid, None, "no name without the permission");
+        assert_eq!(signal, Some(55.0), "the radio's own reading still gives a signal");
+        assert_eq!(*probe.asked.borrow(), vec!["access", "rssi"], "no current-connection call was made");
+    }
+
+    #[test]
+    fn with_location_access_the_name_and_quality_come_from_the_current_connection() {
+        let probe = Counting { allowed: true, asked: Default::default() };
+        let (ssid, signal) = read_connection(&probe);
+        assert_eq!(ssid.as_deref(), Some("net"));
+        assert_eq!(signal, Some(70.0));
+        assert_eq!(*probe.asked.borrow(), vec!["access", "current"], "the radio is not read when the query answered");
     }
 }

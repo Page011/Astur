@@ -14,9 +14,11 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Instant;
 
 use rsb_core::hit::PointerEvent;
+use rsb_core::key::{KeyEvent, Modifiers, TextInput};
 use rsb_core::style::Cursor;
 
-use crate::BarId;
+use crate::keys::{CharJoiner, Composition};
+use crate::{BarId, OutsidePress, PopupId};
 
 /// What a window procedure saw, in arrival order. `Ui` turns each into state
 /// changes and `UiEvent`s outside the window procedure.
@@ -46,14 +48,47 @@ pub(crate) enum Raw {
     },
     TaskbarCreated,
     Clock,
-    FrameDue,
     Close,
     EndSession,
+    PopupPointer {
+        popup: PopupId,
+        event: PointerEvent,
+    },
+    PopupDpi {
+        popup: PopupId,
+        dpi: u32,
+    },
+    Key {
+        popup: PopupId,
+        event: KeyEvent,
+    },
+    Text {
+        popup: PopupId,
+        input: TextInput,
+    },
+    PopupFocus {
+        popup: PopupId,
+        focused: bool,
+    },
+    OutsidePress(OutsidePress),
+    SessionLock {
+        locked: bool,
+    },
+    /// The clipboard worker finished something, or its timer ran out.
+    ClipboardReady,
 }
 
-/// Per bar window input and cursor state, keyed by window handle.
+/// Which `Ui` object a window belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Target {
+    Bar(BarId),
+    Popup(PopupId),
+}
+
+/// Per window input and cursor state, keyed by window handle (bars, popups,
+/// menus, tooltips, overlay content and dim windows).
 pub(crate) struct WinState {
-    pub bar: BarId,
+    pub target: Target,
     pub cursor: Cursor,
     /// `TrackMouseEvent(TME_LEAVE)` is armed.
     pub tracking: bool,
@@ -62,6 +97,32 @@ pub(crate) struct WinState {
     pub last: (f32, f32),
     /// Buttons held that this process captured the mouse for.
     pub captured: u32,
+    /// Popups: joins the surrogate halves `WM_CHAR` delivers one by one.
+    pub joiner: CharJoiner,
+    /// Popups: the caret of the focused input in screen px (left, top, right,
+    /// bottom), for IMEs that ask where the character is.
+    pub ime_caret: Option<(i32, i32, i32, i32)>,
+    /// Dim windows: the colour painted (COLORREF) and how many times the
+    /// window was painted.
+    pub dim_rgb: u32,
+    pub paints: u32,
+}
+
+impl WinState {
+    pub fn new(target: Target) -> WinState {
+        WinState {
+            target,
+            cursor: Cursor::Default,
+            tracking: false,
+            hovered: false,
+            last: (0.0, 0.0),
+            captured: 0,
+            joiner: CharJoiner::default(),
+            ime_caret: None,
+            dim_rgb: 0,
+            paints: 0,
+        }
+    }
 }
 
 /// The flag half of `UiWaker`, shared with every clone.
@@ -90,6 +151,11 @@ pub(crate) struct Shared {
     /// `"ImmersiveColorSet"` as a NUL-terminated UTF-16 string that outlives
     /// every message posted with a pointer to it.
     pub immersive: Vec<u16>,
+    /// Modifiers a test key message carries (a real key message reads the
+    /// thread's key state instead). Set only around the synchronous send.
+    pub inject_mods: Cell<Option<Modifiers>>,
+    /// What a test IME message carries instead of asking the system IME.
+    pub inject_comp: RefCell<Option<Composition>>,
 }
 
 impl Shared {
@@ -105,6 +171,8 @@ impl Shared {
             deadline: Cell::new(None),
             theme_override: Cell::new(None),
             immersive: "ImmersiveColorSet".encode_utf16().chain(std::iter::once(0)).collect(),
+            inject_mods: Cell::new(None),
+            inject_comp: RefCell::new(None),
         }
     }
 
@@ -121,7 +189,10 @@ impl Shared {
     }
 
     pub fn bar_of(&self, hwnd: isize) -> Option<BarId> {
-        self.wins.borrow().get(&hwnd).map(|w| w.bar)
+        match self.wins.borrow().get(&hwnd)?.target {
+            Target::Bar(b) => Some(b),
+            Target::Popup(_) => None,
+        }
     }
 }
 

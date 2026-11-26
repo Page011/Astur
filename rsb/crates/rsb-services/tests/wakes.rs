@@ -5,7 +5,7 @@
 mod common;
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use common::*;
 use rsb_core::services::ServiceId;
@@ -14,6 +14,7 @@ use rsb_services::fake::komorebi::{FakeKomorebi, FakeKomorebiControl};
 use rsb_services::{
     Hub, HubOptions, HubTiming, Service, ServiceFactory, WorkspaceOptions, source_wakes, workspaces_service,
 };
+use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, InternalGetWindowText};
 
 const WINDOW: Duration = Duration::from_secs(3);
 
@@ -31,16 +32,44 @@ impl ServiceFactory for Mixed {
     }
 }
 
-fn measure(hub: &Hub, col: &Collector, id: ServiceId, interval: Option<Duration>) -> (u64, u64) {
+/// How many times the foreground window or its title changed while `span` passed, read here every
+/// 20 ms and independently of the service. Counts only: no title is kept or printed.
+fn foreground_changes(span: Duration) -> u64 {
+    let read = || {
+        // SAFETY: plain window queries; the buffer is writable and InternalGetWindowText sends no message.
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            let mut buf = [0u16; 256];
+            let n = InternalGetWindowText(hwnd, &mut buf).max(0) as usize;
+            (hwnd.0 as isize, buf[..n.min(buf.len())].to_vec())
+        }
+    };
+    let end = Instant::now() + span;
+    let mut last = read();
+    let mut changes = 0;
+    while Instant::now() < end {
+        std::thread::sleep(Duration::from_millis(20));
+        let now = read();
+        if now != last {
+            changes += 1;
+            last = now;
+        }
+    }
+    changes
+}
+
+/// (source wakes, hub wakes, foreground changes seen meanwhile) over `WINDOW` with nothing asked of
+/// the service.
+fn measure(hub: &Hub, col: &Collector, id: ServiceId, interval: Option<Duration>) -> (u64, u64, u64) {
     subscribe(hub, id, 1, interval);
     assert!(col.value(id, Duration::from_secs(10)).is_some(), "{} gave a value", id.name());
     std::thread::sleep(Duration::from_millis(700));
     let (w0, h0) = (source_wakes(), hub.wakes());
-    std::thread::sleep(WINDOW);
+    let changes = foreground_changes(WINDOW);
     let (w1, h1) = (source_wakes() - w0, hub.wakes() - h0);
     unsubscribe(hub, id, 1);
     std::thread::sleep(Duration::from_millis(2600));
-    (w1, h1)
+    (w1, h1, changes)
 }
 
 #[test]
@@ -59,7 +88,7 @@ fn idle_sources_do_not_poll() {
 
     let mut report = Vec::new();
     // A connected GlazeWM-compatible connection: no poll loop, one wake a minute plus the events.
-    let (wakes, hub_wakes) = measure(&hub, &col, ServiceId::Workspaces, None);
+    let (wakes, hub_wakes, _) = measure(&hub, &col, ServiceId::Workspaces, None);
     println!("wakes in {} s idle: workspaces (glazewm connected) sources={wakes} hub={hub_wakes}", WINDOW.as_secs());
     assert!(wakes <= 2, "an idle connection waits on its events: {wakes} wakes in {} s", WINDOW.as_secs());
     report.push(("workspaces/glazewm", wakes));
@@ -97,16 +126,30 @@ fn idle_sources_do_not_poll() {
         (ServiceId::Audio, None),
         (ServiceId::Media, None),
         (ServiceId::Window, None),
+        (ServiceId::Microphone, None),
+        (ServiceId::Power, None),
         (ServiceId::Network, Some(Duration::from_secs(2))),
         (ServiceId::System, Some(Duration::from_secs(2))),
     ] {
-        let (wakes, hub_wakes) = measure(&hub, &col, id, interval);
+        let (wakes, hub_wakes, changes) = measure(&hub, &col, id, interval);
         println!("wakes in {} s idle: {} sources={wakes} hub={hub_wakes}", WINDOW.as_secs(), id.name());
         report.push((id.name(), wakes));
         match id {
-            // Event driven: nothing changes, nothing wakes (a name-change event from some other window may).
-            ServiceId::Battery | ServiceId::Audio | ServiceId::Media | ServiceId::Window => {
+            // Event driven: nothing changes, nothing wakes.
+            ServiceId::Battery | ServiceId::Audio | ServiceId::Media | ServiceId::Microphone | ServiceId::Power => {
                 assert!(wakes <= 6, "{}: {wakes} wakes in {} s", id.name(), WINDOW.as_secs());
+            }
+            // Wakes for the foreground window and its title, which the user's own desktop changes while
+            // this runs (a terminal's title animates): each change costs at most an event wake and the
+            // wake that settles the 250 ms throttle. With the foreground still it wakes once or not at
+            // all.
+            ServiceId::Window => {
+                println!("window: {changes} foreground or title changes seen meanwhile");
+                assert!(
+                    wakes <= 2 * changes + 1,
+                    "window: {wakes} wakes for {changes} changes in {} s",
+                    WINDOW.as_secs()
+                );
             }
             // Sampled at the subscriber's period: about one wake per period, never a tight loop.
             ServiceId::Network => assert!(wakes <= 2 * WINDOW.as_secs() / 2 + 6, "network: {wakes}"),
@@ -115,7 +158,7 @@ fn idle_sources_do_not_poll() {
                 assert_eq!(wakes, 0, "the system sampler has no source thread");
                 assert!(hub_wakes <= 2 * WINDOW.as_secs() / 2 + 3, "system: hub woke {hub_wakes} times");
             }
-            ServiceId::Workspaces => unreachable!(),
+            _ => unreachable!("only the services listed above are measured"),
         }
     }
     println!("idle wake report ({} s each): {report:?}", WINDOW.as_secs());

@@ -341,7 +341,7 @@ fn status_lists_every_service() {
     let (tx, rx) = mpsc::channel();
     hub.port().send(HubRequest::Status { reply: tx });
     let infos = rx.recv_timeout(WAIT).expect("a reply");
-    assert_eq!(infos.len(), 7);
+    assert_eq!(infos.len(), ServiceId::ALL.len());
     let sys = infos.iter().find(|i| i.id == ServiceId::System).unwrap();
     assert_eq!((sys.status, sys.subscribers, sys.interval), (ServiceStatus::Ok, 2, Some(Duration::from_secs(1))));
     assert!(sys.last_update_ago.is_some() && sys.version >= 2);
@@ -374,6 +374,45 @@ fn commands_start_a_stopped_service_and_reach_it_in_order() {
     let last = after.iter().rev().find_map(|e| e.value.clone()).unwrap_or(v.value.unwrap());
     assert_eq!(last.get("volume").and_then(Value::as_f64), Some(20.0), "the fake applied them like the real one would");
     hub.shutdown(WAIT);
+}
+
+#[test]
+fn a_closed_command_gate_records_commands_and_never_starts_their_service() {
+    use rsb_core::services::{AppsCommand, AudioDeviceCommand, PowerCommand};
+    use rsb_services::{CommandRecorder, HubOptions};
+    use std::sync::Arc;
+
+    for forward in [false, true] {
+        let world = FakeWorld::new();
+        world.set(ServiceId::Audio, audio(50.0));
+        let gate = Arc::new(CommandRecorder::new(forward));
+        let options = HubOptions { command_gate: Some(gate.clone()), ..HubOptions::default() };
+        let hub = rsb_services::Hub::start_with(options, Box::new(world.clone()), Box::new(|_| {}), fast_timing());
+        let cmds = [
+            ServiceCommand::AudioDevice(AudioDeviceCommand::SetDefault("{device}".into())),
+            ServiceCommand::Apps(AppsCommand::Launch("Some.App".into())),
+            ServiceCommand::Power(PowerCommand::Restart),
+        ];
+        for c in &cmds {
+            hub.port().send(HubRequest::Command { owner: InstanceId(1), command: c.clone() });
+        }
+        sleep(200);
+        let seen = gate.seen();
+        assert_eq!(
+            seen,
+            [(ServiceId::Audio, "set_default"), (ServiceId::Apps, "launch"), (ServiceId::Power, "restart")],
+            "only service and method names are kept"
+        );
+        if forward {
+            assert_eq!(world.commands(), cmds.to_vec(), "an open gate passes everything on");
+        } else {
+            assert!(world.commands().is_empty(), "a closed gate stops every command");
+            for id in [ServiceId::Audio, ServiceId::Apps, ServiceId::Power] {
+                assert_eq!(world.starts(id), 0, "{} was started by a stopped command", id.name());
+            }
+        }
+        hub.shutdown(WAIT);
+    }
 }
 
 #[test]

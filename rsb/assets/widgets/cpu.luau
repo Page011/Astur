@@ -1,6 +1,7 @@
 --!strict
 -- Processor load. Shows -- while the reading is stale; gets class "warn"
--- from `warn` percent up.
+-- from `warn` percent up. `icons` is "font" (the icon font) or "svg" (the
+-- bundled SVG icons; `icon` then names one of them).
 local rsb = require("@rsb")
 local text = require("./lib/format")
 
@@ -9,6 +10,7 @@ return rsb.widget {
 		format = "{value}%",
 		icon = "cpu",
 		label = "",
+		icons = "font",
 		every = "2s",
 		warn = 80,
 	},
@@ -27,6 +29,7 @@ return rsb.widget {
 
 		local lead = if props.label ~= ""
 			then rsb.text { class = "label", text = props.label }
+			elseif props.icons == "svg" then rsb.icon { svg = props.icon }
 			else rsb.icon { name = props.icon :: any }
 
 		return rsb.row {

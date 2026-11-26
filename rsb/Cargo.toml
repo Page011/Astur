@@ -47,6 +47,10 @@ tungstenite = { version = "=0.30.0", default-features = false, features = ["hand
 # Logging facade so the library crates can log without knowing about the file
 # logger in the binary.
 log = "=0.4.35"
+# SVG icons and images. Default features off: no text (icons draw no text),
+# no system fonts, no embedded raster images and no compressed .svgz, so an
+# SVG can only describe shapes. It draws with the same tiny-skia version.
+resvg = { version = "=0.50.0", default-features = false }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -38,6 +38,12 @@ pub enum Command {
         event: String,
         json: Option<String>,
     },
+    /// `rsb popup <name> [open|close|toggle]` (toggle when left out): the
+    /// popup with that name on the monitor under the pointer.
+    Popup {
+        name: String,
+        action: crate::popup::PopupAction,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,7 +146,7 @@ fn parse_json(text: &str) -> Result<serde_json::Value, IpcError> {
 }
 
 /// The commands a running bar answers, for "did you mean".
-const COMMANDS: [&str; 5] = ["reload", "quit", "toggle", "status", "trigger"];
+const COMMANDS: [&str; 6] = ["reload", "quit", "toggle", "status", "trigger", "popup"];
 
 /// `words` is non-empty; `json` is the raw rest of a trigger line, if any.
 fn build(words: &[&str], json: Option<String>) -> Result<Command, IpcError> {
@@ -162,6 +168,20 @@ fn build(words: &[&str], json: Option<String>) -> Result<Command, IpcError> {
             [_, event] => Err(IpcError::BadEventName(event.to_string())),
             _ => Err(IpcError::WrongArgs { command: "trigger", expected: "<event> [json]" }),
         },
+        "popup" => {
+            let action = |a: &str| crate::popup::PopupAction::from_name(a);
+            match words {
+                [_, name] if is_event_name(name) => {
+                    Ok(Command::Popup { name: name.to_string(), action: crate::popup::PopupAction::Toggle })
+                }
+                [_, name, a] if is_event_name(name) && action(a).is_some() => Ok(Command::Popup {
+                    name: name.to_string(),
+                    action: action(a).unwrap_or(crate::popup::PopupAction::Toggle),
+                }),
+                [_, name, ..] if !is_event_name(name) => Err(IpcError::BadEventName(name.to_string())),
+                _ => Err(IpcError::WrongArgs { command: "popup", expected: "<name> [open|close|toggle]" }),
+            }
+        }
         other => Err(IpcError::UnknownCommand(other.to_string())),
     }
 }
@@ -198,6 +218,7 @@ impl Command {
             Command::Toggle(Some(bar)) => format!("toggle {bar}\n"),
             Command::Trigger { event, json: None } => format!("trigger {event}\n"),
             Command::Trigger { event, json: Some(j) } => format!("trigger {event} {j}\n"),
+            Command::Popup { name, action } => format!("popup {name} {}\n", action.name()),
         }
     }
 

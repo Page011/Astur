@@ -124,6 +124,7 @@ local function new_scope(parent)
 	if parent then
 		s.parent = parent
 		s.inst = parent.inst
+		s.cscope = parent.cscope
 		local kids = parent.kids
 		if not kids then
 			kids = {}
@@ -135,6 +136,28 @@ local function new_scope(parent)
 end
 
 local dispose_scope
+
+-- A popup's content scope read some services: when it is gone and nothing else of the widget reads them, they
+-- are let go (their sampling stops).
+local function release_svcs(s)
+	local sv = s.svcs
+	s.svcs = nil
+	local inst = s.inst
+	if not inst or inst.gone then
+		return
+	end
+	for name in pairs(sv) do
+		local n = (inst.svc_n[name] or 1) - 1
+		if n <= 0 then
+			inst.svc_n[name] = nil
+			if not inst.svc_perm[name] then
+				N.untouch(name)
+			end
+		else
+			inst.svc_n[name] = n
+		end
+	end
+end
 
 local function reset_scope(s)
 	local kids = s.kids
@@ -165,6 +188,9 @@ dispose_scope = function(s)
 	end
 	s.disposed = true
 	reset_scope(s)
+	if s.svcs then
+		release_svcs(s)
+	end
 	local srcs = s.sources
 	if srcs then
 		s.sources = nil
@@ -264,6 +290,22 @@ local function sig_set(s, v)
 		return
 	end
 	rawset(s, "v", v)
+	-- A write made while a click or a key is handled is remembered with that input's id until the effects it wakes
+	-- have run: a popup that opens because of it takes the id (focus and overlays need one).
+	local g = cur_observer == nil and N.g or nil
+	if g then
+		local o = cur_owner
+		local inst = o and o.inst
+		if inst then
+			if rawget(s, "gest") == nil then
+				local st = inst.stamped
+				st[#st + 1] = s
+			end
+			rawset(s, "gest", g)
+		end
+	elseif rawget(s, "gest") then
+		rawset(s, "gest", nil)
+	end
 	for o in pairs(s.observers) do
 		mark(o, DIRTY)
 	end
@@ -405,6 +447,7 @@ local function create_node(kind, fn, owner)
 		state = DIRTY,
 		parent = owner,
 		inst = owner and owner.inst,
+		cscope = owner and owner.cscope,
 		disposed = false,
 	}
 	if kind == COMPUTED then
@@ -504,26 +547,15 @@ local function dirty(node)
 	end
 end
 
-local BASE_PROPS = {
-	id = true,
-	class = true,
-	style = true,
-	key = true,
-	visible = true,
-	on_click = true,
-	on_right_click = true,
-	on_middle_click = true,
-	on_wheel = true,
-	on_enter = true,
-	on_leave = true,
-}
-local KIND_PROPS = {
-	box = {},
-	text = { text = true },
-	icon = { name = true, glyph = true },
-	image = { src = true, width = true, height = true },
-}
 local KIND_PROP_LISTS = K.prop_lists
+local KIND_PROPS = {}
+for kind, list in pairs(KIND_PROP_LISTS) do
+	local set = {}
+	for i = 1, #list do
+		set[list[i]] = true
+	end
+	KIND_PROPS[kind] = set
+end
 local HANDLER_KEYS = {
 	on_click = "click",
 	on_right_click = "right_click",
@@ -531,8 +563,28 @@ local HANDLER_KEYS = {
 	on_wheel = "wheel",
 	on_enter = "enter",
 	on_leave = "leave",
+	on_key = "key",
+	on_scroll = "scroll",
+	on_focus = "focus",
+	on_blur = "blur",
 }
 local UNITLESS = K.unitless
+local BUILTIN_NAMES = K.builtin_popups
+-- The built-in widget each reserved popup name belongs to.
+local BUILTIN_OWNER = {
+	dashboard = "dashboard",
+	launcher = "dashboard",
+	power = "power",
+	calendar = "date",
+	media = "media",
+	volume = "volume",
+	network = "network",
+}
+local CHILD_KINDS = { box = true, popup = true, scroll = true, menuitem = true }
+local MENU_MAX_ITEMS, MENU_MAX_LEVELS = 256, 4
+local sfind = string.find
+-- Runs a function the widget gave (on_open, on_close) as a task; set once tasks exist.
+local spawn_user
 
 local function conv_class(v)
 	local t = type(v)
@@ -551,7 +603,7 @@ local function conv_class(v)
 	elseif v == nil or v == false then
 		return ""
 	end
-	return nil, "class must be a string or a list of strings, got " .. type(v)
+	return nil, "class must be a string or a list of strings, got " .. t
 end
 
 local function conv_style(v)
@@ -610,6 +662,17 @@ local function conv_string(what)
 	end
 end
 
+local function conv_flag(v)
+	return v == true
+end
+
+local function conv_checked(v)
+	if v == nil then
+		return nil
+	end
+	return v == true
+end
+
 local PROP_CONV = {
 	class = conv_class,
 	style = conv_style,
@@ -617,10 +680,17 @@ local PROP_CONV = {
 	text = conv_text,
 	name = conv_string("name"),
 	glyph = conv_string("glyph"),
+	svg = conv_string("svg"),
 	src = conv_string("src"),
+	placeholder = conv_string("placeholder"),
+	disabled = conv_flag,
+	checked = conv_checked,
 }
 
 local function prop_error(kind, key)
+	if key == "popup" then
+		return "make a popup with rsb.popup { ... } as a child of the element it opens from"
+	end
 	if K.reserved_props[key] then
 		return key .. " is not available in this version"
 	end
@@ -653,6 +723,416 @@ local function child_def(c, level)
 	)
 end
 
+-- ---------------------------------------------------------------- popups and menus: props
+
+local ENUMS = {
+	placement = { auto = true, below = true, above = true, left = true, right = true, screen = true },
+	align = { start = true, center = true, ["end"] = true },
+	focus = { auto = true, none = true, always = true },
+	nav = { vertical = true, horizontal = true, grid = true },
+}
+
+local function enum_value(key, v, level)
+	local ok = ENUMS[key]
+	if type(v) ~= "string" or not ok[v] then
+		local names = {}
+		for n in pairs(ok) do
+			names[#names + 1] = '"' .. n .. '"'
+		end
+		tsort(names)
+		error(key .. " must be one of " .. tconcat(names, ", "), level)
+	end
+	return v
+end
+
+local function number_value(key, v, level)
+	if type(v) ~= "number" or v ~= v then
+		error(key .. " must be a number", level)
+	end
+	return v
+end
+
+local function bool_value(key, v, level)
+	if type(v) ~= "boolean" then
+		error(key .. " must be true or false", level)
+	end
+	return v
+end
+
+local function fns_of(def)
+	local f = def.fns
+	if not f then
+		f = {}
+		def.fns = f
+	end
+	return f
+end
+
+local function raw_of(def)
+	local p = def.p
+	if not p then
+		p = {}
+		def.p = p
+	end
+	return p
+end
+
+local function handler_prop(key)
+	return function(def, v, _, level)
+		if type(v) ~= "function" then
+			error(key .. " must be a function", level)
+		end
+		fns_of(def)[key] = v
+		return true
+	end
+end
+
+local function reactive_src(v)
+	if type(v) == "table" and IS_SIGNAL[v] then
+		return { state = v }
+	elseif is_dynamic(v) then
+		return { fn = as_function(v) }
+	end
+	return { val = v }
+end
+
+local SPECIAL = {}
+SPECIAL.on_close = handler_prop("on_close")
+SPECIAL.on_open = handler_prop("on_open")
+SPECIAL.on_change = handler_prop("on_change")
+SPECIAL.on_submit = handler_prop("on_submit")
+SPECIAL.open = function(def, v, _, level)
+	if type(v) == "boolean" then
+		def.open = { val = v }
+	elseif type(v) == "table" and IS_SIGNAL[v] then
+		def.open = { state = v }
+	elseif is_dynamic(v) then
+		def.open = { fn = as_function(v) }
+	else
+		error("open must be a boolean, a state or a function, got " .. type(v), level)
+	end
+	return true
+end
+SPECIAL.name = function(def, v, kind)
+	if kind == "icon" or kind == "menuitem" then
+		return false
+	end
+	raw_of(def).names = v
+	return true
+end
+SPECIAL.group = function(def, v, _, level)
+	if type(v) ~= "string" or v == "" or #v > 32 then
+		error("group must be a short string", level)
+	end
+	raw_of(def).group = v
+	return true
+end
+SPECIAL.placement = function(def, v, kind, level)
+	enum_value("placement", v, level)
+	if kind == "menu" and v == "screen" then
+		error("a menu cannot cover the screen: use a popup for that", level)
+	end
+	raw_of(def).placement = v
+	return true
+end
+SPECIAL.align = function(def, v, _, level)
+	raw_of(def).align = enum_value("align", v, level)
+	return true
+end
+SPECIAL.focus = function(def, v, _, level)
+	raw_of(def).focus = enum_value("focus", v, level)
+	return true
+end
+SPECIAL.offset = function(def, v, _, level)
+	raw_of(def).offset = number_value("offset", v, level)
+	return true
+end
+SPECIAL.attach = function(def, v, _, level)
+	raw_of(def).attach = bool_value("attach", v, level)
+	return true
+end
+SPECIAL.dismiss = function(def, v, _, level)
+	if type(v) ~= "table" then
+		error("dismiss must be a table like { outside = false }", level)
+	end
+	local p = raw_of(def)
+	for k, val in pairs(v) do
+		if k ~= "outside" and k ~= "escape" then
+			error("dismiss has only outside and escape, not " .. tostring(k), level)
+		end
+		p["dismiss_" .. k] = bool_value("dismiss." .. k, val, level)
+	end
+	return true
+end
+SPECIAL.items = function(def, v, _, level)
+	if is_dynamic(v) then
+		def.items = { fn = as_function(v) }
+	elseif type(v) == "table" then
+		def.items = { val = v }
+	else
+		error("items must be a list of menu items, got " .. type(v), level)
+	end
+	return true
+end
+SPECIAL.value = function(def, v)
+	def.value = reactive_src(v)
+	return true
+end
+SPECIAL.password = function(def, v, _, level)
+	def.password = bool_value("password", v, level)
+	return true
+end
+SPECIAL.max_length = function(def, v, _, level)
+	if number_value("max_length", v, level) < 0 then
+		error("max_length cannot be negative", level)
+	end
+	def.max_length = floor(v)
+	return true
+end
+for _, key in ipairs({ "min", "max", "step" }) do
+	SPECIAL[key] = function(def, v, _, level)
+		def[key] = number_value(key, v, level)
+		return true
+	end
+end
+SPECIAL.vertical = function(def, v, _, level)
+	def.vertical = bool_value("vertical", v, level)
+	return true
+end
+SPECIAL.jump = function(def, v, _, level)
+	def.jump = bool_value("jump", v, level)
+	return true
+end
+SPECIAL.focusable = function(def, v, _, level)
+	def.focusable = bool_value("focusable", v, level)
+	return true
+end
+SPECIAL.autofocus = function(def, v, _, level)
+	def.autofocus = bool_value("autofocus", v, level)
+	return true
+end
+SPECIAL.nav = function(def, v, _, level)
+	def.nav = enum_value("nav", v, level)
+	return true
+end
+SPECIAL.reveal = function(def, v)
+	def.reveal = reactive_src(v)
+	return true
+end
+SPECIAL.animate = function(def, v)
+	def.animate = reactive_src(v)
+	return true
+end
+SPECIAL.tooltip = function(def, v, _, level)
+	local t = type(v)
+	if t == "string" or t == "number" then
+		def.tip = { val = v }
+	elseif t == "userdata" then
+		if not N.unwrap(v) then
+			error("tooltip must be a string or an element", level)
+		end
+		def.tip = { val = v }
+	elseif is_dynamic(v) then
+		def.tip = { fn = as_function(v) }
+	else
+		error("tooltip must be a string, an element or a function, got " .. t, level)
+	end
+	return true
+end
+SPECIAL.menu = function(def, v, _, level)
+	if is_dynamic(v) then
+		def.menu_src = { fn = as_function(v) }
+	elseif type(v) == "table" then
+		def.menu_src = { val = v }
+	else
+		error("menu must be a list of menu items, got " .. type(v), level)
+	end
+	return true
+end
+
+-- ---------------------------------------------------------------- menus
+
+local function check_menu_items(items, level, counter)
+	if type(items) ~= "table" then
+		error("menu items must be a list", 0)
+	end
+	if level > MENU_MAX_LEVELS then
+		error("menus nest at most " .. MENU_MAX_LEVELS .. " levels", 0)
+	end
+	for i = 1, #items do
+		local it = items[i]
+		if type(it) ~= "table" then
+			error("each menu item must be a table", 0)
+		end
+		counter.n = counter.n + 1
+		if counter.n > MENU_MAX_ITEMS then
+			error("a menu has at most " .. MENU_MAX_ITEMS .. " items", 0)
+		end
+		if it.items ~= nil then
+			check_menu_items(it.items, level + 1, counter)
+		end
+	end
+end
+
+local SUB_POP = {
+	names = {},
+	group = "menu",
+	placement = "right",
+	align = "start",
+	offset = 0,
+	attach = false,
+	focus = "auto",
+	dismiss_outside = true,
+	dismiss_escape = true,
+}
+local TOOLTIP_POP = {
+	names = {},
+	group = "tooltip",
+	placement = "auto",
+	align = "center",
+	offset = 6,
+	attach = false,
+	focus = "none",
+	dismiss_outside = false,
+	dismiss_escape = false,
+}
+
+local menu_item_defs
+
+local function submenu_def(items, level)
+	return {
+		kind = "menu",
+		direction = "column",
+		sub = true,
+		pop = SUB_POP,
+		children = {
+			{
+				fn = function()
+					return menu_item_defs(items, level)
+				end,
+			},
+		},
+	}
+end
+
+menu_item_defs = function(items, level)
+	local out = {}
+	for i = 1, #items do
+		local it = items[i]
+		if it.separator == true then
+			out[#out + 1] = make_element("box", { class = "separator", key = "sep:" .. i }, "row", 0)
+		else
+			local props = { text = it.label or "", key = "item:" .. i }
+			if it.icon ~= nil then
+				props.name = it.icon
+			end
+			if it.svg ~= nil then
+				props.svg = it.svg
+			end
+			if it.disabled == true then
+				props.disabled = true
+			end
+			if it.checked ~= nil then
+				props.checked = it.checked == true
+			end
+			if it.on_click ~= nil then
+				if type(it.on_click) ~= "function" then
+					error("a menu item's on_click must be a function", 0)
+				end
+				props.on_click = it.on_click
+			end
+			local n = 0
+			if it.shortcut ~= nil then
+				n = n + 1
+				props[n] = make_element("text", { text = tostring(it.shortcut), class = "shortcut" }, "row", 0)
+			end
+			if it.items ~= nil then
+				n = n + 1
+				props[n] = N.wrap(submenu_def(it.items, level + 1))
+			end
+			out[#out + 1] = make_element("menuitem", props, "row", 0)
+		end
+	end
+	return out
+end
+
+local function menu_children_fn(src)
+	return function()
+		local items
+		if src.fn then
+			items = src.fn()
+		else
+			items = src.val
+		end
+		check_menu_items(items, 1, { n = 0 })
+		return menu_item_defs(items, 1)
+	end
+end
+
+-- ---------------------------------------------------------------- elements: construction
+
+local function finalize_popup(def, kind, level)
+	local p = def.p or {}
+	if def.open == nil then
+		error("rsb." .. kind .. " needs open = rsb.state(false)", level)
+	end
+	if kind == "menu" and def.items == nil then
+		error("rsb.menu needs items", level)
+	end
+	local names = {}
+	local v = p.names
+	if v ~= nil then
+		local list
+		if type(v) == "string" then
+			list = { v }
+		elseif type(v) == "table" then
+			list = v
+		else
+			error("name must be a string or a list of strings", level)
+		end
+		for i = 1, #list do
+			local n = list[i]
+			if type(n) ~= "string" or #n == 0 or #n > 32 or sfind(n, "[^a-z0-9_%-]") then
+				error("popup names use a-z, 0-9, _ and -, at most 32 characters", level)
+			end
+			if BUILTIN_NAMES[n] and not N.is_builtin() and N.widget_base() ~= BUILTIN_OWNER[n] then
+				local o = cur_owner
+				local seen = (o and o.inst and o.inst.warned_names) or {}
+				if not seen[n] then
+					seen[n] = true
+					N.log("warn", "popup name '" .. n .. "' belongs to a built-in widget; this popup has no name")
+				end
+			else
+				names[#names + 1] = n
+			end
+		end
+	end
+	if #names > 0 and def.open.state == nil then
+		error("a named popup needs open = rsb.state(false) so rsb popup and rsb.popups can change it", level)
+	end
+	local placement = p.placement or "auto"
+	if placement == "screen" then
+		N.need_overlay()
+	end
+	if def.open.fn and not (def.fns and def.fns.on_close) then
+		N.log("warn", "the UI closes this popup but cannot change its open function; add on_close and update what open reads")
+	end
+	def.pop = {
+		names = names,
+		group = p.group or (kind == "menu" and "menu" or "bar"),
+		placement = placement,
+		align = p.align or "center",
+		offset = p.offset or 0,
+		attach = p.attach == true,
+		focus = p.focus or "auto",
+		dismiss_outside = p.dismiss_outside ~= false,
+		dismiss_escape = p.dismiss_escape ~= false,
+	}
+	if kind == "menu" then
+		def.children = { { fn = menu_children_fn(def.items) } }
+	end
+end
+
 -- `level` counts from the caller of make_element up to widget code.
 make_element = function(kind, props, direction, level)
 	level = level or 3
@@ -662,7 +1142,11 @@ make_element = function(kind, props, direction, level)
 		elseif kind == "icon" then
 			props = { name = props }
 		else
-			error("rsb." .. (direction == "column" and "column" or "box") .. " takes a table of props", level)
+			local fname = kind
+			if kind == "box" then
+				fname = direction == "column" and "column" or "box"
+			end
+			error("rsb." .. fname .. " takes a table of props", level)
 		end
 	end
 	local allowed = KIND_PROPS[kind]
@@ -672,45 +1156,45 @@ make_element = function(kind, props, direction, level)
 	for k, v in pairs(props) do
 		local tk = type(k)
 		if tk == "string" then
-			if allowed[k] or BASE_PROPS[k] then
-				local handler = HANDLER_KEYS[k]
-				if handler then
-					if type(v) ~= "function" then
-						error(k .. " must be a function", level)
-					end
-					local h = def.handlers
-					if not h then
-						h = {}
-						def.handlers = h
-					end
-					h[handler] = v
-				elseif k == "key" or k == "id" then
-					if type(v) ~= "string" and type(v) ~= "number" then
-						error(k .. " must be a string", level)
-					end
-					def[k] = tostring(v)
-				elseif k == "width" or k == "height" then
-					if type(v) ~= "number" then
-						error(k .. " must be a number", level)
-					end
-					def[k] = v
-				else
-					local conv = PROP_CONV[k]
-					if is_dynamic(v) then
-						def[k] = { fn = as_function(v) }
-					else
-						local val, e = conv(v)
-						if e then
-							error(e, level)
-						end
-						def[k] = { val = val }
-					end
-					if k == "style" then
-						has_style = true
-					end
-				end
-			else
+			if not allowed[k] then
 				error(prop_error(kind, k), level)
+			end
+			local handler = HANDLER_KEYS[k]
+			local sp = SPECIAL[k]
+			if handler then
+				if type(v) ~= "function" then
+					error(k .. " must be a function", level)
+				end
+				local h = def.handlers
+				if not h then
+					h = {}
+					def.handlers = h
+				end
+				h[handler] = v
+			elseif k == "key" or k == "id" then
+				if type(v) ~= "string" and type(v) ~= "number" then
+					error(k .. " must be a string", level)
+				end
+				def[k] = tostring(v)
+			elseif k == "width" or k == "height" then
+				if type(v) ~= "number" then
+					error(k .. " must be a number", level)
+				end
+				def[k] = v
+			elseif not (sp and sp(def, v, kind, level)) then
+				local conv = PROP_CONV[k]
+				if is_dynamic(v) then
+					def[k] = { fn = as_function(v) }
+				else
+					local val, e = conv(v)
+					if e then
+						error(e, level)
+					end
+					def[k] = { val = val }
+				end
+				if k == "style" then
+					has_style = true
+				end
 			end
 		elseif tk == "number" then
 			if k > maxn then
@@ -721,7 +1205,7 @@ make_element = function(kind, props, direction, level)
 		end
 	end
 	if maxn > 0 then
-		if kind ~= "box" then
+		if not CHILD_KINDS[kind] then
 			error("rsb." .. kind .. " cannot have children", level)
 		end
 		local children = def.children
@@ -736,10 +1220,36 @@ make_element = function(kind, props, direction, level)
 			end
 		end
 	end
-	if kind == "icon" and def.name == nil and def.glyph == nil then
+	if kind == "icon" and def.name == nil and def.glyph == nil and def.svg == nil then
 		error("rsb.icon needs a name or a glyph", level)
 	elseif kind == "image" and def.src == nil then
 		error("rsb.image needs a src", level)
+	elseif kind == "slider" and def.value == nil then
+		error("rsb.slider needs a value", level)
+	end
+	if def.menu_src then
+		local h = def.handlers
+		if h and h.right_click then
+			error("an element cannot have both menu and on_right_click", level)
+		end
+		if not h then
+			h = {}
+			def.handlers = h
+		end
+		local ctl = { state = new_signal(false) }
+		def.menu_ctl = ctl
+		h.right_click = function(e)
+			local mn = ctl.node
+			if mn then
+				mn.px = e and e.x or 0
+				mn.py = e and e.y or 0
+				dirty(mn)
+			end
+			ctl.state.value = true
+		end
+	end
+	if kind == "popup" or kind == "menu" then
+		finalize_popup(def, kind, level)
 	end
 	if has_style then
 		local src, line = info(level, "sl")
@@ -768,6 +1278,21 @@ function rsb.icon(props)
 end
 function rsb.image(props)
 	return make_element("image", props, "row", 3)
+end
+function rsb.popup(props)
+	return make_element("popup", props, "row", 3)
+end
+function rsb.menu(props)
+	return make_element("menu", props, "column", 3)
+end
+function rsb.input(props)
+	return make_element("input", props, "row", 3)
+end
+function rsb.slider(props)
+	return make_element("slider", props, "row", 3)
+end
+function rsb.scroll(props)
+	return make_element("scroll", props, "column", 3)
 end
 
 local mount
@@ -815,14 +1340,298 @@ local function reconcile(slot, list, parent)
 	slot.nodes = new_nodes
 end
 
+-- ---------------------------------------------------------------- popups: open state and content
+
+-- Popups with a name, by id: what `rsb popup` and `rsb.popups` reach.
+local POPUPS = {}
+local MAX_POPUPS = 16
+
+local function mount_children(def, node, scope, inst, slots, parent)
+	local children = def.children
+	for i = 1, #children do
+		local c = children[i]
+		if c.fn then
+			local slot = { dyn = true, nodes = {} }
+			slots[i] = slot
+			local fn = c.fn
+			create_effect(scope, function()
+				local list = fn()
+				reconcile(slot, list, parent)
+				dirty(node)
+			end)
+		else
+			slots[i] = mount(c.def, scope, inst)
+		end
+	end
+end
+
+-- The open state of a popup or menu. Two effects: the first follows `open` and keeps the numbers the UI reads
+-- (open_seq, the gesture); the second builds the content in a scope of its own while the popup is open, so
+-- everything the content made (timers, effects, handlers, service reads) goes away when it closes.
+local function setup_popup(def, node, scope, inst)
+	local pd = def.pop
+	local src = def.open
+	local state = src.state
+	local open_fn
+	if state then
+		open_fn = function()
+			return state.value
+		end
+	elseif src.fn then
+		open_fn = src.fn
+	else
+		local val = src.val
+		open_fn = function()
+			return val
+		end
+	end
+	local user_close = def.fns and def.fns.on_close
+	local user_open = def.fns and def.fns.on_open
+	node.open, node.oseq, node.ogest = false, 0, 0
+	inst.npop = inst.npop + 1
+	if inst.npop > MAX_POPUPS then
+		error("too many popups (at most " .. MAX_POPUPS .. " per widget)", 0)
+	end
+	add_cleanup(scope, function()
+		inst.npop = inst.npop - 1
+	end)
+	-- The UI closed it: write false into the state, then tell the widget why.
+	local hid = N.handler(bind_owner(scope, function(reason)
+		if state then
+			state.value = false
+		end
+		if user_close then
+			user_close(reason)
+		end
+	end))
+	node.h_close = hid
+	add_cleanup(scope, function()
+		N.unhandler(hid)
+	end)
+	if user_open then
+		local oid = N.handler(bind_owner(scope, user_open))
+		node.h_open = oid
+		add_cleanup(scope, function()
+			N.unhandler(oid)
+		end)
+	end
+	local pid
+	if #pd.names > 0 then
+		pid = N.popup_register(pd.names)
+		POPUPS[pid] = { node = node, state = state, on_open = user_open }
+		add_cleanup(scope, function()
+			POPUPS[pid] = nil
+			N.popup_unregister(pid)
+		end)
+	end
+	local screen = pd.placement == "screen"
+	local osig = new_signal(false)
+	create_effect(scope, function()
+		local me = cur_observer
+		local v = open_fn()
+		v = v ~= nil and v ~= false
+		if v == node.open then
+			return
+		end
+		if v then
+			local g = 0
+			local srcs = me.sources
+			for i = 1, srcs and #srcs or 0 do
+				local gg = rawget(srcs[i], "gest")
+				if gg and gg ~= 0 then
+					g = gg
+				end
+			end
+			if screen and g == 0 then
+				N.log("warn", "an overlay only opens from a click or a key")
+				if state then
+					state.value = false
+				end
+				if user_close then
+					spawn_user(user_close, "refused")
+				end
+				return
+			end
+			node.oseq = node.oseq + 1
+			node.ogest = g
+		end
+		node.open = v
+		sig_set(osig, v)
+		if pid then
+			N.popup_state(pid, v)
+		end
+		dirty(node)
+	end)
+	create_effect(scope, function()
+		if not osig.value then
+			if next(node.slots) ~= nil then
+				node.slots = {}
+				dirty(node)
+			end
+			return
+		end
+		local cs = new_scope(cur_owner)
+		cs.cscope = cs
+		local slots = {}
+		local pb = cur_observer
+		cur_observer = nil
+		node.slots = slots
+		mount_children(def, node, cs, inst, slots, { scope = cs, inst = inst })
+		cur_observer = pb
+		dirty(node)
+	end)
+end
+
+local function aux_node(node, aux)
+	local list = node.aux
+	if not list then
+		list = {}
+		node.aux = list
+	end
+	list[#list + 1] = aux
+end
+
+local function tip_children(src)
+	return function()
+		local v
+		if src.fn then
+			v = src.fn()
+		else
+			v = src.val
+		end
+		local t = type(v)
+		if t == "string" or t == "number" or t == "userdata" then
+			return { v }
+		end
+		error("a tooltip must be a string or an element, got " .. t, 0)
+	end
+end
+
+local function conv_input_value(v)
+	if type(v) == "string" then
+		return v
+	elseif type(v) == "number" then
+		return tostring(v)
+	elseif v == nil then
+		return ""
+	end
+	return nil, "must be a string, got " .. type(v)
+end
+
+local function conv_slider_value(v)
+	if type(v) == "number" and v == v then
+		return v
+	elseif v == nil then
+		return 0
+	end
+	return nil, "must be a number, got " .. type(v)
+end
+
+-- A value both sides write: `field` holds what the script last set or what the UI last reported, `seqfield`
+-- counts only the script's writes (the UI takes a new value only when the count moved).
+local function setup_value(def, node, scope, field, seqfield, conv)
+	local src = def.value
+	local state = src and src.state
+	local user = def.fns and def.fns.on_change
+	if src then
+		local fn
+		if state then
+			fn = function()
+				return state.value
+			end
+		elseif src.fn then
+			fn = src.fn
+		else
+			local val = src.val
+			fn = function()
+				return val
+			end
+		end
+		create_effect(scope, function()
+			local v, e = conv(fn())
+			if e then
+				error("value " .. e, 0)
+			end
+			local old = node[field]
+			if old == v then
+				return
+			end
+			node[field] = v
+			if old ~= nil then
+				node[seqfield] = node[seqfield] + 1
+			end
+			dirty(node)
+		end)
+	else
+		node[field] = conv(nil)
+	end
+	if state or user then
+		local hid = N.handler(bind_owner(scope, function(v, done)
+			node[field] = v
+			if state then
+				state.value = v
+			end
+			if user then
+				user(v, done)
+			end
+		end))
+		node.h_change = hid
+		add_cleanup(scope, function()
+			N.unhandler(hid)
+		end)
+	end
+end
+
+local function css_time(what, v)
+	if type(v) == "number" then
+		return sformat("%gms", v * 1000)
+	elseif type(v) == "string" then
+		return v
+	end
+	error("animate " .. what .. " must be a duration like 0.3 or \"300ms\"", 0)
+end
+
+local ANIM_KEYS = { "duration", "easing", "delay", "iterations", "direction", "fill" }
+
+-- Turns the table rsb.animate made into the fields the scene reads.
+local function anim_spec(a)
+	if type(a) ~= "table" or type(a.name) ~= "string" or a.name == "" then
+		error("animate must be made by rsb.animate(name, options)", 0)
+	end
+	local spec = { name = a.name }
+	for i = 1, #ANIM_KEYS do
+		local k = ANIM_KEYS[i]
+		local v = a[k]
+		if v ~= nil then
+			if k == "duration" or k == "delay" then
+				spec[k] = css_time(k, v)
+			elseif k == "iterations" then
+				if type(v) == "number" then
+					spec[k] = sformat("%g", v)
+				elseif type(v) == "string" then
+					spec[k] = v
+				else
+					error("animate iterations must be a number or \"infinite\"", 0)
+				end
+			elseif type(v) == "string" then
+				spec[k] = v
+			else
+				error("animate " .. k .. " must be a string", 0)
+			end
+		end
+	end
+	return spec
+end
+
 mount = function(def, parent_scope, inst)
 	local live = def.live
 	if live and not live.scope.disposed then
 		error("an element can only be placed once", 0)
 	end
 	local scope = new_scope(parent_scope)
+	local kind = def.kind
 	local node = {
-		kind = def.kind,
+		kind = kind,
 		scope = scope,
 		inst = inst,
 		key = def.key,
@@ -834,6 +1643,12 @@ mount = function(def, parent_scope, inst)
 		w = def.width,
 		h = def.height,
 		vis = true,
+		rseq = 0,
+		aseq = 0,
+		pop = def.pop,
+		focusable = def.focusable,
+		autofocus = def.autofocus,
+		nav = def.nav,
 	}
 	def.live = node
 	-- Props bind under the names the snapshot reads.
@@ -871,7 +1686,11 @@ mount = function(def, parent_scope, inst)
 	bind_as("text", "text")
 	bind_as("iname", "name")
 	bind_as("iglyph", "glyph")
+	bind_as("isvg", "svg")
 	bind_as("src", "src")
+	bind_as("ph", "placeholder")
+	bind_as("dis", "disabled")
+	bind_as("chk", "checked")
 	local handlers = def.handlers
 	if handlers then
 		for name, fn in pairs(handlers) do
@@ -882,23 +1701,111 @@ mount = function(def, parent_scope, inst)
 			end)
 		end
 	end
+	local rv = def.reveal
+	if rv then
+		local fn = rv.fn or (rv.state and function()
+			return rv.state.value
+		end) or function()
+			return rv.val
+		end
+		create_effect(scope, function()
+			local v = fn()
+			local prev = node.rv
+			node.rv = v
+			if v ~= nil and v ~= false and not rawequal(v, prev) then
+				node.rseq = node.rseq + 1
+				dirty(node)
+			end
+		end)
+	end
+	local an = def.animate
+	if an then
+		local fn = an.fn or (an.state and function()
+			return an.state.value
+		end) or function()
+			return an.val
+		end
+		create_effect(scope, function()
+			local a = fn()
+			if a == nil or a == false then
+				if node.anim then
+					node.anim = nil
+					dirty(node)
+				end
+				return
+			end
+			local spec = anim_spec(a)
+			local restart = a.restart
+			local changed = not shallow_eq(node.anim, spec)
+			if node.anim and not deep_eq(node.arestart, restart) then
+				node.aseq = node.aseq + 1
+				changed = true
+			end
+			node.arestart = restart
+			if changed then
+				node.anim = spec
+				dirty(node)
+			end
+		end)
+	end
+	if kind == "input" then
+		node.pw = def.password
+		node.maxlen = def.max_length
+		node.iseq = 0
+		setup_value(def, node, scope, "ival", "iseq", conv_input_value)
+		local hs = def.fns and def.fns.on_submit
+		if hs then
+			local sid = N.handler(bind_owner(scope, hs))
+			node.h_submit = sid
+			add_cleanup(scope, function()
+				N.unhandler(sid)
+			end)
+		end
+	elseif kind == "slider" then
+		node.smin, node.smax, node.sstep, node.svert = def.min, def.max, def.step, def.vertical
+		node.sjump = def.jump
+		node.sseq = 0
+		setup_value(def, node, scope, "sval", "sseq", conv_slider_value)
+	end
 	local slots = {}
 	node.slots = slots
-	local children = def.children
-	for i = 1, #children do
-		local c = children[i]
-		if c.fn then
-			local slot = { dyn = true, nodes = {} }
-			slots[i] = slot
-			local fn = c.fn
-			create_effect(scope, function()
-				local list = fn()
-				reconcile(slot, list, node)
-				dirty(node)
-			end)
-		else
-			slots[i] = mount(c.def, scope, inst)
-		end
+	if def.open ~= nil and def.pop then
+		setup_popup(def, node, scope, inst)
+	else
+		mount_children(def, node, scope, inst, slots, node)
+	end
+	local tip = def.tip
+	if tip then
+		local tdef = {
+			kind = "tooltip",
+			direction = "row",
+			pop = TOOLTIP_POP,
+			children = { { fn = tip_children(tip) } },
+		}
+		aux_node(node, mount(tdef, scope, inst))
+	end
+	local ctl = def.menu_ctl
+	if ctl then
+		local mdef = {
+			kind = "menu",
+			direction = "column",
+			open = { state = ctl.state },
+			pop = {
+				names = {},
+				group = "menu",
+				placement = "pointer",
+				align = "start",
+				offset = 0,
+				attach = false,
+				focus = "auto",
+				dismiss_outside = true,
+				dismiss_escape = true,
+			},
+			children = { { fn = menu_children_fn(def.menu_src) } },
+		}
+		local mn = mount(mdef, scope, inst)
+		ctl.node = mn
+		aux_node(node, mn)
 	end
 	return node
 end
@@ -1041,6 +1948,7 @@ function task.cancel(t)
 	N.cancel(rawget(t, "id"))
 end
 rsb.task = strict_table("rsb.task.", task, K.names.task)
+spawn_user = task.spawn
 
 local timer = {}
 local function timer_fn(kind)
@@ -1157,6 +2065,32 @@ end
 
 local svc_state = {}
 local services = {}
+
+-- Reading a service subscribes to it. A read made inside a popup's content is remembered on that content's
+-- scope, so closing the popup can let the service go.
+local function note_service(name)
+	local o = cur_owner
+	local cs = o and o.cscope
+	if cs then
+		local sv = cs.svcs
+		if not sv then
+			sv = {}
+			cs.svcs = sv
+		end
+		if not sv[name] then
+			sv[name] = true
+			local n = cs.inst.svc_n
+			n[name] = (n[name] or 0) + 1
+		end
+	elseif o and o.inst then
+		o.inst.svc_perm[name] = true
+	end
+end
+
+local function touch(name)
+	note_service(name)
+	N.touch(name)
+end
 for name, schema in pairs(K.svc) do
 	local st = {
 		raw = {},
@@ -1175,6 +2109,7 @@ for name, schema in pairs(K.svc) do
 	local interval_fn
 	if schema.sampled then
 		interval_fn = function(_, d)
+			note_service(name)
 			N.svc_interval(name, d)
 		end
 	end
@@ -1200,7 +2135,7 @@ for name, schema in pairs(K.svc) do
 			if not known then
 				unknown_name(prefix, k, schema.names, 3)
 			end
-			N.touch(name)
+			touch(name)
 			if k == "status" then
 				return read(st.status)
 			elseif k == "stale" then
@@ -1429,6 +2364,132 @@ rsb.format = strict_table("rsb.format.", {
 	end,
 }, K.names.format)
 
+-- ---------------------------------------------------------------- popups by name, animation, fuzzy search
+
+local POPUP_SIGS = {}
+local popups = {}
+local function popup_name(name, what)
+	if type(name) ~= "string" or name == "" or #name > 64 then
+		error("rsb.popups." .. what .. " needs a popup name", 3)
+	end
+end
+function popups.open(name)
+	popup_name(name, "open")
+	N.popup_cmd("open", name)
+end
+function popups.close(name)
+	popup_name(name, "close")
+	N.popup_cmd("close", name)
+end
+function popups.toggle(name)
+	popup_name(name, "toggle")
+	N.popup_cmd("toggle", name)
+end
+function popups.is_open(name)
+	popup_name(name, "is_open")
+	local o = cur_owner
+	local inst = o and o.inst
+	local key = name .. "@" .. (inst and inst.mon or "0")
+	local s = POPUP_SIGS[key]
+	if not s then
+		s = new_signal(N.popup_is_open(key))
+		POPUP_SIGS[key] = s
+	end
+	track(s)
+	return rawget(s, "v")
+end
+rsb.popups = strict_table("rsb.popups.", popups, K.names.popups)
+
+local ANIM_OPTIONS = { "duration", "easing", "delay", "iterations", "direction", "fill", "restart" }
+local ANIM_SET = {}
+for i = 1, #ANIM_OPTIONS do
+	ANIM_SET[ANIM_OPTIONS[i]] = true
+end
+function rsb.animate(name, options)
+	if type(name) ~= "string" or name == "" then
+		error("rsb.animate needs the name of a @keyframes rule", 2)
+	end
+	if options ~= nil and type(options) ~= "table" then
+		error("rsb.animate options must be a table", 2)
+	end
+	local a = { name = name }
+	if options then
+		for k, v in pairs(options) do
+			if not ANIM_SET[k] then
+				local near = type(k) == "string" and N.suggest(k, ANIM_OPTIONS)
+				error(
+					"unknown animate option '" .. tostring(k) .. "'" .. (near and ("; did you mean '" .. near .. "'?") or ""),
+					2
+				)
+			end
+			a[k] = v
+		end
+	end
+	return a
+end
+
+function rsb.fuzzy(query, items, options)
+	if type(query) ~= "string" then
+		error("rsb.fuzzy needs the query as a string", 2)
+	end
+	if type(items) ~= "table" then
+		error("rsb.fuzzy needs a list", 2)
+	end
+	local keyfn, limit = nil, 0
+	if options ~= nil then
+		if type(options) ~= "table" then
+			error("rsb.fuzzy options must be a table", 2)
+		end
+		keyfn, limit = options.key, options.limit or 0
+		if keyfn ~= nil and type(keyfn) ~= "function" then
+			error("rsb.fuzzy: key must be a function", 2)
+		end
+		if type(limit) ~= "number" or limit < 0 then
+			error("rsb.fuzzy: limit must be a number of results", 2)
+		end
+	end
+	local n = #items
+	local out = {}
+	if not sfind(query, "%S") then
+		-- Nothing to look for: everything matches, in order.
+		local last = n
+		if limit > 0 and limit < n then
+			last = floor(limit)
+		end
+		for i = 1, last do
+			out[i] = items[i]
+		end
+		return out
+	end
+	local texts = {}
+	for i = 1, n do
+		local item = items[i]
+		local text = item
+		if keyfn then
+			text = keyfn(item)
+		end
+		if type(text) ~= "string" then
+			error("rsb.fuzzy: every item (or what key returns) must be a string, got " .. type(text), 2)
+		end
+		texts[i] = text
+	end
+	local ranked = N.fuzzy_rank(query, texts, limit)
+	for i = 1, #ranked do
+		out[i] = items[ranked[i]]
+	end
+	return out
+end
+
+function rsb.fuzzy_match(query, text)
+	if type(query) ~= "string" or type(text) ~= "string" then
+		error("rsb.fuzzy_match needs the query and the text as strings", 2)
+	end
+	if not sfind(query, "%S") then
+		return {}
+	end
+	return N.fuzzy_positions(query, text)
+end
+
 -- ---------------------------------------------------------------- widget
 
 local WIDGETS = setmetatable({}, { __mode = "k" })
@@ -1548,7 +2609,23 @@ end
 
 function E.start(id, h, props, ctx)
 	local spec = WIDGETS[h]
-	local inst = { id = id, queue = {}, pending = false, dirty = false, turn = -1, runs = 0, in_setup = true, ctx = ctx }
+	local inst = {
+		id = id,
+		queue = {},
+		pending = false,
+		dirty = false,
+		turn = -1,
+		runs = 0,
+		in_setup = true,
+		ctx = ctx,
+		stamped = {},
+		svc_n = {},
+		svc_perm = {},
+		npop = 0,
+		warned_names = {},
+		gone = false,
+		mon = sformat("%d", ctx.monitor.handle),
+	}
 	INSTANCES[id] = inst
 	local scope = { state = CLEAN, disposed = false, inst = inst }
 	inst.scope = scope
@@ -1606,6 +2683,11 @@ function E.flush(id, turn)
 			update_if_necessary(node)
 		end
 	end
+	local st = inst.stamped
+	for i = #st, 1, -1 do
+		rawset(st[i], "gest", nil)
+		st[i] = nil
+	end
 	inst.queue = {}
 	inst.pending = false
 end
@@ -1617,7 +2699,57 @@ function E.dispose(id)
 	end
 	INSTANCES[id] = nil
 	inst.root = nil
+	inst.gone = true
 	dispose_scope(inst.scope)
+end
+
+local function popup_apply(p, action, name)
+	local state = p.state
+	if not state then
+		return
+	end
+	local cur = rawget(state, "v") == true
+	local want
+	if action == "open" then
+		want = true
+	elseif action == "close" then
+		want = false
+	else
+		want = not cur
+	end
+	if want ~= cur then
+		state.value = want
+	end
+	if want and p.on_open then
+		spawn_user(p.on_open, name)
+	end
+end
+
+-- `rsb popup <name>` and `rsb.popups.*`, run in the VM of the widget that owns the popup.
+function E.popup_cmd(id, pid, action, name)
+	local inst = INSTANCES[id]
+	local p = POPUPS[pid]
+	if not inst or not p then
+		return
+	end
+	local po, pb, pn = cur_owner, cur_observer, no_yield
+	cur_owner, cur_observer, no_yield = inst.scope, nil, 1
+	local ok, err = pcall(popup_apply, p, action, name)
+	cur_owner, cur_observer, no_yield = po, pb, pn
+	if not ok then
+		if N.is_killed() then
+			error(err, 0)
+		end
+		N.report_error(id, tostring(err))
+	end
+end
+
+-- A named popup opened or closed somewhere: `rsb.popups.is_open` follows it.
+function E.popup_event(key, open)
+	local s = POPUP_SIGS[key]
+	if s then
+		sig_set(s, open)
+	end
 end
 
 function E.update_monitor(id, scale)

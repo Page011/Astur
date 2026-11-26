@@ -7,6 +7,14 @@ export type NetworkKind = "wifi" | "ethernet" | "cellular" | "other" | "none"
 
 export type WorkspaceProvider = "glazewm" | "komorebi" | "none"
 
+export type AudioDeviceKind = "output" | "input"
+
+export type BluetoothKind = "audio" | "input" | "phone" | "computer" | "wearable" | "other"
+
+export type PowerMode = "efficiency" | "balanced" | "performance" | "unknown"
+
+export type WifiAccess = "allowed" | "needs_location"
+
 --- A named icon
 export type IconName = "volume_mute" | "volume_0" | "volume_1" | "volume_2" | "volume_3" | "wifi_0" | "wifi_1" | "wifi_2" | "wifi_3" | "wifi_4" | "wifi_off" | "ethernet" | "network_off" | "battery_0" | "battery_1" | "battery_2" | "battery_3" | "battery_4" | "battery_5" | "battery_6" | "battery_7" | "battery_8" | "battery_9" | "battery_10" | "battery_charging" | "battery_saver" | "battery_none" | "cpu" | "memory" | "clock" | "calendar" | "play" | "pause" | "next" | "previous" | "music" | "window" | "desktop" | "cloud" | "sun" | "moon" | "rain" | "snow" | "settings" | "power" | "search" | "bell" | "globe" | "download" | "upload" | "warning" | "error" | "info"
 
@@ -58,7 +66,7 @@ export type Style = {
     letter_spacing: (number | string)?, -- normal | <length>
     text_align: string?, -- start | center | end | left | right
     text_overflow: string?, -- clip | ellipsis
-    overflow: string?, -- visible | hidden
+    overflow: string?, -- visible | hidden | auto | scroll (1-2 values: x, y)
     box_shadow: (number | string)?, -- none | [<length>{2,4} <color>]#
     display: string?, -- flex | none
     visibility: string?, -- visible | hidden
@@ -67,7 +75,29 @@ export type Style = {
     transition_duration: string?, -- <time>#
     transition_delay: string?, -- <time>#
     transition_timing_function: string?, -- <easing>#
-    cursor: string?, -- default | pointer
+    cursor: string?, -- default | pointer | text
+    corner_shape: string?, -- [round | bevel]{1,4}
+    clip_path: (number | string)?, -- none | polygon([nonzero | evenodd,] <coord> <coord>#), coord = <length-percentage> | calc(<percentage> +/- <length>)
+    transform: string?, -- none | [translate(<lp>[, <lp>]) | translateX(<lp>) | translateY(<lp>) | scale(<n>[, <n>]) | scaleX(<n>) | scaleY(<n>)]+
+    transform_origin: string?, -- <lp> [<lp>] | left | center | right | top | bottom
+    animation: string?, -- <name> <time> [<easing>] [<time>] [<count> | infinite] [<direction>] [<fill>] [<play>], ...
+    animation_name: string?, -- none | <ident>#
+    animation_duration: string?, -- <time>#
+    animation_timing_function: string?, -- <easing>#
+    animation_delay: string?, -- <time>#
+    animation_iteration_count: (number | string)?, -- [<number> | infinite]#
+    animation_direction: string?, -- [normal | reverse | alternate | alternate-reverse]#
+    animation_fill_mode: string?, -- [none | forwards | backwards | both]#
+    animation_play_state: string?, -- [running | paused]#
+    overflow_x: string?, -- visible | hidden | auto | scroll
+    overflow_y: string?, -- visible | hidden | auto | scroll
+    scrollbar_width: string?, -- auto | thin | none
+    scrollbar_color: string?, -- auto | <color> <color>
+    caret_color: string?, -- auto | <color>
+    accent_color: string?, -- auto | <color>
+    outline: (number | string)?, -- <length> || solid | none || <color>
+    outline_offset: (number | string)?, -- <length>
+    pointer_events: string?, -- auto | none
     backdrop: string?, -- none | acrylic | mica
 }
 
@@ -89,8 +119,8 @@ export type PollSignal<T> = { value: T?, error: string?, peek: (self: any) -> T?
 --- A child: an element, text, nothing, or a function returning a list (re-run on change)
 export type Child = Element | string | number | nil | () -> { Element }
 
---- Something to draw; made by rsb.box, rsb.row, rsb.column, rsb.text, rsb.icon, rsb.image (opaque: tables you build yourself are refused)
-export type Element = { kind: "box" | "text" | "icon" | "image" }
+--- Something to draw; made by rsb.box, rsb.row, rsb.column, rsb.text, rsb.icon, rsb.image, rsb.popup, rsb.menu, rsb.input, rsb.slider, rsb.scroll (opaque: tables you build yourself are refused)
+export type Element = { kind: "box" | "text" | "icon" | "image" | "popup" | "menu" | "input" | "slider" | "scroll" }
 
 --- x and y are logical px inside the element
 export type ClickEvent = { button: "left" | "right" | "middle", x: number, y: number }
@@ -99,19 +129,19 @@ export type ClickEvent = { button: "left" | "right" | "middle", x: number, y: nu
 export type WheelEvent = { delta: number, x: number, y: number }
 
 --- Props every element takes
-export type Props = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())? }
+export type Props = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>? }
 
 --- Children go in the array part
-export type BoxProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, [number]: Child }
+export type BoxProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>?, [number]: Child }
 
 --- One line of text
-export type TextProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, text: Reactive<string | number>? }
+export type TextProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>?, text: Reactive<string | number>? }
 
---- A named icon, or any glyph text in the icon font
-export type IconProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, name: Reactive<IconName>?, glyph: Reactive<string>? }
+--- A named icon, any glyph text in the icon font, or an SVG icon (a bundled name or a path to an .svg file)
+export type IconProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>?, name: Reactive<IconName>?, glyph: Reactive<string>?, svg: Reactive<string>? }
 
---- A PNG, path relative to the widget's folder
-export type ImageProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, src: Reactive<string>, width: number?, height: number? }
+--- A PNG or SVG, path relative to the widget's folder; or an image key a service value gives (needs that service's read permission)
+export type ImageProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>?, src: Reactive<string>, width: number?, height: number? }
 
 --- The monitor a widget instance is on
 export type MonitorInfo = { index: number, handle: number, device: string, primary: boolean, scale: number }
@@ -119,8 +149,8 @@ export type MonitorInfo = { index: number, handle: number, device: string, prima
 --- About this instance: ref text ("clock#utc"), widget name, bar name, monitor (scale updates in place), folder of the widget file relative to the config folder
 export type Context = { id: string, name: string, bar: string, monitor: MonitorInfo, dir: string }
 
---- What the widget may do besides drawing and reading services (read: private service values; user widgets get these without asking)
-export type Permissions = { exec: { string }?, file: { string }?, net: { string }?, control: { "audio" | "media" | "workspaces" }?, read: { "window" | "media" | "network" }? }
+--- What the widget may do besides drawing and reading services (read: private service values; user widgets get window, media and network without asking; session: restart, shut down, sign out; overlay: a popup that covers the monitor; popups: open or close another widget's popup by name)
+export type Permissions = { exec: { string }?, file: { string }?, net: { string }?, control: { "audio" | "media" | "workspaces" | "microphone" | "bluetooth" | "apps" | "power" | "wifi" | "session" }?, read: { "window" | "media" | "network" | "bluetooth" | "apps" | "wifi" }?, overlay: boolean?, popups: { string }? }
 
 --- A widget: option defaults (bar.toml overrides them), permissions, and setup returning its element; optional lists options that have no default (a table cannot hold nil), so bar.toml may still set them
 export type WidgetSpec<O> = { name: string?, options: O?, optional: { string }?, permissions: Permissions?, setup: (props: O, ctx: Context) -> Element? }
@@ -158,6 +188,36 @@ export type HttpOptions = { headers: { [string]: string }?, timeout: Duration?, 
 --- ok = status 200-299; on a network failure status is 0 and error says why
 export type Response = { ok: boolean, status: number, body: string, headers: { [string]: string }, from_cache: boolean, error: string?, json: (self: any) -> any }
 
+--- A popup anchored to the element it is a child of. open given a State is two-way: the UI writes false when it closes the popup. Children are built only while it is open
+export type PopupProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, open: State<boolean> | Reactive<boolean>, name: (string | { string })?, group: string?, placement: ("auto" | "below" | "above" | "left" | "right" | "screen")?, align: ("start" | "center" | "end")?, offset: number?, attach: boolean?, focus: ("auto" | "none" | "always")?, dismiss: { outside: boolean?, escape: boolean? }?, on_close: ((reason: CloseReason) -> ())?, on_open: ((name: string) -> ())?, on_key: ((KeyEvent) -> ())?, [number]: Child }
+
+--- Why a popup closed
+export type CloseReason = "outside" | "escape" | "deactivated" | "anchor_gone" | "bar_hidden" | "display_change" | "replaced" | "picked" | "command" | "refused"
+
+--- One menu entry; items makes a submenu (at most 256 entries and 4 levels per menu)
+export type MenuItem = { label: string?, icon: IconName?, svg: string?, shortcut: string?, checked: boolean?, disabled: boolean?, separator: boolean?, on_click: (() -> ())?, items: { MenuItem }? }
+
+--- A menu; as a child it is anchored to its parent, like a popup
+export type MenuProps = { id: string?, class: Reactive<string | { string }>?, key: string?, open: State<boolean> | Reactive<boolean>, items: Reactive<{ MenuItem }>, name: (string | { string })?, placement: ("auto" | "below" | "above" | "left" | "right")?, on_close: ((reason: CloseReason) -> ())? }
+
+--- One line of editable text; value given a State is two-way
+export type InputProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>?, value: State<string> | Reactive<string>?, placeholder: Reactive<string>?, password: boolean?, max_length: number?, on_change: ((text: string) -> ())?, on_submit: ((text: string) -> ())? }
+
+--- A value on a track; value given a State is two-way; done is true on the last report of a drag
+export type SliderProps = { id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: ("vertical" | "horizontal" | "grid")?, reveal: Reactive<any>?, animate: Reactive<Animate?>?, value: State<number> | Reactive<number>, min: number?, max: number?, step: number?, vertical: boolean?, jump: boolean?, on_change: ((value: number, done: boolean) -> ())? }
+
+--- A key press: key follows the web's KeyboardEvent.key ("Enter", "Escape", "ArrowDown", "a"); repeat is a Luau keyword, so read it as e["repeat"]
+export type KeyEvent = { key: string, ctrl: boolean, shift: boolean, alt: boolean, ["repeat"]: boolean }
+
+--- The new scroll offset in logical px
+export type ScrollEvent = { x: number, y: number }
+
+--- An animate prop value: run @keyframes name (made by rsb.animate)
+export type Animate = { name: string }
+
+--- restart: the animation starts again from the start whenever this value changes
+export type AnimateOptions = { duration: Duration?, easing: string?, delay: Duration?, iterations: number?, direction: string?, fill: string?, restart: any? }
+
 --- Default 1 MiB, max 8 MiB
 export type FileOptions = { max_bytes: number? }
 
@@ -192,6 +252,64 @@ export type Workspace = {
     has_windows: boolean,
     --- number of windows
     window_count: number,
+}
+
+--- An audio output or input device
+export type AudioDevice = {
+    --- Windows' endpoint id; pass it to set_default and the other device commands
+    id: string,
+    --- the name Windows shows (never logged)
+    name: string,
+    --- "output" or "input"
+    kind: AudioDeviceKind,
+    --- the default device of its kind
+    default: boolean,
+    --- 0-100
+    volume: number,
+    --- muted
+    muted: boolean,
+    --- a Bluetooth device
+    bluetooth: boolean,
+}
+
+--- A paired Bluetooth device
+export type BluetoothDevice = {
+    --- device id; pass it to connect, disconnect and forget
+    id: string,
+    --- the device's name (never logged)
+    name: string,
+    --- what sort of device it is
+    kind: BluetoothKind,
+    --- connected now
+    connected: boolean,
+    --- battery 0-100 when the device reports it
+    battery: number?,
+    --- RSB can connect and disconnect it (audio devices)
+    can_connect: boolean,
+}
+
+--- An app from the Start menu
+export type App = {
+    --- launch id; pass it to launch
+    id: string,
+    --- the name the Start menu shows
+    name: string,
+    --- image key for rsb.image { src = app.icon }, once the icon is ready
+    icon: string?,
+}
+
+--- A Wi-Fi network in range
+export type WifiNetwork = {
+    --- network name; nil when Windows withholds it (location permission) (never logged)
+    ssid: string?,
+    --- signal 0-100
+    signal: number,
+    --- needs a password
+    secure: boolean,
+    --- connected now
+    connected: boolean,
+    --- Windows has a saved profile for it
+    known: boolean,
 }
 
 --- CPU and memory load, sampled while someone reads it (default every 2 s)
@@ -247,6 +365,12 @@ export type AudioService = {
     volume: number?,
     --- muted
     muted: boolean?,
+    --- output devices, the default first
+    devices: {AudioDevice}?,
+    --- input (recording) devices, the default first
+    inputs: {AudioDevice}?,
+    --- set_default works here (it uses an interface Windows does not document)
+    switch_available: boolean?,
     --- "off", "starting", "ok", "stale", "unavailable" or "error"
     status: ServiceStatus,
     --- true when status is "stale": show a placeholder, not the old value
@@ -261,6 +385,12 @@ export type AudioService = {
     set_muted: (self: AudioService, muted: boolean) -> (),
     --- flip mute
     toggle_mute: (self: AudioService) -> (),
+    --- make this output the default
+    set_default: (self: AudioService, id: string) -> (),
+    --- set one device's volume, 0-100
+    set_device_volume: (self: AudioService, id: string, percent: number) -> (),
+    --- mute or unmute one device
+    set_device_muted: (self: AudioService, id: string, muted: boolean) -> (),
 }
 
 --- Connection state and throughput (rates sampled while read, default every 2 s)
@@ -311,6 +441,18 @@ export type MediaService = {
     can_next: boolean?,
     --- previous is allowed
     can_previous: boolean?,
+    --- seconds into the track when position_at was read
+    position: number?,
+    --- when position was read, ms since 1970 (add the time since while playing)
+    position_at: number?,
+    --- track length in seconds
+    length: number?,
+    --- seek is allowed
+    can_seek: boolean?,
+    --- image key of the cover for rsb.image { src = media.art } (kept in memory only)
+    art: string?,
+    --- image key of the player app's own icon, when Windows has one for it
+    app_icon: string?,
     --- "off", "starting", "ok", "stale", "unavailable" or "error"
     status: ServiceStatus,
     --- true when status is "stale": show a placeholder, not the old value
@@ -327,6 +469,8 @@ export type MediaService = {
     next: (self: MediaService) -> (),
     --- previous track
     previous: (self: MediaService) -> (),
+    --- jump to this position in the track
+    seek: (self: MediaService, seconds: number) -> (),
 }
 
 --- The foreground window
@@ -369,6 +513,133 @@ export type WorkspacesService = {
     focus_previous: (self: WorkspacesService, monitor: number?) -> (),
 }
 
+--- The default recording device, and whether any app is using a microphone
+--- The values are nil until the first reading arrives (status "starting"): check before using one.
+export type MicrophoneService = {
+    --- a recording device exists
+    available: boolean?,
+    --- the default recording device is muted
+    muted: boolean?,
+    --- its level, 0-100
+    volume: number?,
+    --- an app is recording from a microphone now
+    in_use: boolean?,
+    --- "off", "starting", "ok", "stale", "unavailable" or "error"
+    status: ServiceStatus,
+    --- true when status is "stale": show a placeholder, not the old value
+    stale: boolean,
+    --- why the service is unavailable or failing
+    error: string?,
+    --- mute or unmute the default recording device
+    set_muted: (self: MicrophoneService, muted: boolean) -> (),
+    --- flip its mute
+    toggle_mute: (self: MicrophoneService) -> (),
+}
+
+--- The Bluetooth radio and paired devices
+--- The values are nil until the first reading arrives (status "starting"): check before using one.
+export type BluetoothService = {
+    --- this PC has a Bluetooth radio
+    available: boolean?,
+    --- the radio is on
+    enabled: boolean?,
+    --- RSB may turn the radio on and off
+    can_toggle: boolean?,
+    --- paired devices, connected first
+    devices: {BluetoothDevice}?,
+    --- "off", "starting", "ok", "stale", "unavailable" or "error"
+    status: ServiceStatus,
+    --- true when status is "stale": show a placeholder, not the old value
+    stale: boolean,
+    --- why the service is unavailable or failing
+    error: string?,
+    --- turn the radio on or off
+    set_enabled: (self: BluetoothService, on: boolean) -> (),
+    --- connect a paired audio device
+    connect: (self: BluetoothService, id: string) -> (),
+    --- disconnect a paired audio device
+    disconnect: (self: BluetoothService, id: string) -> (),
+    --- remove a pairing
+    forget: (self: BluetoothService, id: string) -> (),
+    --- open Windows' Bluetooth page to pair a new device
+    open_settings: (self: BluetoothService) -> (),
+    --- read the paired devices and their state again
+    rescan: (self: BluetoothService) -> (),
+}
+
+--- Apps in the Start menu, for a launcher
+--- The values are nil until the first reading arrives (status "starting"): check before using one.
+export type AppsService = {
+    --- the list has been read
+    ready: boolean?,
+    --- every app, sorted by name
+    apps: {App}?,
+    --- "off", "starting", "ok", "stale", "unavailable" or "error"
+    status: ServiceStatus,
+    --- true when status is "stale": show a placeholder, not the old value
+    stale: boolean,
+    --- why the service is unavailable or failing
+    error: string?,
+    --- start an app
+    launch: (self: AppsService, id: string) -> (),
+    --- open a Windows page: ms-settings: or ms-screenclip: only
+    open_uri: (self: AppsService, uri: string) -> (),
+}
+
+--- Power mode and the lock, sleep, restart, shut down and sign out actions
+--- The values are nil until the first reading arrives (status "starting"): check before using one.
+export type PowerService = {
+    --- "efficiency", "balanced", "performance" or "unknown"
+    mode: PowerMode?,
+    --- set_mode works here (it uses an interface Windows does not document)
+    mode_available: boolean?,
+    --- this PC can sleep
+    can_sleep: boolean?,
+    --- "off", "starting", "ok", "stale", "unavailable" or "error"
+    status: ServiceStatus,
+    --- true when status is "stale": show a placeholder, not the old value
+    stale: boolean,
+    --- why the service is unavailable or failing
+    error: string?,
+    --- change the power mode
+    set_mode: (self: PowerService, mode: PowerMode) -> (),
+    --- lock the PC (Windows' lock screen)
+    lock: (self: PowerService) -> (),
+    --- sleep
+    sleep: (self: PowerService) -> (),
+    --- restart
+    restart: (self: PowerService) -> (),
+    --- shut down
+    shut_down: (self: PowerService) -> (),
+    --- sign out
+    sign_out: (self: PowerService) -> (),
+}
+
+--- Wi-Fi networks in range
+--- The values are nil until the first reading arrives (status "starting"): check before using one.
+export type WifiService = {
+    --- this PC has a Wi-Fi adapter
+    available: boolean?,
+    --- a scan is running
+    scanning: boolean?,
+    --- networks in range, strongest first
+    networks: {WifiNetwork}?,
+    --- "needs_location": Windows shares network lists with desktop apps only when location is on for them
+    access: WifiAccess?,
+    --- "off", "starting", "ok", "stale", "unavailable" or "error"
+    status: ServiceStatus,
+    --- true when status is "stale": show a placeholder, not the old value
+    stale: boolean,
+    --- why the service is unavailable or failing
+    error: string?,
+    --- look for networks again
+    scan: (self: WifiService) -> (),
+    --- connect to a network Windows has a saved profile for
+    connect: (self: WifiService, ssid: string) -> (),
+    --- disconnect from the current network
+    disconnect: (self: WifiService) -> (),
+}
+
 export type Rsb = {
     --- API version, 1.
     version: number,
@@ -388,6 +659,32 @@ export type Rsb = {
     image: (props: ImageProps) -> Element,
     --- Children from a list; with key, unchanged items keep their state.
     each: <T>(list: Reactive<{ T }>, render: (item: T, index: number) -> Element, key: ((item: T) -> string)?) -> () -> { Element },
+    --- A popup anchored to the element it is a child of; its content is built only while it is open.
+    popup: (props: PopupProps) -> Element,
+    --- A menu (as a child: anchored; the menu prop of any element opens one at a right click).
+    menu: (props: MenuProps) -> Element,
+    --- One line of editable text.
+    input: (props: InputProps) -> Element,
+    --- A value on a track.
+    slider: (props: SliderProps) -> Element,
+    --- A column that scrolls.
+    scroll: (props: BoxProps) -> Element,
+    popups: {
+        --- Opens the named popup on this widget's monitor (from a user widget only inside a click or key handler, unless it is the widget's own popup).
+        open: (name: string) -> (),
+        --- Closes the named popup on this widget's monitor.
+        close: (name: string) -> (),
+        --- Opens the named popup, or closes it when it is open.
+        toggle: (name: string) -> (),
+        --- Whether the named popup is open on this widget's monitor; read inside a function prop it updates.
+        is_open: (name: string) -> boolean,
+    },
+    --- An animate prop value: runs @keyframes name, again from the start when options.restart changes.
+    animate: (name: string, options: AnimateOptions?) -> Animate,
+    --- The items that match query, best first, typo tolerant.
+    fuzzy: <T>(query: string, items: { T }, options: { key: ((T) -> string)?, limit: number? }?) -> { T },
+    --- The 1-based character positions of text that matched query, for highlighting; nil when it does not match.
+    fuzzy_match: (query: string, text: string) -> { number }?,
     --- A value you can set; readers update when it changes.
     state: <T>(initial: T) -> State<T>,
     --- A value derived from others; recomputed when they change.
@@ -441,6 +738,16 @@ export type Rsb = {
         window: WindowService,
         --- Window manager workspaces.
         workspaces: WorkspacesService,
+        --- Default recording device.
+        microphone: MicrophoneService,
+        --- Bluetooth radio and paired devices.
+        bluetooth: BluetoothService,
+        --- Start menu apps.
+        apps: AppsService,
+        --- Power mode, lock and the session actions.
+        power: PowerService,
+        --- Wi-Fi networks in range.
+        wifi: WifiService,
     },
     exec: {
         --- Runs a program (argument list, no shell) and waits for it. Waits for a result: call it inside a task.
@@ -470,7 +777,7 @@ export type Rsb = {
         --- A value to JSON text (tables that contain themselves or nest over 64 levels are refused).
         encode: (value: any) -> string,
     },
-    --- Opens an https URL in the default browser: only while a click is being handled, at most one address every 2 seconds (needs net permission for its host).
+    --- Opens an https URL in the default browser: only inside a click or key handler, at most one address every 2 seconds (needs net permission for its host).
     open_url: (url: string) -> (),
     events: {
         --- Runs fn (as a task, on the next turn) for `rsb trigger <name> [json]` and rsb.events.emit; data comes from outside the widget, check it.

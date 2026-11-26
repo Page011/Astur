@@ -24,12 +24,12 @@ fn no_file_is_the_default_config() {
     assert_eq!(l.config.unwrap(), default_config());
     let c = default_config();
     let b = &c.bars[0];
-    assert_eq!((b.name.as_str(), b.height, b.floating, b.margin, b.radius, b.reserve), ("main", 32, false, 8, 0, true));
+    assert_eq!((b.name.as_str(), b.height, b.floating, b.margin, b.radius, b.reserve), ("main", 36, false, 8, 0, true));
     assert_eq!(b.monitors, vec![MonitorSelector::All]);
     assert_eq!((b.position, b.fullscreen), (Position::Top, FullscreenMode::Below));
-    assert_eq!(items(&b.left), ["workspaces", "title"]);
-    assert_eq!(items(&b.center), ["clock"]);
-    assert_eq!(items(&b.right), ["media", "network", "volume", "battery", "cpu", "memory", "date"]);
+    assert_eq!(items(&b.left), ["workspaces", "media"]);
+    assert_eq!(items(&b.center), ["memory", "cpu", "dashboard", "clock", "date"]);
+    assert_eq!(items(&b.right), ["status", "battery", "tray", "record", "power"]);
 }
 
 #[test]
@@ -135,7 +135,7 @@ fn user_bar_n_starts_from_preset_bar_n() {
     assert_eq!((c.bars[2].position, c.bars[2].height, c.bars[2].name.as_str()), (Position::Bottom, 20, "bar3"));
     assert_eq!(items(&c.bars[2].left), ["title"]);
     // Keys neither sets take the built-in defaults: the preset's bar 2 has no center list.
-    assert_eq!(items(&c.bars[1].center), ["clock"]);
+    assert_eq!(items(&c.bars[1].center), ["memory", "cpu", "dashboard", "clock", "date"]);
 }
 
 #[test]
@@ -190,7 +190,7 @@ fn empty_bar_list_means_no_bars() {
 fn unknown_keys_get_a_line_and_a_hint() {
     let l = load("[[bar]]\nheigth = 40\n");
     assert_eq!(msgs(&l), ["warning: bar.toml:2:1: unknown key 'heigth' in [[bar]]; did you mean 'height'?"]);
-    assert_eq!(l.config.unwrap().bars[0].height, 32, "the key falls back to its default");
+    assert_eq!(l.config.unwrap().bars[0].height, 36, "the key falls back to its default");
     let l = load("presett = \"glass\"\n");
     assert!(msgs(&l)[0].starts_with("warning: bar.toml:1:1: unknown key 'presett'"), "{:?}", msgs(&l));
     let l = load("[[bar]]\nzzzzzzzz = 1\n");
@@ -211,7 +211,7 @@ fn wrong_types_and_ranges_are_warnings_with_a_line() {
     assert!(m[5].contains("'fullscreen' must be a string, got an integer"), "{}", m[5]);
     assert!(l.diagnostics.iter().all(|d| d.severity == Severity::Warning));
     let b = &l.config.unwrap().bars[0];
-    assert_eq!((b.height, b.margin, b.floating), (32, 8, false));
+    assert_eq!((b.height, b.margin, b.floating), (36, 8, false));
     let l = load("[[bar]]\nheight = 8\n");
     assert_eq!(msgs(&l), ["warning: bar.toml:2:10: 'height' must be 16 to 128"]);
 }

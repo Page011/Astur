@@ -78,6 +78,71 @@ pub const ICON_NAMES: &[&str] = &[
     "info",
 ];
 
+/// Names of the bundled SVG icons (`assets/icons/<name>.svg`), the values
+/// `IconRef::Svg` and the `svg` prop take besides a file path. `logo` is the
+/// bar's own mark.
+pub const SVG_ICON_NAMES: &[&str] = &[
+    "logo",
+    "power",
+    "restart",
+    "sleep",
+    "lock",
+    "sign-out",
+    "bolt",
+    "leaf",
+    "balance",
+    "rocket",
+    "bluetooth",
+    "bluetooth-off",
+    "bluetooth-connected",
+    "speaker",
+    "volume",
+    "volume-low",
+    "volume-mute",
+    "headphones",
+    "mic",
+    "mic-off",
+    "apps",
+    "search",
+    "refresh",
+    "trash",
+    "shield",
+    "check",
+    "close",
+    "video",
+    "record",
+    "battery-0",
+    "battery-1",
+    "battery-2",
+    "battery-3",
+    "battery-4",
+    "battery-charging",
+    "plug",
+    "memory",
+    "cpu",
+    "wifi-0",
+    "wifi-1",
+    "wifi-2",
+    "wifi-3",
+    "wifi-off",
+    "ethernet",
+    "play",
+    "pause",
+    "next",
+    "previous",
+    "chevron-left",
+    "chevron-right",
+    "chevron-up",
+    "chevron-down",
+    "calendar",
+    "music",
+];
+
+/// True for a name in `SVG_ICON_NAMES`.
+pub fn is_svg_icon_name(name: &str) -> bool {
+    SVG_ICON_NAMES.contains(&name)
+}
+
 /// Name and code point of every icon. Each code point is in the cmap of both
 /// Segoe Fluent Icons and Segoe MDL2 Assets (checked against the installed
 /// fonts) and was looked at drawn in both. The wifi levels have four distinct
@@ -156,5 +221,15 @@ mod tests {
             assert!((0xE000..=0xF8FF).contains(&(c as u32)), "{name} is in the private use area");
         }
         assert_eq!(icon_char("nope"), None);
+    }
+
+    #[test]
+    fn svg_names_are_unique_and_file_safe() {
+        assert_eq!(SVG_ICON_NAMES.len(), 54);
+        for (i, name) in SVG_ICON_NAMES.iter().enumerate() {
+            assert!(name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'), "{name}");
+            assert!(!SVG_ICON_NAMES[..i].contains(name), "{name} twice");
+        }
+        assert!(is_svg_icon_name("sign-out") && !is_svg_icon_name("nope"));
     }
 }

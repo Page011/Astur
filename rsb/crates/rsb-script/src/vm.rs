@@ -11,6 +11,8 @@ use mlua::{Function, Lua, LuaOptions, StdLib, Table, VmState};
 use rsb_core::css::PROPERTIES;
 use rsb_core::services::{COMMON_FIELDS, SERVICE_SCHEMAS};
 
+use rsb_core::popup::BUILTIN_POPUP_NAMES;
+
 use crate::api::{API_ITEMS, HINTS, RESERVED, RESERVED_PROPS};
 use crate::shared::Shared;
 use crate::{Limits, natives};
@@ -29,10 +31,15 @@ pub(crate) struct Entry {
     pub set_theme: Function,
     pub reset: Function,
     pub update_monitor: Function,
+    pub popup_cmd: Function,
+    pub popup_event: Function,
 }
 
 pub(crate) struct Vm {
     pub lua: Lua,
+    /// The native table the prelude holds; the runtime sets `g` on it while a
+    /// user input is being handled.
+    pub n: Table,
     pub entry: Entry,
     pub limit: usize,
     pub soft: usize,
@@ -71,6 +78,7 @@ fn build_constants(lua: &Lua, limits: &Limits, dark: bool) -> mlua::Result<Table
     k.set("style_names", string_set(lua, underscored.iter().map(String::as_str))?)?;
     k.set("reserved", string_set(lua, RESERVED.iter().copied())?)?;
     k.set("reserved_props", string_set(lua, RESERVED_PROPS.iter().copied())?)?;
+    k.set("builtin_popups", string_set(lua, BUILTIN_POPUP_NAMES.iter().copied())?)?;
     let hints = lua.create_table()?;
     for (name, to) in HINTS {
         hints.set(*name, *to)?;
@@ -89,13 +97,47 @@ fn build_constants(lua: &Lua, limits: &Limits, dark: bool) -> mlua::Result<Table
         "on_wheel",
         "on_enter",
         "on_leave",
+        "on_key",
+        "on_scroll",
+        "on_focus",
+        "on_blur",
+        "tooltip",
+        "menu",
+        "focusable",
+        "autofocus",
+        "disabled",
+        "checked",
+        "nav",
+        "reveal",
+        "animate",
     ];
     let lists = lua.create_table()?;
     for (kind, extra) in [
         ("box", &[][..]),
         ("text", &["text"][..]),
-        ("icon", &["name", "glyph"][..]),
+        ("icon", &["name", "glyph", "svg"][..]),
         ("image", &["src", "width", "height"][..]),
+        (
+            "popup",
+            &[
+                "open",
+                "name",
+                "group",
+                "placement",
+                "align",
+                "offset",
+                "attach",
+                "focus",
+                "dismiss",
+                "on_close",
+                "on_open",
+            ][..],
+        ),
+        ("menu", &["open", "items", "name", "placement", "on_close"][..]),
+        ("menuitem", &["text", "name", "svg"][..]),
+        ("input", &["value", "placeholder", "password", "max_length", "on_change", "on_submit"][..]),
+        ("slider", &["value", "min", "max", "step", "vertical", "jump", "on_change"][..]),
+        ("scroll", &[][..]),
     ] {
         lists.set(kind, string_list(lua, base.iter().chain(extra.iter()).map(|s| s.to_string()))?)?;
     }
@@ -154,7 +196,7 @@ pub(crate) fn create(sh: &Rc<Shared>, prelude: &[u8], limit: usize, dark: bool, 
     let n = natives::install(&lua, sh, &load_cell)?;
     let k = build_constants(&lua, &sh.env.limits, dark)?;
     let f = lua.load(prelude).set_name("=rsb").into_function()?;
-    let (e, _rsb): (Table, Table) = f.call((n, k))?;
+    let (e, _rsb): (Table, Table) = f.call((n.clone(), k))?;
     let entry = Entry {
         load: entry_fn(&e, "load")?,
         widget_spec: entry_fn(&e, "widget_spec")?,
@@ -166,6 +208,8 @@ pub(crate) fn create(sh: &Rc<Shared>, prelude: &[u8], limit: usize, dark: bool, 
         set_theme: entry_fn(&e, "set_theme")?,
         reset: entry_fn(&e, "reset")?,
         update_monitor: entry_fn(&e, "update_monitor")?,
+        popup_cmd: entry_fn(&e, "popup_cmd")?,
+        popup_event: entry_fn(&e, "popup_event")?,
     };
     *load_cell.borrow_mut() = Some(entry.load.clone());
     if stall {
@@ -192,5 +236,5 @@ pub(crate) fn create(sh: &Rc<Shared>, prelude: &[u8], limit: usize, dark: bool, 
     // still gets stopped: the interrupt compares against this.
     let soft = limit - limit / 32;
     lua.set_memory_limit(limit)?;
-    Ok(Vm { lua, entry, limit, soft })
+    Ok(Vm { lua, n, entry, limit, soft })
 }

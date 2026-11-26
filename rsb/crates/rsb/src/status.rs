@@ -67,6 +67,9 @@ fn widget_json(w: &WidgetStatus) -> Value {
     if let Some(r) = reason {
         v["reason"] = json!(r);
     }
+    if w.replaces_builtin {
+        v["replaces_builtin"] = json!(true);
+    }
     v
 }
 
@@ -231,6 +234,13 @@ pub fn table(reply: &str) -> String {
                 }
             }
             for w in widgets {
+                if w["replaces_builtin"].as_bool() == Some(true) {
+                    out.push_str(&format!(
+                        "  {}: {} replaces the built-in widget of that name\n",
+                        text_of(&w["widget"]),
+                        text_of(&w["source"])
+                    ));
+                }
                 if let Some(reason) = w["reason"].as_str() {
                     out.push_str(&format!("  {}: {reason}\n", text_of(&w["widget"])));
                 }
@@ -302,6 +312,7 @@ mod tests {
             vm_bytes: 610 * 1024,
             shared_vm: true,
             source: WidgetSource::Builtin,
+            replaces_builtin: false,
             errors: 0,
             restarts: 0,
         }
@@ -418,6 +429,17 @@ mod tests {
         assert!(t.contains("shared = one script VM for 2 copies of widgets/notes.luau: 300 KB in all"), "{t}");
         let one = build(1, None, Some(&[copy("left", false)]), None, (1.0, 2.0));
         assert!(table(&one.to_string()).contains("300 KB"));
+
+        // A user file that stands in for a built-in widget is listed as such, in the table and in the JSON.
+        let mut mine = copy("left", false);
+        mine.widget = "power".into();
+        mine.source = WidgetSource::User("widgets/power.luau".into());
+        mine.replaces_builtin = true;
+        let replaced = build(1, None, Some(&[mine]), None, (1.0, 2.0));
+        assert_eq!(replaced["widgets"][0]["replaces_builtin"], true, "{replaced}");
+        let t = table(&replaced.to_string());
+        assert!(t.contains("power: widgets/power.luau replaces the built-in widget of that name"), "{t}");
+        assert!(widget_json(&widget(WidgetState::Running)).get("replaces_builtin").is_none());
 
         let silent = table(&build(1, None, None, None, (0.0, 0.0)).to_string());
         assert_eq!(silent.matches("did not answer").count(), 3, "{silent}");

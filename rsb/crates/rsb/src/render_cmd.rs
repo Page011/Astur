@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use rsb_core::config::{BUILTIN_PRESETS, default_config, load_config};
 use rsb_core::css::MediaEnv;
 use rsb_core::diag::{DiagKind, Diagnostic, Plate};
-use rsb_core::element::{Element, ElementKind, InstanceId, WidgetTree};
+use rsb_core::element::{InstanceId, WidgetTree};
 use rsb_core::geom::RectPx;
 use rsb_core::msg::{ScriptIn, ScriptOut, ScriptSink};
 use rsb_core::scene::{BarGeometry, Scene, SceneEnv};
@@ -21,10 +21,34 @@ use rsb_services::fake::FakeWorld;
 use rsb_win::MonitorInfo;
 
 use crate::args::RenderOpts;
+use crate::fonts::{self, FontRegistry};
+use crate::gate::{self, Gate};
+use crate::icons::BundledIcons;
+use crate::images::Kind;
 use crate::plan::{BarPlan, InstanceTable, build_instances};
+use crate::stats::Stats;
 use crate::{assets, cfgload, engine, images, logger, paths};
 
 struct ChannelSink(Sender<ScriptOut>);
+
+/// Real monotonic time with the wall clock held at one moment (`--now`), so
+/// every run draws the same clock and date.
+struct FixedWall(rsb_core::time::LocalTime);
+
+impl rsb_core::time::Clock for FixedWall {
+    fn mono(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn now(&self, zone: rsb_core::time::TimeZone) -> rsb_core::time::LocalTime {
+        use rsb_core::time::{LocalTime, TimeZone};
+        match zone {
+            TimeZone::Local => self.0,
+            TimeZone::Utc => LocalTime::from_epoch_ms(self.0.to_epoch_ms(), 0),
+            TimeZone::Offset(m) => LocalTime::from_epoch_ms(self.0.to_epoch_ms(), m),
+        }
+    }
+}
 
 impl ScriptSink for ChannelSink {
     fn send(&self, out: ScriptOut) {
@@ -37,17 +61,6 @@ struct Collected {
     trees: HashMap<InstanceId, Arc<WidgetTree>>,
     plates: HashMap<InstanceId, Plate>,
     reported: HashSet<InstanceId>,
-}
-
-fn image_paths(e: &Element, out: &mut Vec<Arc<str>>) {
-    if e.kind == ElementKind::Image
-        && let Some(img) = &e.image
-    {
-        out.push(img.path.clone());
-    }
-    for c in &e.children {
-        image_paths(c, out);
-    }
 }
 
 pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &RenderOpts) -> ExitCode {
@@ -78,16 +91,25 @@ pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &RenderOpts) ->
     };
 
     let mut renderer = Renderer::new(FontConfig::default());
+    if let Err(e) = fonts::register_bundled(&mut renderer) {
+        log::warn!("the bundled font could not be registered: {e}");
+    }
     let mut diags: Vec<Diagnostic> = built.diagnostics.clone();
+    let mut font_diags = built.font_diagnostics.clone();
+    font_diags.extend(FontRegistry::default().apply(&mut renderer, &built.font_files).diagnostics);
     for (name, pos) in &built.fonts {
         if !renderer.has_family(name) {
-            diags.push(Diagnostic::warning(
+            font_diags.push(Diagnostic::warning(
                 DiagKind::Style,
                 Some(pos.clone()),
                 format!("font '{name}' is not installed; using Segoe UI"),
             ));
         }
     }
+    for d in &font_diags {
+        log::warn!("{d}");
+    }
+    diags.extend(font_diags);
 
     let height = ((bar.height + if bar.floating { 2 * bar.margin } else { 0 }) as f32 * o.scale).round() as u32;
     let monitor = MonitorInfo {
@@ -107,11 +129,16 @@ pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &RenderOpts) ->
     let world = (!o.live).then(FakeWorld::with_sample_values);
     let engine = engine::start(
         engine::EngineOptions {
+            clock: o.now.map(|t| Arc::new(FixedWall(t)) as Arc<dyn rsb_core::time::Clock>),
             config_dir: config_dir.clone(),
             dark: o.dark,
             world,
             glaze_url: None,
             test_stall: None,
+            // Every render records commands; only the fakes take them.
+            gate: Some(Gate::new(gate::select_render(o.live), Arc::new(Stats::off()))),
+            images: None,
+            observe: None,
         },
         Box::new(ChannelSink(tx)),
     );
@@ -141,6 +168,7 @@ pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &RenderOpts) ->
                 }
             }
             Ok(ScriptOut::Diagnostics(d)) => diags.extend(d),
+            Ok(ScriptOut::ErrorNote { .. }) => {}
             Err(_) => break,
         }
     }
@@ -159,19 +187,27 @@ pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &RenderOpts) ->
         scene.set_tree(tree.clone());
         let mut found = Vec::new();
         if let Some(root) = &tree.root {
-            image_paths(root, &mut found);
+            images::files_of(root, &mut found);
         }
-        for path in found {
-            match tree.grant.as_ref().map(|g| images::load(&path, g)) {
-                Some(Ok(img)) => {
-                    scene.set_image_size(&path, img.width, img.height);
-                    renderer.set_image(path, img);
-                }
-                Some(Err(e)) => {
+        for (path, kind) in found {
+            let loaded = match (&tree.grant, kind) {
+                (None, _) => Err("the widget has no file permission".to_string()),
+                (Some(g), Kind::Png) => images::load(&path, g).map(|img| {
+                    let size = (img.width, img.height);
+                    renderer.set_image(Arc::clone(&path), img);
+                    size
+                }),
+                (Some(g), Kind::Svg) => images::load_svg(&path, g).map(|svg| {
+                    let (w, h) = renderer.set_parsed_svg(Arc::clone(&path), svg);
+                    (w.ceil() as u32, h.ceil() as u32)
+                }),
+            };
+            match loaded {
+                Ok((w, h)) => scene.set_image_size(&path, w, h),
+                Err(e) => {
                     log::warn!("an image could not be loaded: {e}");
                     scene.image_failed(&path);
                 }
-                None => scene.image_failed(&path),
             }
         }
     }
@@ -195,6 +231,7 @@ pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &RenderOpts) ->
     }
     let out = if scene.needs_frame(Instant::now()) { scene.frame(Instant::now(), &mut renderer) } else { out };
 
+    BundledIcons::default().ensure(&mut renderer, &out.draw);
     let canvas = match render_offscreen(&mut renderer, &out.draw) {
         Ok(c) => c,
         Err(e) => {

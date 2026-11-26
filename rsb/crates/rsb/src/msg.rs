@@ -7,8 +7,11 @@ use std::sync::mpsc::Sender;
 use rsb_core::element::InstanceId;
 use rsb_core::hit::PointerEvent;
 use rsb_core::ipc::{Command, Reply};
+use rsb_core::key::{KeyEvent, TextInput};
 use rsb_core::msg::ScriptOut;
-use rsb_render::Image;
+use rsb_core::pixels::RgbaImage;
+use rsb_core::popup::PopupAction;
+use rsb_render::{Image, ParsedSvg};
 
 use crate::args::ClockKind;
 use crate::cfgload::Built;
@@ -54,6 +57,17 @@ pub struct BarInfo {
     pub plate: Option<String>,
 }
 
+/// The window a simulated pointer event goes to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SimSurface {
+    /// A bar by name.
+    Bar(String),
+    /// A popup, menu, tooltip or overlay's content by its name.
+    Popup(String),
+    /// An overlay's dim window, by the overlay's name.
+    Dim(String),
+}
+
 /// An event a hidden test flag injects at a set time.
 #[derive(Clone, Debug, PartialEq)]
 pub enum SimAction {
@@ -64,8 +78,47 @@ pub enum SimAction {
     Theme(bool),
     Fullscreen(bool),
     Clock(ClockKind),
-    FullscreenWindow { for_ms: u64 },
-    Pointer { bar: String, event: PointerEvent },
+    FullscreenWindow {
+        for_ms: u64,
+    },
+    Pointer {
+        surface: SimSurface,
+        event: PointerEvent,
+    },
+    /// A key to a popup window (as if it had keyboard focus).
+    Key {
+        popup: String,
+        event: KeyEvent,
+    },
+    /// Typed text or IME composition for a popup window.
+    Text {
+        popup: String,
+        input: TextInput,
+    },
+    /// As `rsb popup <name> <action>`, with a gesture of its own.
+    Popup {
+        name: String,
+        action: PopupAction,
+    },
+    /// A button went down outside every window of ours.
+    OutsidePress,
+    /// Keyboard focus went from the popup to another app.
+    Deactivate {
+        popup: String,
+    },
+    /// The session was locked or unlocked.
+    Session {
+        locked: bool,
+    },
+    /// The popup's window got a DPI change.
+    PopupDpi {
+        popup: String,
+        dpi: u32,
+    },
+    /// The UI thread stops for this long (the watchdog's overlay check).
+    UiStall {
+        for_ms: u64,
+    },
     RenderFailure,
     Panic,
 }
@@ -84,6 +137,26 @@ pub enum UiMsg {
     Image {
         key: Arc<str>,
         result: Result<Image, String>,
+    },
+    /// A user's `.svg` file, already parsed by the image loader.
+    Svg {
+        key: Arc<str>,
+        result: Result<ParsedSvg, String>,
+    },
+    /// A picture a service made (album art, an app icon). Straight from the
+    /// hub: the script thread never sees it.
+    ServiceImage {
+        key: Arc<str>,
+        image: RgbaImage,
+    },
+    /// The power service reported an error (a lock, sleep or other action
+    /// failed): an overlay that was waiting for it closes.
+    PowerError,
+    /// The apps service stopped: nothing needs its icons any more.
+    DropAppImages,
+    /// The service value no longer names this key (the track changed).
+    DropServiceImage {
+        key: Arc<str>,
     },
     /// A script call has run for over 2 s (instance 0 = the runtime itself).
     Stalled {

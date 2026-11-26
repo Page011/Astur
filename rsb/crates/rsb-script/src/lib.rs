@@ -29,6 +29,12 @@
 //! delivered on the next turn; a task that yields with no request
 //! (`coroutine.yield()`) resumes on the next turn.
 //!
+//! Popups, menus, tooltips, inputs and sliders are elements. The script decides when a popup is open (its `open`
+//! state, which the runtime also writes false when the UI closes the popup) and builds the popup's content in a
+//! scope that exists only while it is open. A click or key the UI stamped with an id is a gesture for as long as
+//! its handler runs up to its first wait: popups opened then carry the id (the UI gives focus only for those), and
+//! commands that start apps, change devices or end the session run only then.
+//!
 //! Script code never waits: I/O calls (`rsb.http.get`, `rsb.exec.run`,
 //! `rsb.file.read`, `rsb.task.sleep`) yield the calling task's coroutine and the
 //! scheduler resumes it when the result arrives from the services hub.

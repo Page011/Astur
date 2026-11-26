@@ -3,7 +3,8 @@
 //! The plain tests create hidden windows only: nothing is shown and no screen
 //! space is registered. The `#[ignore]` ones show a window or register an
 //! appbar and run one at a time through the desktop lock; they print the work
-//! area before and after.
+//! area before and after. One of them takes the foreground and only runs with
+//! `RSB_TEST_FOREGROUND=1`.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -17,15 +18,24 @@ use rsb_core::wake::Wake;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{
     GA_PARENT, GWL_EXSTYLE, GWL_STYLE, GetAncestor, GetCursor, GetDesktopWindow, GetForegroundWindow,
-    GetWindowLongPtrW, IDC_ARROW, IDC_HAND, IsWindow, IsWindowVisible, LoadCursorW, MA_NOACTIVATE, MWMO_INPUTAVAILABLE,
-    MsgWaitForMultipleObjectsEx, QS_ALLINPUT, SendMessageW, WM_ENDSESSION, WM_MOUSEACTIVATE, WM_SETCURSOR,
-    WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    GetWindowLongPtrW, IDC_ARROW, IDC_HAND, IsWindow, IsWindowVisible, LoadCursorW, MA_NOACTIVATE, SendMessageW,
+    WM_ENDSESSION, WM_MOUSEACTIVATE, WM_SETCURSOR, WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::bar::Metrics;
 use crate::{BarId, BarWindowSpec, MonitorInfo, TestInput, Ui, UiEvent, UiHandler, UiOptions, monitor, sys};
 
+mod popups;
+
 // ---- helpers ----
+
+/// "rdp" in a Remote Desktop session, else "console": the label on every timing a test prints.
+fn session_name() -> &'static str {
+    use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_REMOTESESSION};
+    // SAFETY: a plain query with no pointers.
+    if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 { "rdp" } else { "console" }
+}
 
 struct Driver<F> {
     f: F,
@@ -77,10 +87,7 @@ fn drive(ui: &mut Ui, limit: Duration, mut f: impl FnMut(&mut Ui, &UiEvent) -> b
             return (events, true);
         }
         let wait = left.min(Duration::from_millis(15)).as_millis().max(1) as u32;
-        // SAFETY: no handles; waits for a queued message or the timeout.
-        unsafe {
-            MsgWaitForMultipleObjectsEx(None, wait, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        }
+        ui.wait(wait);
     }
 }
 
@@ -637,6 +644,38 @@ fn pointer_messages_become_pointer_events_in_physical_bar_px() {
 }
 
 #[test]
+fn the_wheel_with_shift_held_and_the_tilt_wheel_arrive_as_a_sideways_wheel() {
+    // MK_SHIFT is 0x4 in the low word of wParam; the high word is the delta (120 = one notch up).
+    const MK_SHIFT: usize = 0x4;
+    let wheel = |delta: i16| ((delta as u16 as usize) << 16) | MK_SHIFT;
+    let mut ui = Ui::new(UiOptions::default()).unwrap();
+    let mon = primary(&ui);
+    let bar = ui.create_bar(&spec(&mon)).unwrap();
+    let at = ui.window_rect(bar).unwrap();
+    // The message carries screen coordinates; the event comes back in bar px.
+    let lp = ((at.y0 + 5) as u16 as isize) << 16 | (at.x0 + 10) as u16 as isize;
+    let h = sys::raw(hwnd(&ui, bar));
+    assert!(sys::post(h, windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL, wheel(-120), lp));
+    assert!(sys::post(h, windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL, wheel(240), lp));
+    // No Shift: an ordinary wheel. The tilt wheel: positive is right.
+    assert!(sys::post(h, windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL, (120usize) << 16, lp));
+    assert!(sys::post(h, windows::Win32::UI::WindowsAndMessaging::WM_MOUSEHWHEEL, (120usize) << 16, lp));
+    let (events, _) = drive(&mut ui, Duration::from_millis(300), |_, _| false);
+    let kinds: Vec<PointerKind> = events
+        .into_iter()
+        .filter_map(|e| match e {
+            UiEvent::Pointer { event, .. } => Some(event.kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        [PointerKind::HWheel(1.0), PointerKind::HWheel(-2.0), PointerKind::Wheel(1.0), PointerKind::HWheel(1.0)],
+        "Shift with the wheel down goes right"
+    );
+}
+
+#[test]
 fn a_real_mouse_move_arms_leave_tracking_and_reports_the_leave() {
     let mut ui = Ui::new(UiOptions::default()).unwrap();
     let mon = primary(&ui);
@@ -684,7 +723,7 @@ fn set_cursor_picks_the_cursor_for_wm_setcursor() {
 
 #[test]
 fn set_frame_deadline_and_probe_see_a_stalled_ui_thread() {
-    let mut ui = Ui::new(UiOptions { probe: true }).unwrap();
+    let mut ui = Ui::new(UiOptions { probe: true, ..UiOptions::default() }).unwrap();
     assert!(ui.probe_stats().is_some());
     ui.set_frame_deadline(Some(Instant::now() + Duration::from_millis(200)));
     let (_, timed_out) = drive(&mut ui, Duration::from_millis(900), |_, e| {
@@ -701,8 +740,13 @@ fn set_frame_deadline_and_probe_see_a_stalled_ui_thread() {
     drive(&mut ui, Duration::from_millis(120), |_, _| false);
     let s = ui.probe_stats().unwrap();
     eprintln!(
-        "probe (rdp): {} samples, p50 {:.2} ms, p95 {:.2} ms, worst {:.2} ms, {} timeouts",
-        s.samples, s.p50_ms, s.p95_ms, s.worst_ms, s.timeouts
+        "probe ({}): {} samples, p50 {:.2} ms, p95 {:.2} ms, worst {:.2} ms, {} timeouts",
+        session_name(),
+        s.samples,
+        s.p50_ms,
+        s.p95_ms,
+        s.worst_ms,
+        s.timeouts
     );
     assert!(s.samples >= 10, "{s:?}");
     assert_eq!(s.timeouts, 0);
@@ -713,12 +757,16 @@ fn set_frame_deadline_and_probe_see_a_stalled_ui_thread() {
 
 #[test]
 fn probe_on_an_idle_loop_reports_small_gaps() {
-    let mut ui = Ui::new(UiOptions { probe: true }).unwrap();
+    let mut ui = Ui::new(UiOptions { probe: true, ..UiOptions::default() }).unwrap();
     drive(&mut ui, Duration::from_millis(600), |_, _| false);
     let s = ui.probe_stats().unwrap();
     eprintln!(
-        "idle probe (rdp): {} samples, p50 {:.2} ms, p95 {:.2} ms, worst {:.2} ms",
-        s.samples, s.p50_ms, s.p95_ms, s.worst_ms
+        "idle probe ({}): {} samples, p50 {:.2} ms, p95 {:.2} ms, worst {:.2} ms",
+        session_name(),
+        s.samples,
+        s.p50_ms,
+        s.p95_ms,
+        s.worst_ms
     );
     assert!(s.samples >= 20, "{s:?}");
     assert_eq!(s.timeouts, 0);
@@ -1091,6 +1139,12 @@ fn fullscreen_notices_apply_below_hide_and_stay() {
 #[test]
 #[ignore = "shows a window or registers screen space: run through the desktop lock"]
 fn a_real_fullscreen_window_brings_the_shell_notice() {
+    // The test window has to take the foreground, which interrupts whoever is
+    // using the PC: it runs only when asked for.
+    if std::env::var("RSB_TEST_FOREGROUND").as_deref() != Ok("1") {
+        eprintln!("SKIPPED: set RSB_TEST_FOREGROUND=1 to let a test window take the foreground");
+        return;
+    }
     // SAFETY: plain call.
     if unsafe { GetForegroundWindow() }.0.is_null() {
         // A disconnected session has no foreground window to hand over, so

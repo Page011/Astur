@@ -14,9 +14,10 @@
 //! centred on its capital height instead; icons and symbols keep the box.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, OnceLock};
 
+use parley::fontique::{Blob, FontInfoOverride};
 use parley::setting::Tag;
 use parley::style::{FontFamily, FontFamilyName, FontFeature, FontFeatures, FontStyle, FontWeight};
 use parley::{FontContext, Layout, LayoutContext, PositionedLayoutItem, StyleProperty};
@@ -31,7 +32,7 @@ use swash::scale::{Render, ScaleContext, Source, StrikeWith};
 use swash::zeno::{Format, Vector};
 use tiny_skia::{Mask, Pixmap};
 
-use crate::{FontConfig, GLYPH_CACHE_MAX_BYTES, LAYOUT_CACHE_MAX};
+use crate::{FONT_MAX_FILE_BYTES, FontConfig, GLYPH_CACHE_MAX_BYTES, LAYOUT_CACHE_MAX, RenderError};
 
 /// Horizontal glyph positions are quantised to this many steps per pixel so
 /// cached glyph images are reused across draws.
@@ -69,6 +70,13 @@ impl StyleKey {
             tabular: s.tabular_nums,
         }
     }
+}
+
+/// A font file given to `register_font`, kept to recognise the same bytes.
+struct Registered {
+    data: Arc<[u8]>,
+    family: Option<String>,
+    names: Vec<String>,
 }
 
 struct LayoutEntry {
@@ -124,6 +132,9 @@ pub(crate) struct TextEngine {
     tick: u64,
     frame_start: u64,
     colour_drawn: u64,
+    /// Registered fonts by a hash of their bytes.
+    fonts: HashMap<u64, Vec<Registered>>,
+    fonts_count: usize,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -132,6 +143,7 @@ pub(crate) struct TextStats {
     pub glyph_bytes: usize,
     pub layouts: usize,
     pub colour_drawn: u64,
+    pub fonts_registered: usize,
 }
 
 impl TextEngine {
@@ -159,6 +171,8 @@ impl TextEngine {
             tick: 0,
             frame_start: 0,
             colour_drawn: 0,
+            fonts: HashMap::new(),
+            fonts_count: 0,
         }
     }
 
@@ -176,7 +190,84 @@ impl TextEngine {
             glyph_bytes: self.glyph_bytes,
             layouts: self.layout_count,
             colour_drawn: self.colour_drawn,
+            fonts_registered: self.fonts_count,
         }
+    }
+
+    /// Adds the faces in `data` to the collection. See
+    /// `Renderer::register_font`.
+    pub(crate) fn register_font(&mut self, data: Arc<[u8]>, family: Option<&str>) -> Result<Vec<String>, RenderError> {
+        if data.len() > FONT_MAX_FILE_BYTES {
+            return Err(RenderError::Font(format!("{} bytes, limit {FONT_MAX_FILE_BYTES}", data.len())));
+        }
+        let family = family.map(str::trim).filter(|f| !f.is_empty());
+        let hash = fnv_bytes(&data);
+        let known = self.fonts.get(&hash).and_then(|list| {
+            list.iter().find(|f| f.family.as_deref() == family && *f.data == *data).map(|f| f.names.clone())
+        });
+        if let Some(names) = known {
+            return Ok(names);
+        }
+        let over = FontInfoOverride { family_name: family, ..Default::default() };
+        let added = self.font_cx.collection.register_fonts(Blob::new(Arc::new(data.clone())), Some(over));
+        let mut names: Vec<String> = Vec::new();
+        for (id, _) in &added {
+            if let Some(n) = self.font_cx.collection.family_name(*id)
+                && !names.iter().any(|e| e == n)
+            {
+                names.push(n.to_string());
+            }
+        }
+        if names.is_empty() {
+            return Err(RenderError::Font("no usable font face in the data".into()));
+        }
+        // text laid out before may have used a fallback for these names
+        self.layouts.clear();
+        self.layout_count = 0;
+        self.fonts_count += 1;
+        self.fonts.entry(hash).or_default().push(Registered {
+            data,
+            family: family.map(str::to_string),
+            names: names.clone(),
+        });
+        Ok(names)
+    }
+
+    /// Where a caret may stand in `text` on one line: the start, every
+    /// cluster boundary and the end, with the x offset of each. A cluster is
+    /// a grapheme (a base character with its marks, an emoji sequence);
+    /// the parts of a ligature share its advance evenly.
+    pub(crate) fn caret_stops(&mut self, text: &str, style: &TextStyle) -> Vec<(usize, f32)> {
+        let text = cut_text(text);
+        self.ensure(text, style);
+        let Some(entry) = self.layouts.get(&StyleKey::new(style)).and_then(|m| m.get(text)) else {
+            return vec![(0, 0.0)];
+        };
+        let mut stops: BTreeMap<usize, f32> = BTreeMap::new();
+        for line in entry.layout.lines() {
+            for item in line.items() {
+                let PositionedLayoutItem::GlyphRun(run) = item else { continue };
+                let rtl = run.run().is_rtl();
+                let (start, advance) = (run.offset(), run.advance());
+                // clusters come in logical order: left to right in a
+                // left-to-right run, right to left in the other
+                let mut along = 0.0f32;
+                for c in run.run().clusters() {
+                    let range = c.text_range();
+                    let (from, to) = if rtl {
+                        (start + advance - along, start + advance - along - c.advance())
+                    } else {
+                        (start + along, start + along + c.advance())
+                    };
+                    stops.entry(range.start).or_insert(from);
+                    stops.entry(range.end).or_insert(to);
+                    along += c.advance();
+                }
+            }
+        }
+        stops.entry(0).or_insert(0.0);
+        stops.entry(text.len()).or_insert(entry.width);
+        stops.into_iter().collect()
     }
 
     /// Called once per `render`: glyphs touched from here on are kept by the
@@ -425,6 +516,16 @@ fn cut_text(text: &str) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+
+/// FNV-1a over 8-byte words (and the length), for telling font files apart.
+fn fnv_bytes(data: &[u8]) -> u64 {
+    let words = data.chunks(8).map(|c| {
+        let mut w = [0u8; 8];
+        w[..c.len()].copy_from_slice(c);
+        u64::from_le_bytes(w)
+    });
+    fnv(words.chain(std::iter::once(data.len() as u64)))
 }
 
 fn fnv(values: impl Iterator<Item = u64>) -> u64 {

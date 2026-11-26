@@ -18,6 +18,18 @@ use rsb_services::{Hub, HubOptions, HubTiming, ServiceFactory};
 
 pub const WAIT: Duration = Duration::from_secs(5);
 
+/// "rdp" in a Remote Desktop session, else "console": the label every timing
+/// printed by a test carries, since an rdp session paces frames differently.
+pub fn session_name() -> &'static str {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn GetSystemMetrics(index: i32) -> i32;
+    }
+    const SM_REMOTESESSION: i32 = 0x1000;
+    // SAFETY: a plain query with no pointers.
+    if unsafe { GetSystemMetrics(SM_REMOTESESSION) } != 0 { "rdp" } else { "console" }
+}
+
 /// A fresh folder under the build directory (never the user's folders). Each
 /// call gets its own folder, so tests that ask for the same name in parallel
 /// never delete each other's.

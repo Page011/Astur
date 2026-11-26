@@ -2,11 +2,32 @@
 
 use std::sync::Arc;
 
+use super::select::Pseudo;
 use super::select::{Selector, parse_selector};
-use super::value::{Ctx, FamilyName, Longhand, components, parse_property, split_top, unsupported_property};
-use super::{PROPERTIES, PropertyId, PropertyInfo, Stylesheet, property_by_name};
+use super::value::{Comp, Ctx, FamilyName, Longhand, components, parse_property_w, split_top, unsupported_property};
+use super::{FontFace, PROPERTIES, PropertyId, PropertyInfo, Stylesheet, property_by_name};
+use crate::anim::Easing;
 use crate::diag::{DiagKind, Diagnostic, SourcePos};
 use crate::element::ElementKind;
+
+/// One `@keyframes` rule as written.
+#[derive(Clone, Debug)]
+pub(crate) struct Keyframes {
+    pub name: Arc<str>,
+    pub frames: Vec<Keyframe>,
+}
+
+/// One block of a `@keyframes` rule at one offset (`from` = 0, `to` = 1).
+#[derive(Clone, Debug)]
+pub(crate) struct Keyframe {
+    pub offset: f32,
+    pub decls: Arc<Vec<Decl>>,
+    /// `animation-timing-function` inside the block.
+    pub easing: Option<Easing>,
+}
+
+/// Properties a `::placeholder` or `::selection` rule may set.
+const PSEUDO_PROPS: [&str; 4] = ["color", "background-color", "opacity", "font-style"];
 
 /// A parsed declaration.
 #[derive(Clone, Debug, PartialEq)]
@@ -108,7 +129,12 @@ pub(crate) fn parse_decl(
             pos,
         });
     }
-    match parse_property(info, value, ctx) {
+    let mut notes = Vec::new();
+    let parsed = parse_property_w(info, value, ctx, &mut notes);
+    for n in notes {
+        warn(diags, format!("'{}': {n}", info.name));
+    }
+    match parsed {
         Ok(longhands) => {
             if info.id == PropertyId::FontFamily
                 && let (Some(out), Some(p)) = (families, pos.as_ref())
@@ -206,6 +232,10 @@ struct Parser<'a> {
     diags: Vec<Diagnostic>,
     sheet: Stylesheet,
     seen_rule: bool,
+    /// Parsing the blocks of a `@keyframes` rule: only animatable properties.
+    in_keyframes: bool,
+    /// The rule being parsed styles a pseudo-element: only `PSEUDO_PROPS`.
+    pseudo_rule: Option<&'static str>,
 }
 
 impl Parser<'_> {
@@ -336,11 +366,23 @@ impl Parser<'_> {
                 continue;
             }
             match parse_selector(text) {
-                Ok(s) => sels.push(s),
+                Ok(s) => {
+                    if s.focus_only_in_bar() {
+                        self.warn(off + lead, "bars never take keyboard focus: this rule can only match inside a bar");
+                    }
+                    self.sheet.structural |= s.is_structural();
+                    sels.push(s);
+                }
                 Err((o, msg)) => self.warn(off + lead + o, msg),
             }
         }
+        self.pseudo_rule = sels.iter().find_map(|s| s.pseudo()).map(|p| match p {
+            Pseudo::Placeholder => "::placeholder",
+            Pseudo::Selection => "::selection",
+        });
+        self.sheet.pseudo_rules |= self.pseudo_rule.is_some();
         let decls = self.block(open + 1, body_end);
+        self.pseudo_rule = None;
         let decls = Arc::new(decls);
         for sel in sels {
             if self.has_backdrop(&decls)
@@ -397,6 +439,27 @@ impl Parser<'_> {
             if name.is_empty() {
                 self.warn(at, "expected a property name before ':'");
                 continue;
+            }
+            let lower_name = name.to_ascii_lowercase();
+            if let Some(pseudo) = self.pseudo_rule
+                && !PSEUDO_PROPS.contains(&lower_name.as_str())
+            {
+                self.warn(at, format!("{pseudo} takes color, background-color, opacity and font-style"));
+                continue;
+            }
+            if self.in_keyframes && lower_name != "animation-timing-function" {
+                match property_by_name(&lower_name) {
+                    Some(info) if info.animatable => {}
+                    Some(_) => {
+                        self.warn(at, format!("'{name}' cannot be animated; it is dropped from @keyframes"));
+                        continue;
+                    }
+                    None if name.starts_with("--") => {
+                        self.warn(at, "custom properties cannot be set in @keyframes");
+                        continue;
+                    }
+                    None => {}
+                }
             }
             let lower_value = value.to_ascii_lowercase();
             if let Some(stripped) = lower_value.strip_suffix("important")
@@ -485,13 +548,174 @@ impl Parser<'_> {
                     }
                 }
             }
-            "keyframes" | "-webkit-keyframes" => {
-                self.warn(start, "animations come in a later version; @keyframes is not supported")
+            "keyframes" => {
+                if !is_block {
+                    self.warn(start, "@keyframes needs a '{ ... }' block");
+                } else if media.is_some() {
+                    self.warn(start, "@keyframes cannot be inside @media");
+                } else {
+                    let open = stop.unwrap_or(end);
+                    let close = self.block_end(open, end).unwrap_or(end);
+                    self.keyframes(start, &prelude, open + 1, close);
+                }
             }
+            "font-face" => {
+                if !is_block {
+                    self.warn(start, "@font-face needs a '{ ... }' block");
+                } else {
+                    let open = stop.unwrap_or(end);
+                    let close = self.block_end(open, end).unwrap_or(end);
+                    self.font_face(start, open + 1, close);
+                }
+            }
+            "starting-style" => self.warn(
+                start,
+                "@starting-style is not supported: a popup draws its first frame with :open not matching; put the starting values in the closed rule",
+            ),
             "define-color" => self.warn(start, "@define-color is not supported; use a custom property: --name: value"),
             _ => self.warn(start, format!("unsupported at-rule '@{name}'")),
         }
         next
+    }
+
+    /// `@keyframes name { from { .. } 50% { .. } to { .. } }`.
+    fn keyframes(&mut self, at: usize, name: &str, from: usize, to: usize) {
+        let name = name.trim();
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+            self.warn(at, "@keyframes needs a name like 'pulse': letters, digits, '-' and '_'");
+            return;
+        }
+        let mut frames: Vec<Keyframe> = Vec::new();
+        let mut i = from;
+        loop {
+            i = self.skip_ws(i, to);
+            if i >= to {
+                break;
+            }
+            let Some(open) = self.find_top(i, to, b"{;}") else {
+                self.warn(i, "expected '{' after the keyframe selector");
+                break;
+            };
+            if self.src.as_bytes()[open] != b'{' {
+                self.warn(i, "expected '{' after the keyframe selector");
+                i = open + 1;
+                continue;
+            }
+            let close = self.block_end(open, to).unwrap_or(to);
+            let mut offsets = Vec::new();
+            for part in self.src[i..open].split(',') {
+                let t = part.trim().to_ascii_lowercase();
+                let off = match t.as_str() {
+                    "from" => Some(0.0),
+                    "to" => Some(1.0),
+                    _ => t
+                        .strip_suffix('%')
+                        .and_then(|n| n.trim().parse::<f32>().ok())
+                        .filter(|n| (0.0..=100.0).contains(n))
+                        .map(|n| n / 100.0),
+                };
+                match off {
+                    Some(o) => offsets.push(o),
+                    None => self
+                        .warn(i, format!("'{}' is not a keyframe selector; use from, to or 0% to 100%", part.trim())),
+                }
+            }
+            self.in_keyframes = true;
+            let decls = self.block(open + 1, close);
+            self.in_keyframes = false;
+            let mut easing = None;
+            let decls: Vec<Decl> = decls
+                .into_iter()
+                .filter(|d| {
+                    if let DeclTarget::Ready(ls) = &d.target
+                        && let [Longhand::AnimTiming(v)] = ls.as_slice()
+                    {
+                        easing = v.first().copied();
+                        return false;
+                    }
+                    true
+                })
+                .collect();
+            let decls = Arc::new(decls);
+            for o in offsets {
+                frames.push(Keyframe { offset: o, decls: decls.clone(), easing });
+            }
+            i = close + 1;
+        }
+        frames.sort_by(|a, b| a.offset.total_cmp(&b.offset));
+        self.sheet.keyframes.push(Keyframes { name: Arc::from(name), frames });
+    }
+
+    /// `@font-face { font-family; src; font-weight; font-style }`.
+    fn font_face(&mut self, at: usize, from: usize, to: usize) {
+        let (mut family, mut src, mut weight, mut italic) = (None, None, (400u16, 400u16), false);
+        let body = &self.src[from..to];
+        let mut offset = 0;
+        let mut pieces: Vec<(usize, &str)> = Vec::new();
+        for piece in split_top(body, b';') {
+            pieces.push((from + offset, piece));
+            offset += piece.len() + 1;
+        }
+        for (off, piece) in pieces {
+            let text = piece.trim();
+            if text.is_empty() {
+                continue;
+            }
+            let here = off + (piece.len() - piece.trim_start().len());
+            let Some((k, v)) = text.split_once(':') else {
+                self.warn(here, format!("expected 'property: value', found '{}'", short(text)));
+                continue;
+            };
+            let (k, v) = (k.trim().to_ascii_lowercase(), v.trim());
+            match k.as_str() {
+                "font-family" => {
+                    let c = components(v).unwrap_or_default();
+                    family = match c.as_slice() {
+                        [Comp::Str(s)] if !s.trim().is_empty() => Some(s.trim().to_string()),
+                        words if !words.is_empty() => {
+                            let names: Vec<String> = words
+                                .iter()
+                                .filter_map(|w| match w {
+                                    Comp::Word(w) => Some((*w).to_string()),
+                                    _ => None,
+                                })
+                                .collect();
+                            (names.len() == words.len()).then(|| names.join(" "))
+                        }
+                        _ => None,
+                    };
+                    if family.is_none() {
+                        self.warn(here, "bad value for 'font-family': expected a font name");
+                    }
+                }
+                "src" => match font_src(v) {
+                    Ok(s) => src = Some(s),
+                    Err(m) => self.warn(here, m),
+                },
+                "font-weight" => match font_weight(v) {
+                    Ok(w) => weight = w,
+                    Err(m) => self.warn(here, format!("bad value for 'font-weight': {m}")),
+                },
+                "font-style" => match v.to_ascii_lowercase().as_str() {
+                    "normal" => italic = false,
+                    "italic" => italic = true,
+                    _ => self.warn(here, "bad value for 'font-style': expected normal or italic"),
+                },
+                other => self.warn(
+                    here,
+                    format!(
+                        "'{other}' is not used by @font-face; it takes font-family, src, font-weight and font-style"
+                    ),
+                ),
+            }
+        }
+        match (family, src) {
+            (Some(family), Some(src)) => {
+                let pos = self.pos(at);
+                self.sheet.faces.push(FontFace { family, src, weight, italic, pos });
+            }
+            _ => self.warn(at, "@font-face needs font-family and src"),
+        }
     }
 
     fn import(&mut self, start: usize, prelude: &str, is_block: bool, media: Option<bool>) {
@@ -548,6 +772,74 @@ fn backdrop_pos(d: &Decl) -> Option<Option<SourcePos>> {
     is.then(|| d.pos.clone())
 }
 
+/// `url("fonts/x.ttf") [format(..)]`: the file name inside the config
+/// folder's `fonts` folder.
+fn font_src(v: &str) -> Result<String, String> {
+    let comps = components(v).map_err(|e| format!("bad value for 'src': {e}"))?;
+    let mut path: Option<String> = None;
+    let mut urls = 0;
+    for c in &comps {
+        match c {
+            Comp::Func(_, n, inner) if n == "url" => {
+                urls += 1;
+                path = Some(inner.trim().trim_matches(['"', '\'']).to_string());
+            }
+            Comp::Func(_, n, _) if n == "local" => {
+                return Err(
+                    "src: local() is not supported; put the font file in the config folder's fonts folder".into()
+                );
+            }
+            Comp::Func(_, n, inner) if n == "format" => {
+                let f = inner.trim().trim_matches(['"', '\'']).to_ascii_lowercase();
+                if !matches!(f.as_str(), "truetype" | "opentype" | "collection") {
+                    return Err(format!("format('{f}') is not supported; use truetype or opentype"));
+                }
+            }
+            Comp::Comma => return Err("only one url() is supported in src".into()),
+            _ => return Err("bad value for 'src': expected url(\"fonts/name.ttf\")".into()),
+        }
+    }
+    if urls != 1 {
+        return Err("bad value for 'src': expected url(\"fonts/name.ttf\")".into());
+    }
+    let raw = path.unwrap_or_default().replace('\\', "/");
+    let name = raw.strip_prefix("fonts/").unwrap_or(&raw);
+    let bad = name.is_empty() || name.contains(':') || name.contains('/') || name == "." || name == "..";
+    if bad {
+        return Err(format!(
+            "font file '{raw}' must be inside the config folder's fonts folder, like url(\"fonts/name.ttf\")"
+        ));
+    }
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    if !matches!(ext.as_str(), "ttf" | "otf" | "ttc") {
+        return Err(format!("font file '{raw}' must be .ttf, .otf or .ttc"));
+    }
+    Ok(raw)
+}
+
+/// `font-weight` of an `@font-face`: a number, `normal`, `bold`, or a range.
+fn font_weight(v: &str) -> Result<(u16, u16), String> {
+    let one = |t: &str| -> Result<u16, String> {
+        match t.to_ascii_lowercase().as_str() {
+            "normal" => Ok(400),
+            "bold" => Ok(700),
+            n => match n.parse::<u16>() {
+                Ok(w) if (1..=1000).contains(&w) => Ok(w),
+                _ => Err("expected normal, bold or a number from 1 to 1000".into()),
+            },
+        }
+    };
+    let parts: Vec<&str> = v.split_whitespace().collect();
+    match parts.as_slice() {
+        [a] => one(a).map(|w| (w, w)),
+        [a, b] => {
+            let (lo, hi) = (one(a)?, one(b)?);
+            if lo <= hi { Ok((lo, hi)) } else { Err("the first weight must not be above the second".into()) }
+        }
+        _ => Err("expected one weight or a range of two".into()),
+    }
+}
+
 fn short(s: &str) -> String {
     let t: String = s.chars().take(24).collect();
     if t.len() < s.len() { format!("{t}...") } else { t }
@@ -571,7 +863,17 @@ pub(crate) fn parse_sheet(text: &str, file: &str) -> (Stylesheet, Vec<Diagnostic
     let li = LineIndex::new(text);
     let mut diags = Vec::new();
     let clean = strip_comments(text, file, &li, &mut diags);
-    let mut p = Parser { src: &clean, orig: text, file, li, diags, sheet: Stylesheet::default(), seen_rule: false };
+    let mut p = Parser {
+        src: &clean,
+        orig: text,
+        file,
+        li,
+        diags,
+        sheet: Stylesheet::default(),
+        seen_rule: false,
+        in_keyframes: false,
+        pseudo_rule: None,
+    };
     p.parse_rules(0, clean.len(), None);
     (p.sheet, p.diags)
 }

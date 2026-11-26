@@ -93,7 +93,7 @@ box.workspaces {
 /* The runtime adds .error to a widget's root for ten seconds after one of
    its handlers failed; the widget keeps running. */
 .error {
-	border: 1px solid var(--error, #ffb3b3);
+	color: var(--error, #ffb3b3);
 }
 
 /* A widget that stopped shows a plate instead. */
@@ -105,4 +105,43 @@ plate {
 	background: #9b1c1c;
 	color: #ffffff;
 	border-radius: 4px;
+}
+
+/* Elements popups are made of. Colours come from a preset or style.css. */
+
+/* One line of editable text: the I-beam over it, and a width of its own
+   unless a rule gives one. */
+input {
+	cursor: text;
+	align-items: center;
+}
+
+/* A column that scrolls: give it a height or a max-height. */
+scroll {
+	display: flex;
+	flex-direction: column;
+	overflow-y: auto;
+}
+
+/* A menu entry: icon, then the label taking the rest, then the shortcut. */
+menuitem {
+	gap: 8px;
+	align-items: center;
+}
+
+menuitem icon {
+	font-size: 16px;
+}
+
+menuitem .label {
+	flex-grow: 1;
+	font-weight: 400;
+}
+
+/* A slider is a track and a fill (accent-color) with no thumb; style a child
+   element to get one. */
+slider {
+	height: 6px;
+	border-radius: 3px;
+	cursor: pointer;
 }

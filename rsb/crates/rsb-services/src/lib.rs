@@ -48,6 +48,10 @@ mod workspaces;
 pub use hub::{Hub, HubTiming};
 pub use ioreq::UrlOpener;
 pub use real::RealFactory;
+/// The child process that reads the Start menu (`rsb --apps-reader`).
+pub use real::apps::reader as apps_reader;
+pub use real::power::WindowsPowerActions;
+pub use win::trim_heap_soon;
 pub use workspaces::{KomorebiControl, workspaces_service};
 
 /// Largest WebSocket message and frame accepted from a window manager.
@@ -111,6 +115,7 @@ pub(crate) enum HubMsg {
     Publish { service: ServiceId, generation: u64, value: Value, status: Option<(ServiceStatus, Option<String>)> },
     Alive { service: ServiceId, generation: u64 },
     Status { service: ServiceId, generation: u64, status: ServiceStatus, reason: Option<String> },
+    Image { service: ServiceId, generation: u64, key: std::sync::Arc<str>, image: rsb_core::pixels::RgbaImage },
 }
 
 /// Where a service reports. Cloneable and `Send` for its threads. A
@@ -145,6 +150,13 @@ impl Publisher {
             value,
             status: Some((status, reason)),
         });
+    }
+
+    /// An image the service's value refers to by `key` (album art, an app
+    /// icon), kept in memory only. `key` must start with
+    /// `rsb-image:<service name>/`; the hub drops anything else.
+    pub fn publish_image(&self, key: std::sync::Arc<str>, image: rsb_core::pixels::RgbaImage) {
+        let _ = self.tx.send(HubMsg::Image { service: self.service, generation: self.generation, key, image });
     }
 
     /// "Still working, nothing changed."
@@ -196,6 +208,62 @@ impl Default for WorkspaceOptions {
 #[derive(Clone, Debug, Default)]
 pub struct HubOptions {
     pub workspaces: WorkspaceOptions,
+    /// What the real power service calls to lock, sleep, restart, shut
+    /// down and sign out. None = Windows itself. Tests and every run with a
+    /// test flag pass a recorder, so no test can end the session.
+    pub power_actions: Option<std::sync::Arc<dyn PowerActions>>,
+    /// Sees every service command before its service does and may stop it
+    /// there. The binary sets a `CommandRecorder` that stops everything for
+    /// runs driven by test flags on the real services, so a simulated click
+    /// never mutes the microphone, switches the output, starts an app or
+    /// ends the session on the PC the test runs on.
+    pub command_gate: Option<std::sync::Arc<dyn CommandGate>>,
+}
+
+/// A checkpoint every `ServiceCommand` passes on the hub thread.
+pub trait CommandGate: Send + Sync + std::fmt::Debug {
+    /// True lets the command reach its service; false stops it here.
+    fn pass(&self, command: &ServiceCommand) -> bool;
+}
+
+/// Keeps every command it sees (service and method name only, never the
+/// arguments, which can be device or app ids) and lets them through only
+/// when `forward` is set: fake services take them (their values change as
+/// a real PC's would); real services never see them.
+#[derive(Debug, Default)]
+pub struct CommandRecorder {
+    forward: bool,
+    seen: std::sync::Mutex<Vec<(ServiceId, &'static str)>>,
+}
+
+impl CommandRecorder {
+    pub fn new(forward: bool) -> CommandRecorder {
+        CommandRecorder { forward, seen: std::sync::Mutex::new(Vec::new()) }
+    }
+
+    /// `(service, method)` for each command so far, oldest first.
+    pub fn seen(&self) -> Vec<(ServiceId, &'static str)> {
+        self.seen.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+}
+
+impl CommandGate for CommandRecorder {
+    fn pass(&self, command: &ServiceCommand) -> bool {
+        if let Ok(mut v) = self.seen.lock() {
+            v.push((command.service(), command.kind()));
+        }
+        self.forward
+    }
+}
+
+/// The session-ending calls, behind a seam. `real::power` uses
+/// `WindowsPowerActions` unless `HubOptions::power_actions` names another.
+pub trait PowerActions: Send + Sync + std::fmt::Debug {
+    fn lock(&self) -> Result<(), String>;
+    fn sleep(&self) -> Result<(), String>;
+    fn restart(&self) -> Result<(), String>;
+    fn shut_down(&self) -> Result<(), String>;
+    fn sign_out(&self) -> Result<(), String>;
 }
 
 /// Sending side of the hub.

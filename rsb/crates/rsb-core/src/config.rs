@@ -20,7 +20,7 @@ pub const CONFIG_VERSION: i64 = 1;
 /// Preset used when `preset` is not set.
 pub const DEFAULT_PRESET: &str = "default";
 /// Presets shipped inside the binary.
-pub const BUILTIN_PRESETS: &[&str] = &["default", "astur-classic", "glass"];
+pub const BUILTIN_PRESETS: &[&str] = &["default", "fluent", "astur-classic", "glass"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
@@ -60,6 +60,10 @@ pub struct BarSpec {
     pub left: Vec<ZoneItem>,
     pub center: Vec<ZoneItem>,
     pub right: Vec<ZoneItem>,
+    /// The widget of `center` the centre zone is centred on (its ref as
+    /// written, e.g. `dashboard`), so a neighbour that widens grows away
+    /// from it instead of moving it. None = the zone as a whole is centred.
+    pub center_on: Option<String>,
     /// Where the `[[bar]]` table starts, for messages. None for defaults.
     pub pos: Option<SourcePos>,
 }
@@ -226,8 +230,8 @@ pub struct ConfigLoad {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// The built-in values of a bar that sets nothing (zone lists are the
-/// default bar's).
+/// The built-in values of a bar that sets nothing: the bar of the `default`
+/// preset (a test in the binary crate keeps the two equal).
 fn default_bar(index: usize) -> BarSpec {
     let list = |names: &[&str]| -> Vec<ZoneItem> {
         names.iter().map(|n| ZoneItem::new(WidgetRef::parse(n).expect("built-in widget names are valid"))).collect()
@@ -236,15 +240,16 @@ fn default_bar(index: usize) -> BarSpec {
         name: default_bar_name(index),
         monitors: vec![MonitorSelector::All],
         position: Position::Top,
-        height: 32,
+        height: 36,
         floating: false,
         margin: 8,
         radius: 0,
         reserve: true,
         fullscreen: FullscreenMode::Below,
-        left: list(&["workspaces", "title"]),
-        center: list(&["clock"]),
-        right: list(&["media", "network", "volume", "battery", "cpu", "memory", "date"]),
+        left: list(&["workspaces", "media"]),
+        center: list(&["memory", "cpu", "dashboard", "clock", "date"]),
+        right: list(&["status", "battery", "tray", "record", "power"]),
+        center_on: Some("dashboard".into()),
         pos: None,
     }
 }
@@ -256,8 +261,9 @@ fn default_bar_name(index: usize) -> String {
 /// The config used when there is no `bar.toml` (and the fallback when the
 /// very first `bar.toml` read is broken, so a first start never shows an
 /// empty screen edge): one bar on every monitor,
-/// top, 32 px, reserved, left `workspaces title`, center `clock`, right
-/// `media network volume battery cpu memory date`, preset `default`.
+/// top, 36 px, reserved, left `workspaces media`, center `memory cpu
+/// dashboard clock date` centred on `dashboard`, right `status battery tray
+/// record`, preset `default`.
 pub fn default_config() -> Config {
     Config {
         config_version: CONFIG_VERSION,
@@ -282,6 +288,8 @@ struct PartialBar {
     left: Option<Vec<ZoneItem>>,
     center: Option<Vec<ZoneItem>>,
     right: Option<Vec<ZoneItem>>,
+    /// The ref as written and where.
+    center_on: Option<(String, SourcePos)>,
     pos: Option<SourcePos>,
 }
 
@@ -319,6 +327,7 @@ pub const BAR_KEYS: &[&str] = &[
     "left",
     "center",
     "right",
+    "center_on",
 ];
 /// Keys the top of `bar.toml` takes.
 pub const TOP_KEYS: &[&str] = &["config_version", "preset", "bar", "widget"];
@@ -537,6 +546,11 @@ impl Reader<'_> {
                 "left" => b.left = self.zone(key, v),
                 "center" => b.center = self.zone(key, v),
                 "right" => b.right = self.zone(key, v),
+                "center_on" => {
+                    if let Some(s) = self.string(key, v) {
+                        b.center_on = Some((s, self.pos(v.span().start)));
+                    }
+                }
                 _ => {
                     let hint = crate::suggest::hint(key, BAR_KEYS.iter().copied());
                     self.warn(k.span().start, format!("unknown key '{key}' in [[bar]]{hint}"));
@@ -734,6 +748,7 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
 
     // Bars.
     let preset_bars = preset_layer.bars.clone().unwrap_or_default();
+    let user_wrote_bars = user_layer.as_ref().is_some_and(|l| l.bars.is_some());
     let user_bars: Vec<PartialBar> = match user_layer.as_ref().and_then(|l| l.bars.clone()) {
         Some(b) => b,
         None if preset_bars.is_empty() => vec![PartialBar::default()],
@@ -744,6 +759,7 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
         let same_index = preset_bars.get(n);
         let base = same_index.or(preset_bars.last()).cloned().unwrap_or_default();
         let d = default_bar(n);
+        let d_center_on = d.center_on.clone();
         let floating = ub.floating.or(base.floating).unwrap_or(d.floating);
         bars.push(BarSpec {
             name: ub.name.clone().or_else(|| same_index.and_then(|p| p.name.clone())).unwrap_or(d.name),
@@ -758,8 +774,32 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
             left: ub.left.clone().or(base.left).unwrap_or(d.left),
             center: ub.center.clone().or(base.center).unwrap_or(d.center),
             right: ub.right.clone().or(base.right).unwrap_or(d.right),
+            center_on: None,
             pos: ub.pos.clone(),
         });
+        // The pinned widget must be one of the centre zone's. A pin the
+        // user wrote is reported when it is not; one that only came from the
+        // preset is dropped without a word, since the user never wrote it
+        // (they replaced `center` and the preset's pin simply does not fit).
+        let written = user_wrote_bars && ub.center_on.is_some();
+        let pinned = ub
+            .center_on
+            .clone()
+            .or(base.center_on)
+            .map(|(t, at)| (t, Some(at)))
+            .or_else(|| d_center_on.map(|t| (t, None)));
+        if let (Some((text, at)), Some(bar)) = (pinned, bars.last_mut()) {
+            let found = WidgetRef::parse(&text).ok().filter(|r| bar.center.iter().any(|z| z.widget == *r));
+            match found {
+                Some(_) => bar.center_on = Some(text),
+                None if !written => {}
+                None => diags.push(Diagnostic::warning(
+                    DiagKind::Config,
+                    at,
+                    format!("'center_on' names '{text}', which is not in center; the zone is centred as a whole"),
+                )),
+            }
+        }
     }
     // Names must be unique: `rsb toggle <name>` and the CSS class use them.
     let mut seen: Vec<String> = Vec::new();

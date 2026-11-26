@@ -3,7 +3,7 @@
 
 use rsb_core::color::Color;
 use rsb_core::draw::Fill;
-use rsb_core::geom::{Edges, Radii, RectF};
+use rsb_core::geom::{Edges, PathEl, PathF, PointF, Radii, RectF, RectPx};
 use tiny_skia::{GradientStop, LinearGradient, Paint, Path, PathBuilder, Point, SpreadMode, Transform};
 
 /// Control point distance of a cubic that approximates a quarter circle.
@@ -80,6 +80,54 @@ pub(crate) fn rrect_path(rect: RectF, radii: Radii) -> Option<Path> {
     pb.finish()
 }
 
+/// A rounded rectangle with whole-pixel rectangles cut out of it (fill with
+/// the even-odd rule): the part of a box that needs anti-aliasing when the
+/// holes are filled directly. The holes must not overlap.
+pub(crate) fn rrect_ring(rect: RectF, radii: Radii, holes: &[RectPx]) -> Option<Path> {
+    if rect.is_empty() || !sane(&rect) {
+        return None;
+    }
+    let mut pb = PathBuilder::new();
+    add_rrect(&mut pb, rect, clamp_corners(circular(radii), rect.w, rect.h));
+    for hole in holes.iter().filter(|h| !h.is_empty()) {
+        let (x0, y0, x1, y1) = (hole.x0 as f32, hole.y0 as f32, hole.x1 as f32, hole.y1 as f32);
+        pb.move_to(x0, y0);
+        pb.line_to(x1, y0);
+        pb.line_to(x1, y1);
+        pb.line_to(x0, y1);
+        pb.close();
+    }
+    pb.finish()
+}
+
+/// Whole-pixel rectangles inside a rounded rectangle that no corner or
+/// partly covered edge touches: every pixel of them is fully covered. A
+/// band along the top, a band along the bottom and the middle between them
+/// (any of them may be empty). None when they add up to little (the
+/// ordinary path is as fast there).
+pub(crate) fn solid_parts(rect: RectF, radii: Radii) -> Option<[RectPx; 3]> {
+    const MIN_PIXELS: i64 = 2048;
+    if rect.is_empty() || !sane(&rect) {
+        return None;
+    }
+    let c = clamp_corners(circular(radii), rect.w, rect.h);
+    let (top, bottom) = (c[0].1.max(c[1].1), c[2].1.max(c[3].1));
+    let (left, right) = (c[0].0.max(c[3].0), c[1].0.max(c[2].0));
+    let (x0, x1) = (rect.x.ceil() as i32, rect.right().floor() as i32);
+    let (my0, my1) = ((rect.y + top).ceil() as i32, (rect.bottom() - bottom).floor() as i32);
+    if my1 <= my0 || x1 <= x0 {
+        return None;
+    }
+    let (bx0, bx1) = ((rect.x + left).ceil() as i32, (rect.right() - right).floor() as i32);
+    let parts = [
+        RectPx::new(bx0, rect.y.ceil() as i32, bx1, my0),
+        RectPx::new(x0, my0, x1, my1),
+        RectPx::new(bx0, my1, bx1, rect.bottom().floor() as i32),
+    ];
+    let area: i64 = parts.iter().filter(|p| !p.is_empty()).map(|p| p.width() as i64 * p.height() as i64).sum();
+    (area >= MIN_PIXELS).then_some(parts)
+}
+
 /// The ring between the outer rounded rectangle and the same rectangle
 /// shrunk by the side widths (fill with the even-odd rule). When the widths
 /// leave no inside, the ring is the whole outer shape. None when there is
@@ -111,6 +159,79 @@ pub(crate) fn border_path(rect: RectF, radii: Radii, widths: Edges<f32>) -> Opti
             }
         }
         add_rrect(&mut pb, inner_rect, clamp_corners(inner, inner_rect.w, inner_rect.h));
+    }
+    pb.finish()
+}
+
+/// Calls `f` with every point of the outline, control points included.
+fn for_each_point(p: &PathF, mut f: impl FnMut(PointF)) {
+    for el in &p.els {
+        match *el {
+            PathEl::MoveTo(a) | PathEl::LineTo(a) => f(a),
+            PathEl::QuadTo(a, b) => {
+                f(a);
+                f(b);
+            }
+            PathEl::CubicTo(a, b, c) => {
+                f(a);
+                f(b);
+                f(c);
+            }
+            PathEl::Close => {}
+        }
+    }
+}
+
+/// The rectangle holding every point of an outline (control points
+/// included). None for an outline with no points, or with a point that is
+/// not a finite number of sane size: such outlines are skipped quietly.
+pub(crate) fn path_bounds(p: &PathF) -> Option<RectF> {
+    let mut b: Option<(f32, f32, f32, f32)> = None;
+    let mut ok = true;
+    for_each_point(p, |pt| {
+        const LIMIT: f32 = 1.0e6;
+        if !(pt.x.is_finite() && pt.y.is_finite() && pt.x.abs() < LIMIT && pt.y.abs() < LIMIT) {
+            ok = false;
+        }
+        b = Some(match b {
+            Some((x0, y0, x1, y1)) => (x0.min(pt.x), y0.min(pt.y), x1.max(pt.x), y1.max(pt.y)),
+            None => (pt.x, pt.y, pt.x, pt.y),
+        });
+    });
+    let (x0, y0, x1, y1) = b?;
+    ok.then(|| RectF::new(x0, y0, x1 - x0, y1 - y0))
+}
+
+fn add_outline(pb: &mut PathBuilder, p: &PathF) {
+    for el in &p.els {
+        match *el {
+            PathEl::MoveTo(a) => pb.move_to(a.x, a.y),
+            PathEl::LineTo(a) => pb.line_to(a.x, a.y),
+            PathEl::QuadTo(a, b) => pb.quad_to(a.x, a.y, b.x, b.y),
+            PathEl::CubicTo(a, b, c) => pb.cubic_to(a.x, a.y, b.x, b.y, c.x, c.y),
+            PathEl::Close => pb.close(),
+        }
+    }
+}
+
+/// An outline as a tiny-skia path. None when it has no area to fill or a
+/// point that is not usable.
+pub(crate) fn outline_path(p: &PathF) -> Option<Path> {
+    path_bounds(p)?;
+    let mut pb = PathBuilder::new();
+    add_outline(&mut pb, p);
+    pb.finish()
+}
+
+/// Two outlines in one path, to be filled with the even-odd rule: the ring
+/// between `outer` and `inner`. An unusable `inner` leaves the whole outer
+/// shape; an unusable `outer` leaves nothing.
+pub(crate) fn ring_path(outer: &PathF, inner: &PathF) -> Option<Path> {
+    path_bounds(outer)?;
+    let mut pb = PathBuilder::new();
+    add_outline(&mut pb, outer);
+    if path_bounds(inner).is_some() {
+        add_outline(&mut pb, inner);
     }
     pb.finish()
 }

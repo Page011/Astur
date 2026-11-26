@@ -197,7 +197,7 @@ fn render_draws_the_default_bar_with_sample_values() {
         .arg("--config-dir")
         .arg(dir.join("none")));
     assert_eq!(code, 0, "{out} {err}");
-    assert!(out.contains("1200x32 px") && out.contains("0 plates"), "{out}");
+    assert!(out.contains("1200x36 px") && out.contains("0 plates"), "{out}");
     let bytes = std::fs::read(&png).unwrap();
     assert_eq!(&bytes[..8], b"\x89PNG\r\n\x1a\n");
     assert!(!dir.join("none").exists(), "render never creates the config folder");
@@ -298,7 +298,7 @@ fn a_running_bar_answers_every_command_and_stops_cleanly() {
     assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
     assert_eq!(v["bars"][0]["name"], "main");
     assert_eq!(v["bars"][0]["render"], "ok");
-    assert_eq!(v["widgets"].as_array().map(Vec::len), Some(10), "{status}");
+    assert_eq!(v["widgets"].as_array().map(Vec::len), Some(12), "the default bar has twelve widgets: {status}");
     assert!(v["services"].is_array() && v["memory"]["private_mb"].as_f64().unwrap_or(0.0) > 1.0, "{status}");
     assert!(v["widgets"].as_array().unwrap().iter().all(|w| w["state"] == "running"), "{status}");
 

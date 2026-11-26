@@ -51,8 +51,7 @@ const fn i(path: &'static str, ty: &'static str, doc: &'static str, yields: bool
 
 /// Module-level names reserved for later versions. Using one raises
 /// "rsb.<name> is not available in this version".
-pub const RESERVED: &[&str] =
-    &["popup", "menu", "tooltip", "animate", "settings", "tray", "slider", "input", "graph", "open", "ipc"];
+pub const RESERVED: &[&str] = &["settings", "tray", "graph", "open", "ipc"];
 
 /// Names people try that live elsewhere (also never used for anything
 /// else): `rsb.sleep` raises
@@ -68,7 +67,7 @@ pub const HINTS: &[(&str, &str)] = &[
 ];
 
 /// Element props reserved for later versions (same error).
-pub const RESERVED_PROPS: &[&str] = &["tooltip", "popup", "menu", "animate", "on_scroll", "on_key", "draggable"];
+pub const RESERVED_PROPS: &[&str] = &["draggable"];
 
 /// The props every element takes, followed by the element's own fields.
 macro_rules! props {
@@ -76,7 +75,11 @@ macro_rules! props {
         concat!(
             "{ id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, visible: Reactive<boolean>?, ",
             "on_click: ((ClickEvent) -> ())?, on_right_click: ((ClickEvent) -> ())?, on_middle_click: ((ClickEvent) -> ())?, ",
-            "on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?",
+            "on_wheel: ((WheelEvent) -> ())?, on_enter: (() -> ())?, on_leave: (() -> ())?, ",
+            "on_key: ((KeyEvent) -> ())?, on_scroll: ((ScrollEvent) -> ())?, on_focus: (() -> ())?, on_blur: (() -> ())?, ",
+            "tooltip: Reactive<string | Element>?, menu: Reactive<{ MenuItem }>?, focusable: boolean?, autofocus: boolean?, ",
+            "disabled: Reactive<boolean>?, checked: Reactive<boolean>?, nav: (\"vertical\" | \"horizontal\" | \"grid\")?, ",
+            "reveal: Reactive<any>?, animate: Reactive<Animate?>?",
             $own,
             " }"
         )
@@ -123,8 +126,8 @@ pub static API_TYPES: &[ApiType] = &[
     t(
         "Element",
         "",
-        "{ kind: \"box\" | \"text\" | \"icon\" | \"image\" }",
-        "Something to draw; made by rsb.box, rsb.row, rsb.column, rsb.text, rsb.icon, rsb.image (opaque: tables you build yourself are refused)",
+        "{ kind: \"box\" | \"text\" | \"icon\" | \"image\" | \"popup\" | \"menu\" | \"input\" | \"slider\" | \"scroll\" }",
+        "Something to draw; made by rsb.box, rsb.row, rsb.column, rsb.text, rsb.icon, rsb.image, rsb.popup, rsb.menu, rsb.input, rsb.slider, rsb.scroll (opaque: tables you build yourself are refused)",
     ),
     t(
         "ClickEvent",
@@ -139,14 +142,14 @@ pub static API_TYPES: &[ApiType] = &[
     t(
         "IconProps",
         "",
-        props!(", name: Reactive<IconName>?, glyph: Reactive<string>?"),
-        "A named icon, or any glyph text in the icon font",
+        props!(", name: Reactive<IconName>?, glyph: Reactive<string>?, svg: Reactive<string>?"),
+        "A named icon, any glyph text in the icon font, or an SVG icon (a bundled name or a path to an .svg file)",
     ),
     t(
         "ImageProps",
         "",
         props!(", src: Reactive<string>, width: number?, height: number?"),
-        "A PNG, path relative to the widget's folder",
+        "A PNG or SVG, path relative to the widget's folder; or an image key a service value gives (needs that service's read permission)",
     ),
     t(
         "MonitorInfo",
@@ -163,8 +166,8 @@ pub static API_TYPES: &[ApiType] = &[
     t(
         "Permissions",
         "",
-        "{ exec: { string }?, file: { string }?, net: { string }?, control: { \"audio\" | \"media\" | \"workspaces\" }?, read: { \"window\" | \"media\" | \"network\" }? }",
-        "What the widget may do besides drawing and reading services (read: private service values; user widgets get these without asking)",
+        "{ exec: { string }?, file: { string }?, net: { string }?, control: { \"audio\" | \"media\" | \"workspaces\" | \"microphone\" | \"bluetooth\" | \"apps\" | \"power\" | \"wifi\" | \"session\" }?, read: { \"window\" | \"media\" | \"network\" | \"bluetooth\" | \"apps\" | \"wifi\" }?, overlay: boolean?, popups: { string }? }",
+        "What the widget may do besides drawing and reading services (read: private service values; user widgets get window, media and network without asking; session: restart, shut down, sign out; overlay: a popup that covers the monitor; popups: open or close another widget's popup by name)",
     ),
     t(
         "WidgetSpec",
@@ -212,6 +215,60 @@ pub static API_TYPES: &[ApiType] = &[
         "",
         "{ ok: boolean, status: number, body: string, headers: { [string]: string }, from_cache: boolean, error: string?, json: (self: any) -> any }",
         "ok = status 200-299; on a network failure status is 0 and error says why",
+    ),
+    t(
+        "PopupProps",
+        "",
+        "{ id: string?, class: Reactive<string | { string }>?, style: Reactive<Style>?, key: string?, open: State<boolean> | Reactive<boolean>, name: (string | { string })?, group: string?, placement: (\"auto\" | \"below\" | \"above\" | \"left\" | \"right\" | \"screen\")?, align: (\"start\" | \"center\" | \"end\")?, offset: number?, attach: boolean?, focus: (\"auto\" | \"none\" | \"always\")?, dismiss: { outside: boolean?, escape: boolean? }?, on_close: ((reason: CloseReason) -> ())?, on_open: ((name: string) -> ())?, on_key: ((KeyEvent) -> ())?, [number]: Child }",
+        "A popup anchored to the element it is a child of. open given a State is two-way: the UI writes false when it closes the popup. Children are built only while it is open",
+    ),
+    t(
+        "CloseReason",
+        "",
+        "\"outside\" | \"escape\" | \"deactivated\" | \"anchor_gone\" | \"bar_hidden\" | \"display_change\" | \"replaced\" | \"picked\" | \"command\" | \"refused\"",
+        "Why a popup closed",
+    ),
+    t(
+        "MenuItem",
+        "",
+        "{ label: string?, icon: IconName?, svg: string?, shortcut: string?, checked: boolean?, disabled: boolean?, separator: boolean?, on_click: (() -> ())?, items: { MenuItem }? }",
+        "One menu entry; items makes a submenu (at most 256 entries and 4 levels per menu)",
+    ),
+    t(
+        "MenuProps",
+        "",
+        "{ id: string?, class: Reactive<string | { string }>?, key: string?, open: State<boolean> | Reactive<boolean>, items: Reactive<{ MenuItem }>, name: (string | { string })?, placement: (\"auto\" | \"below\" | \"above\" | \"left\" | \"right\")?, on_close: ((reason: CloseReason) -> ())? }",
+        "A menu; as a child it is anchored to its parent, like a popup",
+    ),
+    t(
+        "InputProps",
+        "",
+        props!(
+            ", value: State<string> | Reactive<string>?, placeholder: Reactive<string>?, password: boolean?, max_length: number?, on_change: ((text: string) -> ())?, on_submit: ((text: string) -> ())?"
+        ),
+        "One line of editable text; value given a State is two-way",
+    ),
+    t(
+        "SliderProps",
+        "",
+        props!(
+            ", value: State<number> | Reactive<number>, min: number?, max: number?, step: number?, vertical: boolean?, jump: boolean?, on_change: ((value: number, done: boolean) -> ())?"
+        ),
+        "A value on a track; value given a State is two-way; done is true on the last report of a drag",
+    ),
+    t(
+        "KeyEvent",
+        "",
+        "{ key: string, ctrl: boolean, shift: boolean, alt: boolean, [\"repeat\"]: boolean }",
+        "A key press: key follows the web's KeyboardEvent.key (\"Enter\", \"Escape\", \"ArrowDown\", \"a\"); repeat is a Luau keyword, so read it as e[\"repeat\"]",
+    ),
+    t("ScrollEvent", "", "{ x: number, y: number }", "The new scroll offset in logical px"),
+    t("Animate", "", "{ name: string }", "An animate prop value: run @keyframes name (made by rsb.animate)"),
+    t(
+        "AnimateOptions",
+        "",
+        "{ duration: Duration?, easing: string?, delay: Duration?, iterations: number?, direction: string?, fill: string?, restart: any? }",
+        "restart: the animation starts again from the start whenever this value changes",
     ),
     t("FileOptions", "", "{ max_bytes: number? }", "Default 1 MiB, max 8 MiB"),
     t("FileSignal", "", "{ value: string?, error: string? }", "The file's text, kept current; nil while it is missing"),
@@ -275,6 +332,90 @@ pub static API_ITEMS: &[ApiItem] = &[
         "Children from a list; with key, unchanged items keep their state",
         false,
         "rsb.row { rsb.each(function() local m = ws.monitors return if m and m[1] then m[1].workspaces else {} end, function(w) return rsb.text(w.display_name) end, function(w) return w.name end) }",
+    ),
+    i(
+        "popup",
+        "(props: PopupProps) -> Element",
+        "A popup anchored to the element it is a child of; its content is built only while it is open",
+        false,
+        "rsb.popup { open = shown, function() return rsb.text \"hi\" end }",
+    ),
+    i(
+        "menu",
+        "(props: MenuProps) -> Element",
+        "A menu (as a child: anchored; the menu prop of any element opens one at a right click)",
+        false,
+        "rsb.menu { open = m, items = { { label = \"Reload\", on_click = reload } } }",
+    ),
+    i(
+        "input",
+        "(props: InputProps) -> Element",
+        "One line of editable text",
+        false,
+        "rsb.input { value = query, placeholder = \"Search\", autofocus = true }",
+    ),
+    i(
+        "slider",
+        "(props: SliderProps) -> Element",
+        "A value on a track",
+        false,
+        "rsb.slider { value = vol, on_change = function(v) audio:set_device_volume(id, v) end }",
+    ),
+    i(
+        "scroll",
+        "(props: BoxProps) -> Element",
+        "A column that scrolls",
+        false,
+        "rsb.scroll { class = \"list\", rsb.each(items, row) }",
+    ),
+    i(
+        "popups.open",
+        "(name: string) -> ()",
+        "Opens the named popup on this widget's monitor (from a user widget only inside a click or key handler, unless it is the widget's own popup)",
+        false,
+        "on_click = function() rsb.popups.open(\"launcher\") end",
+    ),
+    i(
+        "popups.close",
+        "(name: string) -> ()",
+        "Closes the named popup on this widget's monitor",
+        false,
+        "rsb.popups.close(\"launcher\")",
+    ),
+    i(
+        "popups.toggle",
+        "(name: string) -> ()",
+        "Opens the named popup, or closes it when it is open",
+        false,
+        "on_click = function() rsb.popups.toggle(\"launcher\") end",
+    ),
+    i(
+        "popups.is_open",
+        "(name: string) -> boolean",
+        "Whether the named popup is open on this widget's monitor; read inside a function prop it updates",
+        false,
+        "class = function() return rsb.popups.is_open(\"power\") and \"on\" or \"\" end",
+    ),
+    i(
+        "animate",
+        "(name: string, options: AnimateOptions?) -> Animate",
+        "An animate prop value: runs @keyframes name, again from the start when options.restart changes",
+        false,
+        "animate = function() return rsb.animate(\"flash\", { duration = \"300ms\", restart = count.value }) end",
+    ),
+    i(
+        "fuzzy",
+        "<T>(query: string, items: { T }, options: { key: ((T) -> string)?, limit: number? }?) -> { T }",
+        "The items that match query, best first, typo tolerant",
+        false,
+        "rsb.fuzzy(q.value, apps.apps, { key = function(a) return a.name end, limit = 50 })",
+    ),
+    i(
+        "fuzzy_match",
+        "(query: string, text: string) -> { number }?",
+        "The 1-based character positions of text that matched query, for highlighting; nil when it does not match",
+        false,
+        "local hit = rsb.fuzzy_match(q.value, app.name)",
     ),
     // Signals
     i(
@@ -387,6 +528,23 @@ pub static API_ITEMS: &[ApiItem] = &[
         false,
         "rsb.services.workspaces:focus(\"2\")",
     ),
+    i(
+        "services.microphone",
+        "MicrophoneService",
+        "Default recording device",
+        false,
+        "rsb.services.microphone:toggle_mute()",
+    ),
+    i(
+        "services.bluetooth",
+        "BluetoothService",
+        "Bluetooth radio and paired devices",
+        false,
+        "rsb.services.bluetooth.devices",
+    ),
+    i("services.apps", "AppsService", "Start menu apps", false, "rsb.services.apps.apps"),
+    i("services.power", "PowerService", "Power mode, lock and the session actions", false, "rsb.services.power:lock()"),
+    i("services.wifi", "WifiService", "Wi-Fi networks in range", false, "rsb.services.wifi.networks"),
     // I/O
     i(
         "exec.run",
@@ -461,7 +619,7 @@ pub static API_ITEMS: &[ApiItem] = &[
     i(
         "open_url",
         "(url: string) -> ()",
-        "Opens an https URL in the default browser: only while a click is being handled, at most one address every 2 seconds (needs net permission for its host)",
+        "Opens an https URL in the default browser: only inside a click or key handler, at most one address every 2 seconds (needs net permission for its host)",
         false,
         "on_click = function() rsb.open_url(\"https://open-meteo.com\") end",
     ),

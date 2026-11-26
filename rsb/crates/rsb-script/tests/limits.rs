@@ -162,7 +162,7 @@ fn wheel_and_enter_leave_handlers_get_their_events() {
     h.start(&[(1, "wh")]);
     let hs = h.root(1).unwrap().handlers;
     let call = |kind, handler: HandlerId| {
-        ScriptIn::Input(HandlerCall { instance: InstanceId(1), handler, kind, x: 3.0, y: 4.5 })
+        ScriptIn::Input(HandlerCall { instance: InstanceId(1), handler, kind, x: 3.0, y: 4.5, gesture: 0 })
     };
     h.send(call(InputKind::Wheel(-1.0), hs.wheel.unwrap()));
     assert_eq!(h.texts(1), vec!["w-1,3,4.5"]);

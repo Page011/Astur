@@ -108,9 +108,47 @@ fn a_user_file_overrides_a_builtin_and_deleting_it_switches_back() {
     assert_eq!(st[0].source, WidgetSource::User("widgets/clock.luau".into()));
     assert!(!st[0].shared_vm);
     assert!(st[1].shared_vm, "the other built-in keeps its VM");
+    // The replacement is said out loud: in the log (once) and in the status.
+    assert!(st[0].replaces_builtin && !st[1].replaces_builtin, "{st:?}");
+    let said = log_lines("widgets/clock.luau replaces the built-in clock widget");
+    assert_eq!(said.len(), 1, "{said:?}");
+    h.send(ScriptIn::FileChanged {
+        rel_path: "widgets/clock.luau".into(),
+        source: Some(widget("return rsb.text 'again'")),
+    });
+    assert_eq!(h.texts(1), vec!["again"]);
+    assert_eq!(log_lines("widgets/clock.luau replaces the built-in clock widget").len(), 1, "not once a reload");
     h.send(ScriptIn::FileChanged { rel_path: "widgets/clock.luau".into(), source: None });
     assert_eq!(h.texts(1), vec!["builtin"]);
     assert_eq!(h.status()[0].source, WidgetSource::Builtin);
+    assert!(!h.status()[0].replaces_builtin);
+}
+
+#[test]
+fn a_file_saved_with_a_capital_extension_reloads_its_widget() {
+    let mut h = Harness::new();
+    h.start(&[(1, "mine")]);
+    h.send(ScriptIn::FileChanged {
+        rel_path: "widgets/mine.luau".into(),
+        source: Some(widget("return rsb.text 'one'")),
+    });
+    assert_eq!(h.texts(1), vec!["one"]);
+    // The file watcher reports the spelling on disk.
+    h.send(ScriptIn::FileChanged {
+        rel_path: "widgets/mine.LUAU".into(),
+        source: Some(widget("return rsb.text 'two'")),
+    });
+    assert_eq!(h.texts(1), vec!["two"]);
+}
+
+#[test]
+fn a_user_widget_that_shares_no_name_with_a_builtin_replaces_nothing() {
+    let mut h = Harness::new();
+    h.builtin("widgets/clock.luau", &widget("return rsb.text 'builtin'"));
+    h.send(ScriptIn::FileChanged { rel_path: "widgets/mine.luau".into(), source: Some(widget("return rsb.text 'x'")) });
+    h.start(&[(1, "mine")]);
+    assert_eq!(h.texts(1), vec!["x"]);
+    assert!(!h.status()[0].replaces_builtin);
 }
 
 #[test]

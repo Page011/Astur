@@ -58,6 +58,16 @@ pub struct Permissions {
     pub net: Vec<String>,
     pub control: Vec<ServiceId>,
     pub read: Vec<ServiceId>,
+    /// `control = { "session" }`: restart, shut down and sign out, apart
+    /// from `control:power` (power mode, lock, sleep), so a lock button
+    /// never also holds shutdown.
+    pub session: bool,
+    /// `overlay = true`: may open a popup with `placement = "screen"` that
+    /// covers the whole monitor, taskbar included.
+    pub overlay: bool,
+    /// `popups = { "name" }`: may open and close another user widget's
+    /// popup by these names (its own and the built-ins' need nothing).
+    pub popups: Vec<String>,
 }
 
 /// A missing permission, written the way the plate and docs write it:
@@ -70,6 +80,12 @@ pub enum Need {
     Net(String),
     Control(ServiceId),
     Read(ServiceId),
+    /// `control:session`.
+    Session,
+    /// `overlay`.
+    Overlay,
+    /// `popups:<name>`.
+    Popup(String),
 }
 
 impl fmt::Display for Need {
@@ -80,6 +96,9 @@ impl fmt::Display for Need {
             Need::Net(h) => write!(f, "net:{h}"),
             Need::Control(s) => write!(f, "control:{}", s.name()),
             Need::Read(s) => write!(f, "read:{}", s.name()),
+            Need::Session => f.write_str("control:session"),
+            Need::Overlay => f.write_str("overlay"),
+            Need::Popup(n) => write!(f, "popups:{n}"),
         }
     }
 }
@@ -110,9 +129,45 @@ pub struct PathEnv {
 }
 
 /// Services `control` may name.
-pub const CONTROL_SERVICES: &[ServiceId] = &[ServiceId::Audio, ServiceId::Media, ServiceId::Workspaces];
+pub const CONTROL_SERVICES: &[ServiceId] = &[
+    ServiceId::Audio,
+    ServiceId::Media,
+    ServiceId::Workspaces,
+    ServiceId::Microphone,
+    ServiceId::Bluetooth,
+    ServiceId::Apps,
+    ServiceId::Power,
+    ServiceId::Wifi,
+];
 /// Services `read` may name.
-pub const READ_SERVICES: &[ServiceId] = &[ServiceId::Window, ServiceId::Media, ServiceId::Network];
+pub const READ_SERVICES: &[ServiceId] =
+    &[ServiceId::Window, ServiceId::Media, ServiceId::Network, ServiceId::Bluetooth, ServiceId::Apps, ServiceId::Wifi];
+/// What user widgets may read without declaring it. Services added to
+/// `READ_SERVICES` later (device names, the app list, network names) must
+/// be declared, so the grant line shows them.
+pub const USER_DEFAULT_READS: &[ServiceId] = &[ServiceId::Window, ServiceId::Media, ServiceId::Network];
+/// Keys of the `permissions` table.
+const PERMISSION_KEYS: &str = "exec, file, net, control, read, overlay, popups";
+
+/// What the grant line adds after a broad `control` or a private `read`.
+fn control_note(id: ServiceId) -> Option<&'static str> {
+    match id {
+        ServiceId::Audio => Some("can change volume, mute and the default output device"),
+        ServiceId::Power => Some("can lock or sleep this PC and change its power mode"),
+        ServiceId::Apps => Some("can start any app in the Start menu"),
+        ServiceId::Bluetooth => Some("can turn Bluetooth off and remove pairings"),
+        _ => None,
+    }
+}
+
+fn read_note(id: ServiceId) -> Option<&'static str> {
+    match id {
+        ServiceId::Wifi => Some("network names reveal where this PC is"),
+        ServiceId::Bluetooth => Some("names of paired devices"),
+        ServiceId::Apps => Some("every installed app"),
+        _ => None,
+    }
+}
 
 /// Programs that can start any other program. Granting one is granting
 /// everything; the grant log and the docs say so.
@@ -556,8 +611,17 @@ impl Permissions {
         };
         let mut p = Permissions::default();
         for (key, val) in map {
-            if !matches!(key.as_str(), "exec" | "file" | "net" | "control" | "read") {
-                return Err(format!("unknown permission '{key}' (exec, file, net, control, read)"));
+            if !matches!(key.as_str(), "exec" | "file" | "net" | "control" | "read" | "overlay" | "popups") {
+                return Err(format!("unknown permission '{key}' ({PERMISSION_KEYS})"));
+            }
+            if key == "overlay" {
+                match val {
+                    Value::Bool(b) => p.overlay = *b,
+                    other => {
+                        return Err(format!("permissions.overlay must be true or false, got {}", other.type_name()));
+                    }
+                }
+                continue;
             }
             let items: Vec<&str> = match val {
                 Value::Str(s) => vec![s.as_str()],
@@ -614,10 +678,27 @@ impl Permissions {
                             None => host,
                         });
                     }
+                    "control" if item == "session" => p.session = true,
+                    "popups" => {
+                        let ok = !item.is_empty()
+                            && item.len() <= 32
+                            && item
+                                .bytes()
+                                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+                        if !ok {
+                            return Err(at(format!("'{item}': popup names use a-z, 0-9, _ and -, at most 32")));
+                        }
+                        if !p.popups.iter().any(|n| n == item) {
+                            p.popups.push(item.to_string());
+                        }
+                    }
                     "control" | "read" => {
                         let allowed = if key == "control" { CONTROL_SERVICES } else { READ_SERVICES };
                         let id = ServiceId::from_name(item).filter(|id| allowed.contains(id)).ok_or_else(|| {
-                            let names: Vec<&str> = allowed.iter().map(|s| s.name()).collect();
+                            let mut names: Vec<&str> = allowed.iter().map(|s| s.name()).collect();
+                            if key == "control" {
+                                names.push("session");
+                            }
                             at(format!("'{item}' is not one of {}", names.join(", ")))
                         })?;
                         let list = if key == "control" { &mut p.control } else { &mut p.read };
@@ -626,7 +707,7 @@ impl Permissions {
                         }
                     }
                     other => {
-                        return Err(format!("unknown permission '{other}' (exec, file, net, control, read)"));
+                        return Err(format!("unknown permission '{other}' ({PERMISSION_KEYS})"));
                     }
                 }
             }
@@ -774,6 +855,21 @@ impl Permissions {
         if self.control.contains(&service) { Ok(()) } else { Err(Need::Control(service)) }
     }
 
+    /// Restart, shut down, sign out.
+    pub fn check_session(&self) -> Result<(), Need> {
+        if self.session { Ok(()) } else { Err(Need::Session) }
+    }
+
+    /// A popup with `placement = "screen"`.
+    pub fn check_overlay(&self) -> Result<(), Need> {
+        if self.overlay { Ok(()) } else { Err(Need::Overlay) }
+    }
+
+    /// Opening or closing another user widget's popup by name.
+    pub fn check_popup(&self, name: &str) -> Result<(), Need> {
+        if self.popups.iter().any(|n| n == name) { Ok(()) } else { Err(Need::Popup(name.to_string())) }
+    }
+
     /// Reading `window`, `media` or `network` values. Other services need
     /// nothing.
     pub fn check_read(&self, service: ServiceId) -> Result<(), Need> {
@@ -786,7 +882,7 @@ impl Permissions {
 
     /// What user widgets in the config folder get without declaring it.
     pub fn grant_user_defaults(&mut self) {
-        for s in READ_SERVICES {
+        for s in USER_DEFAULT_READS {
             if !self.read.contains(s) {
                 self.read.push(*s);
             }
@@ -828,8 +924,21 @@ impl Permissions {
             if broad { format!("file:{f} (can read every file there)") } else { format!("file:{f}") }
         }));
         parts.extend(self.net.iter().map(|n| format!("net:{n}")));
-        parts.extend(self.control.iter().map(|s| format!("control:{}", s.name())));
-        parts.extend(self.read.iter().map(|s| format!("read:{}", s.name())));
+        parts.extend(self.control.iter().map(|s| match control_note(*s) {
+            Some(note) => format!("control:{} ({note})", s.name()),
+            None => format!("control:{}", s.name()),
+        }));
+        if self.session {
+            parts.push("control:session (can restart, shut down or sign out this PC)".into());
+        }
+        parts.extend(self.read.iter().map(|s| match read_note(*s) {
+            Some(note) => format!("read:{} ({note})", s.name()),
+            None => format!("read:{}", s.name()),
+        }));
+        if self.overlay {
+            parts.push("overlay (can cover the whole screen)".into());
+        }
+        parts.extend(self.popups.iter().map(|n| format!("popups:{n}")));
         // exec and click may name the same program: say it once.
         let mut seen = std::collections::HashSet::new();
         parts.retain(|p| seen.insert(p.clone()));
@@ -1321,5 +1430,36 @@ mod tests {
         );
         assert_eq!(Permissions::from_value(&Value::Nil), Ok(Permissions::default()));
         assert!(Permissions::from_value(&Value::Str("x".into())).is_err());
+    }
+
+    #[test]
+    fn session_overlay_and_popups_are_declared_apart_from_control() {
+        let map = |pairs: Vec<(&str, Value)>| Value::Map(pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect());
+        let list = |items: &[&str]| Value::List(items.iter().map(|s| Value::Str(s.to_string())).collect());
+        let p = Permissions::from_value(&map(vec![
+            ("control", list(&["audio", "session"])),
+            ("overlay", Value::Bool(true)),
+            ("popups", list(&["my-panel"])),
+        ]))
+        .unwrap();
+        assert!(p.check_session().is_ok() && p.check_overlay().is_ok() && p.check_popup("my-panel").is_ok());
+        assert_eq!(p.check_popup("other"), Err(Need::Popup("other".into())));
+        assert_eq!(
+            p.describe(),
+            "control:audio (can change volume, mute and the default output device), \
+             control:session (can restart, shut down or sign out this PC), overlay (can cover the whole screen), \
+             popups:my-panel"
+        );
+        let none = Permissions::default();
+        assert_eq!(none.check_session().unwrap_err().message("w"), "w needs control:session; add it to permissions");
+        assert_eq!(none.check_overlay().unwrap_err().to_string(), "overlay");
+        assert!(Permissions::from_value(&map(vec![("overlay", Value::Str("yes".into()))])).is_err());
+        assert!(Permissions::from_value(&map(vec![("popups", list(&["Bad Name"]))])).is_err());
+        let err = Permissions::from_value(&map(vec![("control", list(&["shutdown"]))])).unwrap_err();
+        assert!(err.contains("session"), "{err}");
+        // The default grant stays what it was: new private reads must be declared.
+        let mut u = Permissions::default();
+        u.grant_user_defaults();
+        assert_eq!(u.read, USER_DEFAULT_READS);
     }
 }

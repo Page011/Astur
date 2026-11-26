@@ -177,6 +177,23 @@ fn set_image_size_damages_the_image_node_and_gives_it_its_size() {
 }
 
 #[test]
+fn a_user_svg_that_arrives_late_is_redrawn() {
+    let t0 = Instant::now();
+    let mut img = Element::new(ElementKind::Image);
+    img.image = Some(ImageRef { path: Arc::from("C:/x/logo.svg"), width: Some(20.0), height: Some(10.0) });
+    img.classes = vec![Arc::from("pic")];
+    let mut s = scene_with(BASE, 300, 1.0, Some(boxed(vec![img])), None, None);
+    let f = frame(&mut s, t0);
+    assert!(f.draw.items.iter().any(|i| matches!(i.cmd, DrawCmd::Svg { .. })));
+    // The draw list stays equal when the file is parsed, but the picture must be painted.
+    s.set_image_size("C:/x/logo.svg", 20, 10);
+    let f = frame(&mut s, at(t0, 5));
+    let item = f.draw.items.iter().find(|i| matches!(i.cmd, DrawCmd::Svg { .. })).unwrap();
+    assert_eq!(f.dirty, Some(RectPx::outward(&item.bounds).intersect(&RectPx::new(0, 0, 300, 32)).unwrap()));
+    assert_eq!(frame(&mut s, at(t0, 10)).dirty, None);
+}
+
+#[test]
 fn an_image_with_one_dimension_keeps_its_aspect() {
     let t0 = Instant::now();
     let mut s = scene_with(BASE, 300, 1.0, Some(image_element(Some(40.0), None)), None, None);
@@ -436,6 +453,25 @@ fn a_preset_rule_that_uses_a_bad_user_variable_points_at_the_users_value() {
     use rsb_core::css::Stylesheet;
     let mut sheet = Stylesheet::empty();
     sheet.append(Stylesheet::parse(".a { padding: var(--pad) }", "preset.css").0);
+    sheet.append(Stylesheet::parse(":root { --pad: wide }", "style.css").0);
+    let t0 = Instant::now();
+    let mut s = scene_with("", 100, 1.0, Some(classed(text("a"), &["a"])), None, None);
+    s.set_stylesheet(Arc::new(sheet));
+    frame(&mut s, t0);
+    let d = s.take_diagnostics();
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert_eq!(
+        d[0].diagnostic.plate_text(),
+        "RSB ERROR - style.css:1:9 --pad: expected a length like 12px, got 'wide' (the preset uses it for 'padding')"
+    );
+}
+
+#[test]
+fn a_bad_user_variable_passed_on_by_another_preset_variable_points_at_the_users_line_and_name() {
+    // The preset says `--pad-x: var(--pad)` and uses --pad-x: the value is still the user's, written in --pad.
+    use rsb_core::css::Stylesheet;
+    let mut sheet = Stylesheet::empty();
+    sheet.append(Stylesheet::parse(":root { --pad-x: var(--pad) } .a { padding: var(--pad-x) }", "preset.css").0);
     sheet.append(Stylesheet::parse(":root { --pad: wide }", "style.css").0);
     let t0 = Instant::now();
     let mut s = scene_with("", 100, 1.0, Some(classed(text("a"), &["a"])), None, None);

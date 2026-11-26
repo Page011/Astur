@@ -12,7 +12,7 @@ use mlua::{Lua, MultiValue, Table, Value as Lv};
 use rsb_core::config::WidgetRef;
 use rsb_core::diag::{DiagKind, Diagnostic, Plate, SourcePos};
 use rsb_core::element::{InstanceId, WidgetTree};
-use rsb_core::hit::{Button, HandlerCall, InputKind};
+use rsb_core::hit::{Button, ElementCall, ElementEvent, HandlerCall, InputKind};
 use rsb_core::io::{IoEvent, IoEventKind, IoGrant};
 use rsb_core::msg::{
     HubEvent, HubPort, HubRequest, InstanceSpec, ScriptIn, ScriptOut, ScriptSink, WidgetSource, WidgetState,
@@ -20,6 +20,7 @@ use rsb_core::msg::{
 };
 use rsb_core::paths::widget_files;
 use rsb_core::permissions::Permissions;
+use rsb_core::popup::PopupAction;
 use rsb_core::services::{ServiceEvent, ServiceStatus};
 use rsb_core::time::{TimeZone, until_boundary};
 use rsb_core::value::Value;
@@ -48,6 +49,8 @@ struct Resolved {
     rel: String,
     src: String,
     builtin: bool,
+    /// A user file with the name of a built-in widget.
+    replaces_builtin: bool,
 }
 
 pub(crate) struct Core {
@@ -58,6 +61,8 @@ pub(crate) struct Core {
     vm_of_inst: HashMap<InstanceId, VmKey>,
     next_vm: VmId,
     rr_last: Option<InstanceId>,
+    /// A popup closed since the last turn ended: its tree is garbage now, so the VMs are swept once.
+    sweep: bool,
 }
 
 fn split_pos(msg: &str) -> (Option<SourcePos>, String) {
@@ -109,6 +114,7 @@ impl Core {
             vm_of_inst: HashMap::new(),
             next_vm: 0,
             rr_last: None,
+            sweep: false,
         }
     }
 
@@ -128,6 +134,12 @@ impl Core {
             ScriptIn::FileChanged { rel_path, source } => self.file_changed(&rel_path, source),
             ScriptIn::Hub(HubEvent::Service(ev)) => self.service_event(ev),
             ScriptIn::Hub(HubEvent::Io(ev)) => self.io_event(ev),
+            // Images are the renderer's; the binary never routes them here.
+            ScriptIn::Hub(HubEvent::Image { .. }) => {}
+            ScriptIn::Element(call) => {
+                self.sh.st.borrow_mut().ready.entry(call.instance).or_default().push_back(Work::Element(call));
+            }
+            ScriptIn::Popup { name, action, monitor, gesture } => self.popup_message(&name, action, monitor, gesture),
             ScriptIn::Input(call) => {
                 self.sh.st.borrow_mut().ready.entry(call.instance).or_default().push_back(Work::Input(call));
             }
@@ -251,13 +263,18 @@ impl Core {
     fn resolve_entry(&self, widget: &WidgetRef) -> Result<Resolved, String> {
         for rel in widget_files(widget) {
             if let Some(src) = self.sh.user_source(&rel)? {
-                return Ok(Resolved { rel, src, builtin: false });
+                let replaces_builtin = !widget.is_path()
+                    && self.sh.env.sources.builtin(&format!("widgets/{}.luau", widget.name)).is_some();
+                if replaces_builtin && self.sh.st.borrow_mut().replaced_reported.insert(rel.clone()) {
+                    log::warn!("{rel} replaces the built-in {} widget, with its popups and hotkey", widget.name);
+                }
+                return Ok(Resolved { rel, src, builtin: false, replaces_builtin });
             }
         }
         if !widget.is_path() {
             let rel = format!("widgets/{}.luau", widget.name);
             if let Some(src) = self.sh.env.sources.builtin(&rel) {
-                return Ok(Resolved { rel, src: src.into_owned(), builtin: true });
+                return Ok(Resolved { rel, src: src.into_owned(), builtin: true, replaces_builtin: false });
             }
         }
         let mut names = self.sh.env.sources.builtin_widgets();
@@ -278,6 +295,7 @@ impl Core {
             ref_text: spec.widget.to_string(),
             source: if r.builtin { WidgetSource::Builtin } else { WidgetSource::User(r.rel.clone()) },
             builtin: r.builtin,
+            replaces_builtin: r.replaces_builtin,
             files: std::iter::once(r.rel.clone()).collect(),
             entry,
             perms: Permissions::default(),
@@ -295,6 +313,7 @@ impl Core {
             version: 0,
             dirty: false,
             error_until: None,
+            last_error: None,
             err_times: Default::default(),
             cpu: Default::default(),
             cpu_sum: Duration::ZERO,
@@ -309,6 +328,7 @@ impl Core {
             loading: Vec::new(),
             timer_warned: false,
             widget_name: String::new(),
+            gesture_cmd_at: None,
             spec,
             vm: 0,
         }
@@ -319,7 +339,7 @@ impl Core {
         let resolved = match self.resolve_entry(&spec.widget) {
             Ok(r) => r,
             Err(msg) => {
-                let r = Resolved { rel: String::new(), src: String::new(), builtin: false };
+                let r = Resolved { rel: String::new(), src: String::new(), builtin: false, replaces_builtin: false };
                 let inst = self.new_inst(spec.clone(), &r, carry);
                 self.sh.st.borrow_mut().instances.insert(id, inst);
                 let diag = Diagnostic::error(DiagKind::Config, spec.pos.clone(), msg);
@@ -546,6 +566,10 @@ impl Core {
             st.ready.remove(&id);
             st.deferred.retain(|(i, _)| *i != id);
             st.pending_flush.remove(&id);
+            let popups: Vec<u64> = st.popups.iter().filter(|(_, r)| r.inst == id).map(|(pid, _)| *pid).collect();
+            for pid in popups {
+                st.popup_drop(pid);
+            }
             if let Some(i) = st.instances.get_mut(&id) {
                 i.handlers.clear();
                 i.subs.clear();
@@ -574,7 +598,13 @@ impl Core {
 
     fn remove_instance(&mut self, id: InstanceId) {
         self.teardown(id);
-        self.sh.st.borrow_mut().instances.remove(&id);
+        {
+            let mut st = self.sh.st.borrow_mut();
+            if st.instances.get(&id).is_some_and(|i| i.error_until.is_some()) {
+                st.error_notes.push((id, None));
+            }
+            st.instances.remove(&id);
+        }
         self.vm_of_inst.remove(&id);
         self.drop_unused_vms();
     }
@@ -594,7 +624,13 @@ impl Core {
         log::warn!("rebuilding the shared widget VM: memory stayed above 90% after a full collection");
         for (id, ..) in &members {
             self.teardown(*id);
-            self.sh.st.borrow_mut().instances.remove(id);
+            {
+                let mut st = self.sh.st.borrow_mut();
+                if st.instances.get(id).is_some_and(|i| i.error_until.is_some()) {
+                    st.error_notes.push((*id, None));
+                }
+                st.instances.remove(id);
+            }
             self.vm_of_inst.remove(id);
         }
         self.vm_keys.remove(&key);
@@ -605,9 +641,13 @@ impl Core {
     }
 
     fn file_changed(&mut self, rel: &str, source: Option<String>) {
-        if !rel.starts_with("widgets/") || !rel.ends_with(".luau") {
+        let is_luau = std::path::Path::new(rel).extension().is_some_and(|e| e.eq_ignore_ascii_case("luau"));
+        if !rel.starts_with("widgets/") || !is_luau {
             return;
         }
+        // Widget files are keyed with a lower-case extension, whatever the file is called.
+        let rel = format!("{}.luau", &rel[..rel.len() - ".luau".len()]);
+        let rel = rel.as_str();
         self.sh.st.borrow_mut().user_src.insert(rel.to_string(), source);
         let affected: Vec<InstanceId> = {
             let st = self.sh.st.borrow();
@@ -915,7 +955,144 @@ impl Core {
                 });
             }
             Work::Input(call) => self.run_input(id, call),
+            Work::Element(call) => self.run_element(id, call),
+            Work::Popup { pid, action, name, gesture } => {
+                let vm = self.vm_of(id);
+                self.set_gesture(vm, gesture);
+                self.call_in(id, "popup", |_, e| e.popup_cmd.call::<()>((id.0, pid, action.name(), name)));
+                self.set_gesture(vm, None);
+            }
         }
+    }
+
+    fn vm_of(&self, id: InstanceId) -> Option<VmId> {
+        self.sh.st.borrow().instances.get(&id).map(|i| i.vm)
+    }
+
+    /// Marks the user input being handled: the id the commands that need a click or key look for, and the same id
+    /// where the prelude can read it when a signal is written.
+    fn set_gesture(&self, vm: Option<VmId>, gesture: Option<u64>) {
+        self.sh.st.borrow_mut().gesture = gesture;
+        if let Some(vm) = vm.and_then(|v| self.vms.get(&v)) {
+            let _ = vm.n.raw_set("g", gesture.map_or(Lv::Nil, |g| Lv::Integer(g as i64)));
+        }
+    }
+
+    /// A key, text, value, focus, scroll or popup event from a scene for one handler of the instance.
+    fn run_element(&mut self, id: InstanceId, call: ElementCall) {
+        let sh = self.sh.clone();
+        let f = sh.st.borrow().instances.get(&id).and_then(|i| i.handlers.get(&call.handler.0).cloned());
+        let Some(f) = f else { return };
+        let (label, gesture) = match &call.event {
+            ElementEvent::Key(e) => {
+                if !e.down {
+                    return;
+                }
+                ("on_key", (call.gesture != 0).then_some(call.gesture))
+            }
+            ElementEvent::TextChanged(_) => ("on_change", None),
+            ElementEvent::Submitted(_) => ("on_submit", None),
+            ElementEvent::ValueChanged { .. } => ("on_change", None),
+            ElementEvent::Focus => ("on_focus", None),
+            ElementEvent::Blur => ("on_blur", None),
+            ElementEvent::Scrolled { .. } => ("on_scroll", None),
+            ElementEvent::PopupClosed(_) => ("on_close", None),
+            ElementEvent::PopupOpened(_) => ("on_open", None),
+        };
+        let vm = self.vm_of(id);
+        self.set_gesture(vm, gesture);
+        self.call_in(id, label, |lua, _| {
+            let args = match &call.event {
+                ElementEvent::Key(e) => {
+                    let t = lua.create_table()?;
+                    t.set("key", e.key.name())?;
+                    t.set("ctrl", e.mods.ctrl)?;
+                    t.set("shift", e.mods.shift)?;
+                    t.set("alt", e.mods.alt)?;
+                    t.set("repeat", e.repeat)?;
+                    MultiValue::from_vec(vec![Lv::Table(t)])
+                }
+                ElementEvent::TextChanged(text) | ElementEvent::Submitted(text) => {
+                    MultiValue::from_vec(vec![Lv::String(lua.create_string(&**text)?)])
+                }
+                ElementEvent::ValueChanged { value, done } => {
+                    MultiValue::from_vec(vec![Lv::Number(*value), Lv::Boolean(*done)])
+                }
+                ElementEvent::Focus | ElementEvent::Blur => MultiValue::new(),
+                ElementEvent::Scrolled { x, y } => {
+                    let t = lua.create_table()?;
+                    t.set("x", *x)?;
+                    t.set("y", *y)?;
+                    MultiValue::from_vec(vec![Lv::Table(t)])
+                }
+                ElementEvent::PopupClosed(reason) => {
+                    MultiValue::from_vec(vec![Lv::String(lua.create_string(reason.name())?)])
+                }
+                ElementEvent::PopupOpened(name) => MultiValue::from_vec(vec![Lv::String(lua.create_string(&**name)?)]),
+            };
+            sh.spawn_task(lua, id, f, args).map(|_| ())
+        });
+        self.set_gesture(vm, None);
+    }
+
+    /// `rsb popup <name> [action]`: queues the change for the instance whose popup answers to the name on the
+    /// monitor (None = the primary one).
+    fn popup_message(&mut self, name: &str, action: PopupAction, monitor: Option<u64>, gesture: u64) {
+        let mut st = self.sh.st.borrow_mut();
+        let monitor = monitor.or_else(|| {
+            let primary = st.instances.values().find(|i| i.spec.monitor.primary);
+            let first = st.instances.values().min_by_key(|i| i.spec.monitor.index);
+            primary.or(first).map(|i| i.spec.monitor.handle)
+        });
+        let Some(monitor) = monitor else { return };
+        let target = st
+            .popups
+            .iter()
+            .filter(|(_, r)| r.monitor == monitor && r.names.iter().any(|n| n == name))
+            .map(|(pid, r)| (*pid, r.inst, st.instances.get(&r.inst).is_some_and(|i| i.builtin)))
+            .min_by_key(|(pid, _, builtin)| (!*builtin, *pid));
+        let Some((pid, owner, _)) = target else {
+            log::info!("rsb popup: no popup is named '{}'", crate::shared::escape_log(name, 40));
+            return;
+        };
+        st.ready.entry(owner).or_default().push_back(Work::Popup {
+            pid,
+            action,
+            name: name.to_string(),
+            gesture: (gesture != 0).then_some(gesture),
+        });
+    }
+
+    /// Tells every VM which named popups opened or closed, so `rsb.popups.is_open` updates across widgets.
+    fn push_popup_events(&mut self) {
+        let events = std::mem::take(&mut self.sh.st.borrow_mut().popup_events);
+        if events.is_empty() {
+            return;
+        }
+        self.sweep |= events.iter().any(|(_, open)| !open);
+        let sh = self.sh.clone();
+        let lim = sh.env.limits;
+        let ids: Vec<VmId> = self.vms.keys().copied().collect();
+        for vm_id in ids {
+            let Some(vm) = self.vms.get(&vm_id) else { continue };
+            let _ = sh.guarded(
+                Call {
+                    inst: None,
+                    label: "popup",
+                    budget: lim.callback_budget,
+                    loading: false,
+                    mem: (vm.limit, vm.soft),
+                    reset: Some(&vm.entry.reset),
+                },
+                || {
+                    for (key, open) in &events {
+                        vm.entry.popup_event.call::<()>((key.as_str(), *open))?;
+                    }
+                    Ok(())
+                },
+            );
+        }
+        self.collect_pending();
     }
 
     fn run_input(&mut self, id: InstanceId, call: HandlerCall) {
@@ -930,8 +1107,9 @@ impl Core {
             InputKind::Enter => "on_enter",
             InputKind::Leave => "on_leave",
         };
-        let clicked = matches!(call.kind, InputKind::Click(_));
-        sh.st.borrow_mut().in_click = clicked;
+        let gesture = (matches!(call.kind, InputKind::Click(_)) && call.gesture != 0).then_some(call.gesture);
+        let vm = self.vm_of(id);
+        self.set_gesture(vm, gesture);
         self.call_in(id, label, |lua, _| {
             let args = match call.kind {
                 InputKind::Click(b) => {
@@ -952,7 +1130,7 @@ impl Core {
             };
             sh.spawn_task(lua, id, f, args).map(|_| ())
         });
-        sh.st.borrow_mut().in_click = false;
+        self.set_gesture(vm, None);
     }
 
     // ------------------------------------------------------------ the turn
@@ -1015,6 +1193,7 @@ impl Core {
                 }
                 st.ready.entry(inst).or_default().push_back(Work::Resume { task, payload: Payload::Nothing });
             }
+            let mut ended: Vec<InstanceId> = Vec::new();
             for i in st.instances.values_mut() {
                 if let Some(at) = i.restart_at
                     && at <= now
@@ -1025,9 +1204,12 @@ impl Core {
                     && u <= now
                 {
                     i.error_until = None;
+                    i.last_error = None;
                     i.dirty = true;
+                    ended.push(i.id);
                 }
             }
+            st.error_notes.extend(ended.into_iter().map(|id| (id, None)));
         }
         for id in restarts {
             let carry;
@@ -1067,12 +1249,19 @@ impl Core {
         while let Some((id, work)) = self.next_ready() {
             self.run_work(id, work);
             self.collect_pending();
+            self.push_popup_events();
             if started.elapsed() >= budget {
                 break;
             }
         }
         self.settle();
         self.flush_out();
+        if std::mem::take(&mut self.sweep) {
+            // The incremental collector would hold a closed popup's tree for a long time on an idle bar.
+            for vm in self.vms.values() {
+                let _ = vm.lua.gc_collect();
+            }
+        }
     }
 
     /// Runs the effect passes still waiting at the front of a queue, so the
@@ -1098,11 +1287,13 @@ impl Core {
                     self.run_work(id, w);
                 }
                 self.collect_pending();
+                self.push_popup_events();
             }
         }
     }
 
     fn flush_out(&mut self) {
+        self.push_popup_events();
         let sh = self.sh.clone();
         let now = sh.mono();
         let ids: Vec<InstanceId> = sh
@@ -1138,10 +1329,18 @@ impl Core {
                 }
             }
         }
-        let (plates, cleared, diags) = {
+        let (plates, cleared, diags, notes) = {
             let mut st = sh.st.borrow_mut();
-            (std::mem::take(&mut st.plates), std::mem::take(&mut st.cleared), std::mem::take(&mut st.diags))
+            (
+                std::mem::take(&mut st.plates),
+                std::mem::take(&mut st.cleared),
+                std::mem::take(&mut st.diags),
+                std::mem::take(&mut st.error_notes),
+            )
         };
+        for (instance, note) in notes {
+            sh.out.send(ScriptOut::ErrorNote { instance, note });
+        }
         for id in cleared {
             let mut st = sh.st.borrow_mut();
             if let Some(i) = st.instances.get_mut(&id) {
@@ -1215,6 +1414,7 @@ impl Core {
                 vm_bytes: self.vms.get(&i.vm).map_or(0, |v| v.lua.used_memory()),
                 shared_vm: i.builtin || shares_vm(i.id),
                 source: i.source.clone(),
+                replaces_builtin: i.replaces_builtin,
                 errors: i.errors,
                 restarts: i.restarts,
             })
@@ -1225,7 +1425,7 @@ impl Core {
 /// `Permissions::from_value` reads only the keys that hold entries, so a
 /// misspelled key with an empty list would pass in silence.
 fn check_permission_keys(declared: &Value) -> mlua::Result<()> {
-    const KEYS: [&str; 5] = ["exec", "file", "net", "control", "read"];
+    const KEYS: [&str; 7] = ["exec", "file", "net", "control", "read", "overlay", "popups"];
     let Value::Map(map) = declared else { return Ok(()) };
     let names: Vec<String> = KEYS.iter().map(|k| k.to_string()).collect();
     for key in map.keys() {

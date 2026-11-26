@@ -32,7 +32,11 @@ pub struct ProbeStats {
     pub samples: u64,
     pub p50_ms: f64,
     pub p95_ms: f64,
+    /// The worst round trip of the whole run, start-up included.
     pub worst_ms: f64,
+    /// The worst round trip after the first bar frame was drawn: what the
+    /// running bar does, without the one-off cost of building it.
+    pub worst_after_first_frame_ms: f64,
     /// Sends that hit the 1 s timeout.
     pub timeouts: u64,
 }
@@ -43,12 +47,27 @@ pub(crate) struct Histogram {
     big: Vec<f64>,
     samples: u64,
     worst: f64,
+    worst_after_first: f64,
+    after_first: bool,
     timeouts: u64,
 }
 
 impl Histogram {
     pub(crate) fn new() -> Histogram {
-        Histogram { bins: vec![0; BINS], big: Vec::new(), samples: 0, worst: 0.0, timeouts: 0 }
+        Histogram {
+            bins: vec![0; BINS],
+            big: Vec::new(),
+            samples: 0,
+            worst: 0.0,
+            worst_after_first: 0.0,
+            after_first: false,
+            timeouts: 0,
+        }
+    }
+
+    /// The first bar frame is on the screen: from here the worst gap is kept apart.
+    pub(crate) fn first_frame_drawn(&mut self) {
+        self.after_first = true;
     }
 
     pub(crate) fn record(&mut self, ms: f64, timed_out: bool) {
@@ -57,6 +76,9 @@ impl Histogram {
             self.timeouts += 1;
         }
         self.worst = self.worst.max(ms);
+        if self.after_first {
+            self.worst_after_first = self.worst_after_first.max(ms);
+        }
         let bin = (ms / BIN_MS) as usize;
         if bin < BINS {
             self.bins[bin] += 1;
@@ -94,6 +116,7 @@ impl Histogram {
             p50_ms: self.quantile(0.50),
             p95_ms: self.quantile(0.95),
             worst_ms: self.worst,
+            worst_after_first_frame_ms: self.worst_after_first,
             timeouts: self.timeouts,
         }
     }
@@ -151,6 +174,11 @@ impl UiProbe {
     pub fn stats(&self) -> ProbeStats {
         self.hist.lock().unwrap_or_else(|e| e.into_inner()).stats()
     }
+
+    /// The first bar frame was drawn.
+    pub fn first_frame_drawn(&self) {
+        self.hist.lock().unwrap_or_else(|e| e.into_inner()).first_frame_drawn();
+    }
 }
 
 impl Drop for UiProbe {
@@ -188,6 +216,19 @@ mod tests {
         assert!((s.p95_ms - 10.0).abs() <= 0.1, "p95 {}", s.p95_ms);
         assert_eq!(s.worst_ms, 30.0);
         assert_eq!(s.timeouts, 0);
+    }
+
+    #[test]
+    fn the_worst_gap_after_the_first_frame_is_kept_apart_from_the_start_up() {
+        let mut h = Histogram::new();
+        h.record(40.0, false); // building the first frame
+        h.record(1.0, false);
+        h.first_frame_drawn();
+        h.record(6.0, false);
+        h.record(2.0, false);
+        let s = h.stats();
+        assert_eq!((s.worst_ms, s.worst_after_first_frame_ms), (40.0, 6.0));
+        assert_eq!(Histogram::new().stats().worst_after_first_frame_ms, 0.0);
     }
 
     #[test]

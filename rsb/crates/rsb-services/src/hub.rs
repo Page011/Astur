@@ -189,14 +189,6 @@ struct Core {
     timing: HubTiming,
 }
 
-fn command_service(command: &ServiceCommand) -> ServiceId {
-    match command {
-        ServiceCommand::Audio(_) => ServiceId::Audio,
-        ServiceCommand::Media(_) => ServiceId::Media,
-        ServiceCommand::Workspaces(_) => ServiceId::Workspaces,
-    }
-}
-
 impl Core {
     fn new(
         options: HubOptions,
@@ -411,7 +403,13 @@ impl Core {
     }
 
     fn command(&mut self, command: ServiceCommand, now: Instant) {
-        let id = command_service(&command);
+        let id = command.service();
+        if let Some(gate) = &self.options.command_gate
+            && !gate.pass(&command)
+        {
+            // Stopped before the service is even started.
+            return;
+        }
         let i = Core::index(id);
         if !self.slots[i].running {
             self.start_service(i, now);
@@ -445,6 +443,22 @@ impl Core {
     }
 
     // --------------------------------------------------- source reports
+
+    /// Images go straight to the sink (the binary hands them to the
+    /// renderer); only from the running generation and under the
+    /// service's own key prefix.
+    fn handle_image(&mut self, service: ServiceId, generation: u64, key: Arc<str>, image: rsb_core::pixels::RgbaImage) {
+        let i = Core::index(service);
+        if !self.slots[i].running || self.slots[i].generation != generation {
+            return;
+        }
+        let prefix = format!("{}{}/", rsb_core::pixels::IMAGE_KEY_PREFIX, service.name());
+        if !key.starts_with(&prefix) {
+            log::error!("service {} published an image under a key outside its own", service.name());
+            return;
+        }
+        (self.sink)(HubEvent::Image { key, image });
+    }
 
     fn handle_publish(
         &mut self,
@@ -607,6 +621,7 @@ fn run(mut core: Core, rx: Receiver<HubMsg>, wakes: &AtomicU64) {
             Ok(HubMsg::Status { service, generation, status, reason }) => {
                 core.handle_status(service, generation, status, reason, now)
             }
+            Ok(HubMsg::Image { service, generation, key, image }) => core.handle_image(service, generation, key, image),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }

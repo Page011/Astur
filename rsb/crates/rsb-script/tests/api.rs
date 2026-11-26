@@ -366,6 +366,7 @@ fn median_click_turn(src: &str, name: &str, n: usize) -> std::time::Duration {
             kind: rsb_core::hit::InputKind::Click(rsb_core::hit::Button::Left),
             x: 0.0,
             y: 0.0,
+            gesture: 0,
         }));
         times.push(t.elapsed());
     }

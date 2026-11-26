@@ -1,67 +1,1430 @@
-/* default: a full-width translucent bar, dark or light with Windows, accent
-   pills for workspaces. Change a colour by setting the custom property in
-   your own style.css, for example  :root { --accent: #e5a50a; }  */
+/* default: chevron segments along the top edge of the screen, dark or light
+   with Windows. Every colour is a custom property, so one line in your own
+   style.css changes it, for example  :root { --accent: #e5a50a; }
+   Segments are cut with clip-path; --d is the depth of a point. */
 
 @media (prefers-color-scheme: dark) {
 	:root {
-		--bg: rgba(28, 28, 32, 0.88);
-		--fg: #f2f2f5;
-		--muted: #c1c6d1;
+		--seg0: #090f12;
+		--seg1: #1b1f22;
+		--seg2: #2f3639;
+		--seg0-hover: #12191d;
+		--seg1-hover: #23282b;
+		--seg2-hover: #373e42;
+		--seg0-press: #1b2327;
+		--seg1-press: #2c3236;
+		--seg2-press: #40474b;
+		--panel: #0f1317;
+		--card: #1b1f22;
+		--input: #252b2e;
+		--row: #252b2e;
+		--row-selected: #2f3639;
+		--row-hover: #32393a;
+		--row-press: #383f43;
+		--tile-hover: #1b1f22;
+		--tile-press: #23282b;
+		--icon-hover: #3a4245;
+		--icon-press: #444c50;
+		--fg: #e0e5e8;
+		--muted: #c1c6c9;
+		--mem: #f2cdcd;
+		--accent: #81cbea;
+		--accent-hover: #95d4ee;
+		--accent-press: #6cbfe2;
+		--accent-fg: #003447;
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
+		--placeholder: #8e9497;
+		--dim: #6d7477;
 		--warn: #ffc562;
 		--error: #ffb3b3;
-		--pill: rgba(255, 255, 255, 0.1);
-		--hover: rgba(255, 255, 255, 0.14);
-		--press: rgba(255, 255, 255, 0.22);
-		--accent: #4cc2ff;
-		--accent-fg: #06202e;
+		--row-tint: rgba(129, 203, 234, 0.1);
+		--row-connected: #2e3b41;
+		--row-connected-on: #38454b;
+		--audio-fill: rgba(255, 255, 255, 0.07);
+		--audio-fill-hover: rgba(255, 255, 255, 0.1);
+		--audio-fill-drag: rgba(255, 255, 255, 0.13);
+		--power-fill-1: #2f3639;
+		--power-fill-2: #1b1f22;
+		--power-fill-3: #171b1f;
+		--power-fill-4: #090f12;
+		--power-tile: #1e2427;
+		--power-tile-press: #262d31;
+		--power-icon-hover: #b0d7ea;
+		--overlay-dim: rgba(9, 15, 18, 0.5);
+		--overlay-dim-blur: rgba(9, 15, 18, 0.35);
+		--lock-curtain: #090f12;
+		--scrollbar-thumb: rgba(224, 229, 232, 0.5);
 	}
 }
 
 @media (prefers-color-scheme: light) {
 	:root {
-		--bg: rgba(243, 243, 246, 0.88);
-		--fg: #1b1e24;
-		--muted: #3f4654;
+		--seg0: #d5dbdf;
+		--seg1: #e4e9ec;
+		--seg2: #f1f4f6;
+		--seg0-hover: #cad1d6;
+		--seg1-hover: #d9dfe3;
+		--seg2-hover: #e6ebee;
+		--seg0-press: #bfc7cd;
+		--seg1-press: #cdd4d9;
+		--seg2-press: #dbe1e5;
+		--panel: #f6f8f9;
+		--card: #e9edf0;
+		--input: #dfe4e7;
+		--row: #dfe4e7;
+		--row-selected: #d3dade;
+		--row-hover: #d9dfe2;
+		--row-press: #cdd4d8;
+		--tile-hover: #e4e9ec;
+		--tile-press: #d6dde1;
+		--icon-hover: #cfd6da;
+		--icon-press: #c3cbd0;
+		--fg: #1b1f22;
+		--muted: #485055;
+		--mem: #8a5250;
+		--accent: #81cbea;
+		--accent-hover: #95d4ee;
+		--accent-press: #6cbfe2;
+		--accent-fg: #003447;
+		--accent-text: #095470;
+		--accent-line: #13648c;
+		--placeholder: #5b6368;
+		--dim: #6b7378;
 		--warn: #7a4600;
 		--error: #9b1c1c;
-		--pill: rgba(0, 0, 0, 0.07);
-		--hover: rgba(0, 0, 0, 0.1);
-		--press: rgba(0, 0, 0, 0.16);
-		--accent: #0f6cbd;
-		--accent-fg: #ffffff;
+		--row-tint: rgba(19, 100, 140, 0.1);
+		--row-connected: #cbd7de;
+		--row-connected-on: #bccad3;
+		--audio-fill: rgba(0, 0, 0, 0.06);
+		--audio-fill-hover: rgba(0, 0, 0, 0.08);
+		--audio-fill-drag: rgba(0, 0, 0, 0.1);
+		--power-fill-1: #f1f4f6;
+		--power-fill-2: #e4e9ec;
+		--power-fill-3: #dce2e5;
+		--power-fill-4: #d5dbdf;
+		--power-tile: #c3ccd1;
+		--power-tile-press: #b7c1c7;
+		--power-icon-hover: #13648c;
+		--overlay-dim: rgba(240, 243, 245, 0.5);
+		--overlay-dim-blur: rgba(240, 243, 245, 0.35);
+		--lock-curtain: #090f12;
+		--scrollbar-thumb: rgba(27, 31, 34, 0.55);
 	}
 }
 
-bar {
-	background: var(--bg);
-	color: var(--fg);
+:root {
+	--d: 13px;
 }
 
-/* The first pill sits as far from the left edge as the last item does from the right (14 px). */
+/* The bar window is 36 px tall and draws nothing itself: the segments hang
+   from 10 px down, so the wallpaper shows above them. */
+bar {
+	background: transparent;
+	color: var(--fg);
+	font-family: "JetBrains Mono", monospace;
+	font-size: 14px;
+	font-weight: 400;
+	padding: 10px 7px 0 10px;
+}
+
+icon {
+	font-size: 16px;
+}
+
+/* ---- segments ---- */
+
+/* The segments are as tall as the bar's content (its height from bar.toml
+   less the 10 px above them), so the height setting changes the bar. */
+zone,
+zone > widget {
+	height: 100%;
+}
+
+/* Text sits a pixel above the middle of the segment: capitals look centred. */
+.item .value,
+.item .label,
+.ws text,
+.item.media icon.state {
+	margin-top: -2px;
+}
+
+/* Inside a group, segments overlap by the depth of a point; between groups
+   they sit edge to edge and the points leave a gap of a constant width. */
+widget.media,
+widget.date,
+widget.battery,
+widget.tray {
+	margin-left: -13px;
+}
+
+zone > widget:first-child {
+	margin-left: 0;
+}
+
+widget.record {
+	margin-left: 2px;
+}
+
+.item,
 box.workspaces {
-	padding: 0 8px;
+	height: 100%;
+	padding: 0 18px;
+	gap: 6px;
+	border-radius: 0;
+	background: var(--seg1);
+	color: var(--fg);
+	--hover: var(--seg1-hover);
+	--press: var(--seg1-press);
+	clip-path: polygon(var(--d) 0, calc(100% - var(--d)) 0, 100% 50%, calc(100% - var(--d)) 100%, var(--d) 100%, 0 50%);
+}
+
+/* Segment colours and the shapes of the groups in the middle and on the right. */
+.item.media {
+	background: var(--seg0);
+	--hover: var(--seg0-hover);
+	--press: var(--seg0-press);
+	padding: 0 15px 0 21px;
+}
+
+.item.memory {
+	color: var(--mem);
+	padding: 0 18px 0 19px;
+}
+
+.item.cpu {
+	padding: 0 19px;
+}
+
+.item.memory .value,
+.item.cpu .value {
+	margin-top: -1px;
+}
+
+/* The point of this segment sits two pixels further right than the generic
+   overlap puts it. */
+widget.cpu {
+	margin-left: -11px;
+}
+
+.item.battery {
+	padding: 0 18px 0 20px;
+}
+
+.item.battery icon {
+	font-size: 21px;
+	margin: 0 -2px 0 -3px;
+}
+
+.item.cpu,
+.item.clock,
+.item.tray,
+.item.record {
+	background: var(--seg2);
+	--hover: var(--seg2-hover);
+	--press: var(--seg2-press);
+}
+
+.item.status {
+	background: var(--seg0);
+	--hover: var(--seg0-hover);
+	--press: var(--seg0-press);
+}
+
+/* Hovering the date and the clock only widens them; their fill stays. */
+.item.date {
+	--hover: var(--seg1);
+}
+
+.item.clock {
+	--hover: var(--seg2);
+}
+
+/* ">" joints (workspaces and media, clock and date): the earlier segment's
+   point goes into the next one's notch, and the next one is drawn on top. */
+.item.media,
+.item.clock,
+.item.date {
+	clip-path: polygon(0 0, calc(100% - var(--d)) 0, 100% 50%, calc(100% - var(--d)) 100%, 0 100%, var(--d) 50%);
+}
+
+/* "<" joints (memory and cpu, status and battery and tray): the later
+   segment's point covers the earlier one's notch, so the earlier one ends
+   flat and nothing shows through the joint. The last one keeps its notch. */
+.item.memory,
+.item.status,
+.item.battery {
+	clip-path: polygon(var(--d) 0, 100% 0, 100% 100%, var(--d) 100%, 0 50%);
+}
+
+.item.cpu,
+.item.tray {
+	clip-path: polygon(var(--d) 0, 100% 0, calc(100% - var(--d)) 50%, 100% 100%, var(--d) 100%, 0 50%);
+}
+
+/* The earlier segment of a ">" joint runs 1.5 px under the next one, so the
+   edge of the one underneath never shows a hairline of wallpaper; the margin
+   takes the 1.5 px back so nothing moves. */
+zone#left > widget,
+widget.clock {
+	margin-right: -1.5px;
+}
+
+zone#left > widget > .item,
+zone#left > widget > box.workspaces {
+	padding-right: 19.5px;
+}
+
+.item.clock {
+	padding-right: 19.5px;
+}
+
+/* The ends of the left group take a point whatever is there: the first
+   segment a point on its left, the last one a point on its right. */
+zone#left > widget > .item,
+zone#left > widget > box.workspaces {
+	clip-path: polygon(0 0, calc(100% - var(--d)) 0, 100% 50%, calc(100% - var(--d)) 100%, 0 100%, var(--d) 50%);
+}
+
+zone#left > widget:first-child > .item,
+zone#left > widget:first-child > box.workspaces {
+	clip-path: polygon(var(--d) 0, calc(100% - var(--d)) 0, 100% 50%, calc(100% - var(--d)) 100%, var(--d) 100%, 0 50%);
+}
+
+zone#left > widget:last-child {
+	margin-right: 0;
+}
+
+zone#left > widget:last-child > .item {
+	padding-right: 18px;
+}
+
+zone#left > widget:last-child > .item.media {
+	padding-right: 15px;
+}
+
+.item.date {
+	padding-right: 18px;
+}
+
+/* The workspaces segment is plain labels: the focused one in the accent. */
+box.workspaces {
+	padding-left: 13px;
+	padding-right: 11px;
+	gap: 1px;
+}
+
+zone#left > widget > box.workspaces {
+	padding-right: 12.5px;
+}
+
+zone#left > widget:last-child > box.workspaces {
+	padding-right: 11px;
 }
 
 .ws {
-	background: var(--pill);
-	border: 1px solid transparent;
+	background: var(--pill, transparent);
 }
 
-.ws.button:hover {
-	background: var(--hover);
+box.workspaces.plain .ws {
+	min-width: 0;
+	height: 100%;
+	padding: 0 10px;
+	border: 0;
+	border-radius: 0;
+	background: transparent;
+	color: var(--muted);
+	font-weight: 400;
+}
+
+box.workspaces.plain .ws.visible {
 	color: var(--fg);
 }
 
-.ws.empty {
+box.workspaces.plain .ws.focused {
+	color: var(--accent-text);
+	font-weight: 400;
+}
+
+box.workspaces.plain .ws.button:hover {
+	background: var(--seg1-hover);
+	color: var(--fg);
+}
+
+box.workspaces.plain .ws.focused.button:hover {
+	color: var(--accent-text);
+}
+
+box.workspaces.plain .ws.button:active {
+	background: var(--seg1-press);
+}
+
+/* ---- media ---- */
+
+.item.media.with-progress {
+	flex-direction: column;
+	align-items: start;
+	justify-content: start;
+	gap: 0;
+}
+
+.item.media .media-main {
+	height: 26px;
+	gap: 0;
+	align-items: center;
+	flex-shrink: 0;
+}
+
+.item.media.with-progress .media-main {
+	margin-bottom: -3px;
+}
+
+.item.media image.app-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.item.media icon.app-icon {
+	font-size: 14px;
+}
+
+.item.media icon.state {
+	margin-right: 4px;
+}
+
+.item.media .progress {
+	margin-left: 2px;
+	height: 3px;
+	border-radius: 2px;
+	background: var(--accent-line);
+}
+
+/* ---- clock, date, battery ---- */
+
+/* The box grows to the longer text and the text is cut by the growing box. */
+.item.clock,
+.item.date {
+	overflow: hidden;
+	justify-content: center;
+	transition: background-color 120ms ease-out, width 120ms ease-in;
+}
+
+.item.clock:hover,
+.item.date:hover {
+	transition: background-color 120ms ease-out, width 200ms ease-out;
+}
+
+.item.clock .value,
+.item.date .value {
+	flex-shrink: 0;
+}
+
+.item.battery {
+	transition: background-color 120ms ease-out, width 120ms ease-out;
+}
+
+/* ---- centre button ---- */
+
+.item.dashboard {
+	background: var(--accent);
+	color: var(--accent-fg);
+	--hover: var(--accent-hover);
+	--press: var(--accent-press);
+	justify-content: center;
+	transition: background-color 120ms ease-out, width 150ms ease-in-out;
+}
+
+.item.dashboard icon {
+	font-size: 18px;
+}
+
+.item.dashboard.button:hover {
+	color: var(--accent-fg);
+}
+
+.item.dashboard:open {
+	width: 526px;
+	transition: background-color 120ms ease-out, width 200ms ease-out;
+}
+
+/* ---- right group: status, battery, tray, record ---- */
+
+/* The status segment is a sliver until the pointer is over its group; the
+   box opens first, its content fades in after. It closes 300 ms after the
+   pointer left, so growing never takes the pointer out from under it. */
+.item.status {
+	width: 26px;
+	padding: 0;
+	overflow: hidden;
+	transition: background-color 120ms ease-out, width 200ms ease-in 300ms;
+}
+
+zone#right:hover .item.status {
+	width: auto;
+	transition: background-color 120ms ease-out, width 200ms ease-out;
+}
+
+.status-content {
+	height: 100%;
+	padding: 0 18px 0 16px;
+	gap: 6px;
+	align-items: center;
+	flex-shrink: 0;
+	opacity: 0;
+	transition: opacity 100ms ease-in;
+}
+
+zone#right:hover .status-content {
+	opacity: 1;
+	transition: opacity 120ms ease-out 120ms;
+}
+
+.item.status:hover {
+	background: var(--seg0);
+}
+
+.item.status:active {
+	background: var(--seg0-press);
+}
+
+.status-btn {
+	height: 100%;
+	align-items: center;
+	cursor: pointer;
+}
+
+.status-btn.mic {
+	margin-right: 10px;
+}
+
+.status-btn.bt {
+	margin-right: -4px;
+}
+
+.status-btn.live {
+	color: var(--accent-text);
+}
+
+.status-btn.off,
+.status-level.off {
+	color: var(--dim);
+}
+
+.status-level {
+	font-variant-numeric: tabular-nums;
+}
+
+/* The tray is a sliver and stays one while it holds no icons. */
+.item.tray {
+	width: 26px;
+	padding: 0;
+}
+
+widget.record {
+	margin-left: 2px;
+}
+
+.item.record {
+	width: 26px;
+	padding: 0;
+	border-radius: 13px;
+	clip-path: none;
+	justify-content: center;
+	color: var(--accent-text);
+}
+
+.item.record.button:hover {
+	color: var(--accent-text);
+}
+
+.item.record icon {
+	font-size: 18px;
+}
+
+/* ---- states ---- */
+
+.item.warn,
+.item.low {
+	color: var(--warn);
+}
+
+.item.stale,
+.item.absent,
+.item.idle,
+.item.paused {
 	color: var(--muted);
 }
 
-.ws.visible {
-	border-color: var(--accent);
+.item.media.paused {
+	color: var(--fg);
 }
 
-.ws.focused,
-.ws.focused:hover {
+/* ---- popups, menus, inputs ---- */
+
+tooltip {
+	background: var(--card);
+	color: var(--fg);
+	border: 1px solid var(--seg2);
+	border-radius: 6px;
+	padding: 4px 8px;
+	font-size: 13px;
+	max-width: 320px;
+	box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+menu {
+	align-items: stretch;
+	background: var(--panel);
+	color: var(--fg);
+	border-radius: 8px;
+	padding: 6px;
+	box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+
+menuitem {
+	height: 30px;
+	padding: 0 10px;
+	justify-content: flex-start;
+	border-radius: 6px;
+	color: var(--fg);
+}
+
+menuitem:hover {
+	background: var(--row);
+}
+
+menuitem:focus-visible {
+	background: var(--row-selected);
+	outline: 1px solid var(--accent-line);
+}
+
+menuitem:disabled {
+	color: var(--dim);
+}
+
+menuitem:checked icon {
+	color: var(--accent-text);
+}
+
+box.separator {
+	height: 1px;
+	margin: 4px 0;
+	background: var(--seg2);
+}
+
+input {
+	height: 27px;
+	padding: 0 10px;
+	border-radius: 9px;
+	background: var(--input);
+	color: var(--fg);
+	caret-color: var(--fg);
+}
+
+input::placeholder {
+	color: var(--placeholder);
+}
+
+input:focus-visible {
+	outline: 1px solid var(--accent-line);
+}
+
+slider {
+	min-width: 80px;
+	background: var(--row);
+	accent-color: var(--accent-line);
+}
+
+slider:focus-visible {
+	outline: 2px solid var(--accent-line);
+	outline-offset: 2px;
+}
+
+scroll {
+	scrollbar-width: thin;
+	scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+/* ---- panels: the dashboard, the calendar, the player, the mixer, Wi-Fi ---- */
+
+/* Every panel hangs from the bar's lower edge: square top, round bottom. */
+popup.panel {
+	display: flex;
+	flex-direction: column;
+	align-items: stretch;
+	background: var(--panel);
+	color: var(--fg);
+	border-radius: 0 0 10px 10px;
+	padding: 10px;
+}
+
+/* The dashboard grows out of the centre button: it is as wide as the button's
+   flat edge (attach), opens downwards after the button has stretched, and its
+   content fades in last. It closes by fading out while the button narrows. */
+popup.dashboard {
+	height: 0;
+	padding: 0;
+	overflow: hidden;
+	opacity: 0;
+	transition: opacity 100ms ease-in, height 200ms ease-in-out 200ms;
+}
+
+popup.dashboard:open {
+	height: 500px;
+	opacity: 1;
+	transition: height 200ms ease-in-out 200ms;
+}
+
+.panel-body {
+	flex-grow: 1;
+	min-height: 0;
+	align-items: stretch;
+	opacity: 0;
+	transition: opacity 100ms ease-in;
+}
+
+popup.dashboard:open .panel-body {
+	opacity: 1;
+	transition: opacity 150ms ease-out 420ms;
+}
+
+/* The six quick tiles: three columns, pitch 110. */
+.tiles {
+	flex-grow: 1;
+	gap: 30px;
+	justify-content: center;
+	align-items: center;
+}
+
+.tile-row {
+	gap: 30px;
+}
+
+.tile {
+	width: 80px;
+	height: 80px;
+	border-radius: 14px;
+	justify-content: center;
+	align-items: center;
+	color: var(--fg);
+	cursor: pointer;
+	transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.tile icon {
+	font-size: 50px;
+}
+
+.tile-row:last-child > .tile:first-child icon {
+	font-size: 45px;
+}
+
+.tile:hover {
+	background: var(--tile-hover);
+	color: var(--accent-text);
+}
+
+.tile:active {
+	background: var(--tile-press);
+	color: var(--accent-text);
+}
+
+.tile:focus-visible {
+	background: var(--tile-hover);
+	color: var(--accent-text);
+	outline: 2px solid var(--accent-line);
+	outline-offset: 2px;
+}
+
+/* A page: a header card over a list card, 10 px of room all round. */
+.page {
+	flex-grow: 1;
+	min-height: 0;
+	align-items: stretch;
+	padding: 10px;
+	gap: 10px;
+}
+
+.card {
+	background: var(--card);
+	border-radius: 8px;
+}
+
+.card.head {
+	height: 37px;
+	padding: 0 10px;
+	gap: 6px;
+	align-items: center;
+	flex-shrink: 0;
+}
+
+/* A scroll container clips at its padding edge, so the 10px inset is a
+   transparent border: rows are cut 10px inside the card, not at its edge. */
+.card.list {
+	flex-grow: 1;
+	min-height: 0;
+	border: 10px solid transparent;
+	gap: 5px;
+	align-items: stretch;
+	scrollbar-width: none;
+}
+
+popup.volume .card.list,
+popup.network .card.list {
+	scrollbar-width: thin;
+}
+
+icon.head-icon {
+	width: 36px;
+	font-size: 16px;
+	color: var(--muted);
+}
+
+.icon-btn.head-icon {
+	width: 36px;
+}
+
+.title {
+	flex-grow: 1;
+	text-align: center;
+	font-weight: 700;
+}
+
+input.search {
+	flex-grow: 1;
+	text-align: center;
+}
+
+input.search:focus-visible {
+	outline: none;
+}
+
+/* On the Bluetooth page the search is 376 wide with the refresh button after it. */
+.page.bluetooth input.search {
+	flex-grow: 0;
+	width: 376px;
+}
+
+.page.bluetooth .card.head .icon-btn:last-child {
+	margin-left: 4px;
+}
+
+/* One line in place of a list. */
+.note {
+	padding: 8px 10px;
+	color: var(--muted);
+}
+
+.off {
+	gap: 10px;
+	align-items: stretch;
+}
+
+/* A row of a list: 38 px, 5 px apart. */
+.row {
+	height: 38px;
+	padding: 0 10px;
+	gap: 8px;
+	flex-shrink: 0;
+	align-items: center;
+	border-radius: 8px;
+	background: var(--row);
+	color: var(--fg);
+	cursor: pointer;
+	transition: background-color 120ms ease-out;
+}
+
+.row:hover {
+	background: var(--row-hover);
+}
+
+.row:active {
+	background: var(--row-press);
+}
+
+.row:focus-visible {
+	background: var(--row-selected);
+	outline: 2px solid var(--accent-line);
+	outline-offset: 1px;
+}
+
+.row:disabled {
+	color: var(--dim);
+	cursor: default;
+}
+
+/* An off row keeps its resting fill under the pointer: the dim text only has
+   to reach 3:1 on that fill, not on the hover fills. */
+.row:disabled:hover,
+.row:disabled:active {
+	background: var(--row);
+}
+
+.row.selected {
+	background: var(--row-selected);
+	outline: 1px solid var(--accent-line);
+	outline-offset: -1px;
+}
+
+.row.selected:hover {
+	background: var(--row-hover);
+}
+
+.row.app {
+	justify-content: center;
+}
+
+.row.action {
+	justify-content: center;
+	color: var(--accent-text);
+}
+
+.row .name {
+	flex-grow: 1;
+}
+
+.row .level {
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+}
+
+.row .mark {
+	color: var(--muted);
+}
+
+.row.device,
+.row.net {
+	padding: 0 16px 0 10px;
+}
+
+.row .actions {
+	gap: 9px;
+	align-items: center;
+}
+
+.row .icon-btn {
+	color: var(--fg);
+}
+
+.row .icon-btn icon {
+	font-size: 18px;
+}
+
+/* The device being used and the device that is connected: accent text, a tint
+   and a full outline all round (never a stripe on one edge). */
+.row.current,
+.row.connected {
+	color: var(--accent-text);
+	outline: 1px solid var(--accent-line);
+	outline-offset: -1px;
+}
+
+.row.current {
+	background: var(--row-selected);
+}
+
+.row.connected {
+	background: var(--row-connected);
+}
+
+.row.connected:hover,
+.row.connected:active,
+.row.connected:focus-visible {
+	background: var(--row-connected-on);
+}
+
+.row.current:hover,
+.row.current:active {
+	background: var(--row-selected);
+}
+
+.row.current .icon-btn,
+.row.connected .icon-btn {
+	color: var(--accent-text);
+}
+
+/* Audio rows: the slider is the row's background and its fill is the level (a
+   faint white); the lead button, the name and the mute button are drawn over
+   it with negative margins, and the name takes no pointer, so a drag anywhere
+   on the row sets the volume. 460 is the width of a row on a dashboard page,
+   340 in the mixer. */
+.row.output {
+	padding: 0;
+	gap: 0;
+	overflow: hidden;
+}
+
+.row.output .track {
+	flex-shrink: 0;
+	width: 460px;
+	height: 38px;
+	border-radius: 8px;
+	accent-color: var(--audio-fill);
+	cursor: default;
+}
+
+.row.output:hover .track {
+	accent-color: var(--audio-fill-hover);
+}
+
+.row.output:active .track {
+	accent-color: var(--audio-fill-drag);
+}
+
+.row.output .track:focus-visible {
+	accent-color: var(--audio-fill-hover);
+	outline: 2px solid var(--accent-line);
+	outline-offset: -2px;
+}
+
+.row.output .lead {
+	margin-left: -455px;
+}
+
+.row.output .name {
+	flex-grow: 1;
+	min-width: 0;
+	margin-left: 8px;
+	pointer-events: none;
+}
+
+.row.output .mute {
+	margin-right: 16px;
+}
+
+.row.output .level {
+	margin-right: 10px;
+	pointer-events: none;
+}
+
+popup.volume .row.output .track {
+	width: 340px;
+}
+
+popup.volume .row.output .lead {
+	margin-left: -335px;
+}
+
+popup.volume .row.output.master .track {
+	width: 360px;
+}
+
+popup.volume .row.output.master .lead {
+	margin-left: -355px;
+}
+
+/* A square button with one icon: header refresh, row actions, chevrons. */
+.icon-btn {
+	width: 28px;
+	height: 28px;
+	flex-shrink: 0;
+	justify-content: center;
+	align-items: center;
+	border-radius: 6px;
+	color: var(--muted);
+	cursor: pointer;
+	transition: background-color 120ms ease-out, color 120ms ease-out;
+}
+
+.icon-btn:hover {
+	background: var(--icon-hover);
+	color: var(--fg);
+}
+
+.icon-btn:active {
+	background: var(--icon-press);
+	color: var(--fg);
+}
+
+.icon-btn:focus-visible {
+	outline: 2px solid var(--accent-line);
+}
+
+.icon-btn:disabled {
+	color: var(--dim);
+	cursor: default;
+}
+
+.icon-btn.forget.armed {
+	width: auto;
+	padding: 0 8px;
+	color: var(--error);
+	font-size: 12px;
+}
+
+/* The calendar: 300 wide, seven columns 40 apart, six weeks of 36. */
+popup.calendar {
+	width: 300px;
+	padding: 0;
+}
+
+.calendar-body {
+	padding: 10px;
+	align-items: stretch;
+}
+
+.calendar-body .card.head {
+	padding: 0 5px;
+}
+
+.weekdays {
+	margin-top: 10px;
+	height: 24px;
+	align-items: center;
+}
+
+.weekday {
+	width: 40px;
+	justify-content: center;
+	color: var(--muted);
+	font-size: 12px;
+}
+
+.weeks {
+	margin-top: 11px;
+}
+
+.week {
+	height: 36px;
+}
+
+.day {
+	width: 36px;
+	height: 36px;
+	margin: 0 2px;
+	border-radius: 8px;
+	justify-content: center;
+	align-items: center;
+}
+
+.day.other {
+	color: var(--placeholder);
+}
+
+.day.today {
 	background: var(--accent);
 	color: var(--accent-fg);
+}
+
+/* The player: a 140 px cover and the controls beside it. */
+popup.media {
+	width: 380px;
+}
+
+.media-pop {
+	gap: 10px;
+	height: 140px;
+	align-items: stretch;
+}
+
+.art {
+	width: 140px;
+	height: 140px;
+	flex-shrink: 0;
+	border-radius: 8px;
+	background: var(--card);
+	justify-content: center;
+	align-items: center;
+	overflow: hidden;
+}
+
+.art icon {
+	font-size: 48px;
+	color: var(--muted);
+}
+
+.info {
+	flex-grow: 1;
+	width: 210px;
+	justify-content: space-between;
+	align-items: stretch;
+}
+
+.info .title {
+	text-align: left;
+	font-weight: 700;
+}
+
+.info .artist {
+	color: var(--muted);
+}
+
+.controls {
+	gap: 8px;
+	align-items: stretch;
+}
+
+.lines {
+	align-items: stretch;
+}
+
+slider.seek {
+	height: 6px;
+	border-radius: 3px;
+	background: var(--row);
+	accent-color: var(--accent-line);
+}
+
+slider.seek:disabled {
+	accent-color: var(--dim);
+}
+
+.transport-row {
+	justify-content: center;
+	gap: 8px;
+}
+
+.icon-btn.transport {
+	width: 32px;
+	height: 32px;
+	border-radius: 16px;
+	color: var(--fg);
+}
+
+.icon-btn.transport:disabled {
+	color: var(--dim);
+}
+
+/* The mixer and the Wi-Fi list: 380 wide, the list scrolls past 6 or 8 rows. */
+popup.volume,
+popup.network {
+	width: 380px;
+}
+
+.volume-body,
+.network-body {
+	gap: 10px;
+	align-items: stretch;
+}
+
+.volume-body .card.list {
+	flex-grow: 0;
+	max-height: 273px;
+}
+
+.network-body .card.list {
+	flex-grow: 0;
+	max-height: 359px;
+}
+
+.network-body .card.head .icon-btn {
+	margin-left: auto;
+}
+
+/* The power menu: four chevrons over a dimmed monitor. The dim is the root's
+   background (the window layer paints it), so the menu fades with `opacity`. */
+widget.power {
+	margin: 0;
+}
+
+.power-anchor {
+	width: 0;
+	height: 0;
+}
+
+popup.power {
+	width: 100%;
+	height: 100%;
+	justify-content: center;
+	align-items: center;
+	background: var(--overlay-dim);
+	opacity: 0;
+	transition: opacity 200ms ease-out;
+}
+
+popup.power:open {
+	opacity: 1;
+}
+
+popup.power.blur {
+	background: var(--overlay-dim-blur);
+}
+
+popup.power.locking {
+	background: var(--lock-curtain);
+	transition: background-color 150ms ease-in;
+}
+
+.power-menu {
+	align-items: center;
+}
+
+popup.power.locking .power-menu {
+	opacity: 0;
+	transition: opacity 150ms ease-in;
+}
+
+.power-row {
+	height: 150px;
+	justify-content: center;
+}
+
+/* 300 x 150 chevrons overlapping by their 75 px points; every button but the
+   last is 1.5 px wider (and pulled back by the same margin), so it runs under
+   the next one and no hairline of the dim shows at a joint. */
+.power-btn {
+	width: 151.5px;
+	height: 150px;
+	margin-left: -75px;
+	margin-right: -1.5px;
+	justify-content: center;
+	align-items: center;
+	cursor: pointer;
+	clip-path: polygon(0 0, calc(100% - 75px) 0, 100% 50%, calc(100% - 75px) 100%, 0 100%, 75px 50%);
+	transition: width 150ms ease-out;
+}
+
+.power-btn.b1 {
+	margin-left: 0;
+	background: var(--power-fill-1);
+	clip-path: polygon(75px 0, calc(100% - 75px) 0, 100% 50%, calc(100% - 75px) 100%, 75px 100%, 0 50%);
+}
+
+.power-btn.b2 {
+	background: var(--power-fill-2);
+}
+
+.power-btn.b3 {
+	background: var(--power-fill-3);
+}
+
+.power-btn.b4 {
+	width: 150px;
+	margin-right: 0;
+	background: var(--power-fill-4);
+}
+
+popup.power:open .power-btn {
+	width: 301.5px;
+}
+
+popup.power:open .power-btn.b4 {
+	width: 300px;
+}
+
+popup.power:open .b1 {
+	transition: width 150ms ease-out;
+}
+
+popup.power:open .b2 {
+	transition: width 150ms ease-out 240ms;
+}
+
+popup.power:open .b3 {
+	transition: width 150ms ease-out 480ms;
+}
+
+popup.power:open .b4 {
+	transition: width 150ms ease-out 720ms;
+}
+
+.power-btn .tile {
+	width: 120px;
+	height: 120px;
+	border-radius: 16px;
+	justify-content: center;
+	align-items: center;
+	opacity: 0;
+	transition: opacity 120ms ease-out, background-color 120ms ease-out;
+}
+
+popup.power:open .power-btn .tile {
+	opacity: 1;
+}
+
+popup.power:open .b1 .tile {
+	transition: opacity 120ms ease-out 120ms, background-color 120ms ease-out;
+}
+
+popup.power:open .b2 .tile {
+	transition: opacity 120ms ease-out 360ms, background-color 120ms ease-out;
+}
+
+popup.power:open .b3 .tile {
+	transition: opacity 120ms ease-out 600ms, background-color 120ms ease-out;
+}
+
+popup.power:open .b4 .tile {
+	transition: opacity 120ms ease-out 840ms, background-color 120ms ease-out;
+}
+
+.power-btn.b1 .tile,
+.power-btn.b2 .tile,
+.power-btn.b3 .tile {
+	margin-left: -5px;
+}
+
+.power-btn icon {
+	font-size: 64px;
+	color: var(--fg);
+	opacity: 0;
+	transition: opacity 120ms ease-out, color 120ms ease-out;
+}
+
+popup.power:open .power-btn icon {
+	opacity: 1;
+}
+
+/* The glyphs fill their box differently: these sizes give every one about the
+   ink of 49 to 63 px instead of the same box. */
+.power-btn.b1 icon {
+	font-size: 82px;
+}
+
+.power-btn.b2 icon {
+	font-size: 68px;
+}
+
+.power-btn.b3 icon {
+	font-size: 73px;
+}
+
+.power-btn.b4 icon {
+	font-size: 76px;
+}
+
+popup.power:open .b1 icon {
+	transition: opacity 120ms ease-out 120ms, color 120ms ease-out;
+}
+
+popup.power:open .b2 icon {
+	transition: opacity 120ms ease-out 360ms, color 120ms ease-out;
+}
+
+popup.power:open .b3 icon {
+	transition: opacity 120ms ease-out 600ms, color 120ms ease-out;
+}
+
+popup.power:open .b4 icon {
+	transition: opacity 120ms ease-out 840ms, color 120ms ease-out;
+}
+
+.power-btn:hover .tile,
+.power-btn:focus-visible .tile {
+	background: var(--power-tile);
+}
+
+.power-btn:hover icon,
+.power-btn:focus-visible icon {
+	color: var(--power-icon-hover);
+}
+
+.power-btn:active .tile {
+	background: var(--power-tile-press);
+}
+
+.power-btn:focus-visible .tile {
+	outline: 2px solid var(--accent-line);
+}
+
+.power-btn:disabled icon {
+	color: var(--dim);
+}
+
+.power-error {
+	margin-top: 24px;
+	padding: 6px 12px;
+	border-radius: 8px;
+	background: var(--card);
+	color: var(--error);
 }

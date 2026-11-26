@@ -4,6 +4,7 @@
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
 use windows::Win32::Security::{GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenUser};
+use windows::Win32::System::Memory::{GetProcessHeap, HeapOptimizeResources, HeapSetInformation};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{
     CreateEventW, GetCurrentProcess, GetCurrentProcessId, OpenProcess, OpenProcessToken,
@@ -32,6 +33,40 @@ impl Drop for Owned {
             // SAFETY: the handle was opened by this process and is closed exactly once, here.
             let _ = unsafe { CloseHandle(self.0) };
         }
+    }
+}
+
+/// Set while a trim is waiting, so a burst of requests makes one.
+static TRIM_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// A moment from now, asks Windows to hand the process heap's free pages back. A popup that held a long
+/// list leaves a heap full of holes that stay committed for as long as the bar runs. Runs on its own
+/// thread: the heap is locked while it works.
+pub fn trim_heap_soon() {
+    use std::sync::atomic::Ordering::SeqCst;
+    if TRIM_PENDING.swap(true, SeqCst) {
+        return;
+    }
+    let started = std::thread::Builder::new().name("rsb-heap-trim".into()).spawn(|| {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        TRIM_PENDING.store(false, SeqCst);
+        // HEAP_OPTIMIZE_RESOURCES_INFORMATION { Version: 1, Flags: 0 }.
+        let info: [u32; 2] = [1, 0];
+        // SAFETY: the process heap handle is always valid and `info` outlives the call.
+        let done = unsafe {
+            HeapSetInformation(
+                Some(GetProcessHeap().unwrap_or_default()),
+                HeapOptimizeResources,
+                Some(info.as_ptr().cast()),
+                8,
+            )
+        };
+        if let Err(e) = done {
+            log::debug!("heap trim: {e}");
+        }
+    });
+    if started.is_err() {
+        TRIM_PENDING.store(false, SeqCst);
     }
 }
 
