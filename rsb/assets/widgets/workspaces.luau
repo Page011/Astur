@@ -26,6 +26,7 @@ type Pill = {
 }
 
 return rsb.widget {
+	about = { title = "Workspaces" },
 	options = {
 		monitor = "own",
 		hide_empty = false,

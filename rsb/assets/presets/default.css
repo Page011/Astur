@@ -1,7 +1,8 @@
 /* default: chevron segments along the top edge of the screen, dark or light
    with Windows. Every colour is a custom property, so one line in your own
    style.css changes it, for example  :root { --accent: #e5a50a; }
-   Segments are cut with clip-path; --d is the depth of a point. */
+   Segments are cut with clip-path; --d is the depth of a point.
+   If the colours block made by rsb settings is at the end of your style.css, change the accent there. */
 
 @media (prefers-color-scheme: dark) {
 	:root {

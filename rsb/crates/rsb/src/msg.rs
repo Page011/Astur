@@ -1,9 +1,10 @@
 //! What the UI thread's inbox carries. Every other thread sends one of
 //! these and wakes the UI; the UI drains them all on each wake.
 
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
+use rsb_core::contract::{AppliedReply, FileHash};
 use rsb_core::element::InstanceId;
 use rsb_core::hit::PointerEvent;
 use rsb_core::ipc::{Command, Reply};
@@ -38,12 +39,77 @@ impl ReloadKind {
     }
 }
 
+/// The versions of the files a config was built from: the hash of the raw
+/// bytes that were parsed (a byte order mark included). `None` where that
+/// file's part was not used (the file was unusable and the last good one
+/// stays); `Some(FileHash::Missing)` where the file does not exist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AppliedHashes {
+    pub bar_toml: Option<FileHash>,
+    pub style_css: Option<FileHash>,
+}
+
 /// A parsed config, produced off the UI thread.
 pub struct ConfigUpdate {
     pub kind: ReloadKind,
     pub built: Built,
+    /// The versions of the files `built` was parsed from (a copy of
+    /// `built.hashes`, kept with the update the UI thread applies).
+    pub hashes: AppliedHashes,
     /// When the file watcher saw the change (wall clock, ms since the epoch).
     pub notified_wall_ms: u64,
+}
+
+/// What the bar shows, readable from any thread: the versions of the files
+/// of the config now in effect, how many diagnostics it came with and the
+/// folders it reads. The UI thread sets it when it swaps a config in; the
+/// pipe thread answers `applied` from it with no round trip.
+#[derive(Debug)]
+pub struct AppliedState {
+    inner: Mutex<AppliedSnapshot>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AppliedSnapshot {
+    pub hashes: AppliedHashes,
+    pub diagnostics: u32,
+    pub loads: u64,
+    /// Canonical paths.
+    pub config_dir: String,
+    pub log_dir: String,
+}
+
+impl AppliedState {
+    pub fn new(config_dir: String, log_dir: String) -> AppliedState {
+        AppliedState { inner: Mutex::new(AppliedSnapshot { config_dir, log_dir, ..Default::default() }) }
+    }
+
+    /// A config was swapped in. A file whose part was not applied (`None`)
+    /// keeps the version it had.
+    pub fn set(&self, hashes: AppliedHashes, diagnostics: u32) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.hashes.bar_toml = hashes.bar_toml.or(inner.hashes.bar_toml);
+        inner.hashes.style_css = hashes.style_css.or(inner.hashes.style_css);
+        inner.diagnostics = diagnostics;
+        inner.loads += 1;
+    }
+
+    pub fn snapshot(&self) -> AppliedSnapshot {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The answer to the pipe line `applied`.
+    pub fn reply(&self) -> AppliedReply {
+        let s = self.snapshot();
+        AppliedReply {
+            bar_toml: s.hashes.bar_toml,
+            style_css: s.hashes.style_css,
+            diagnostics: s.diagnostics,
+            loads: s.loads,
+            config_dir: s.config_dir,
+            log_dir: s.log_dir,
+        }
+    }
 }
 
 /// What `rsb status` asks the UI about its bars.
@@ -134,6 +200,12 @@ pub enum UiMsg {
     BarsQuery {
         reply: Sender<Vec<BarInfo>>,
     },
+    /// `rsb inspect` asks for the bars' frame cost and the trees of the
+    /// widgets it names. Answered from the UI thread's own state at once.
+    Inspect {
+        query: crate::inspect::InspectQuery,
+        reply: Sender<crate::inspect::UiPart>,
+    },
     Image {
         key: Arc<str>,
         result: Result<Image, String>,
@@ -171,4 +243,32 @@ pub enum UiMsg {
     },
     Sim(SimAction),
     Quit,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn applied_state_keeps_the_version_of_a_file_that_was_not_applied() {
+        let state = AppliedState::new("cfg-dir".into(), "log-dir".into());
+        assert_eq!(state.reply().bar_toml, None, "nothing applied yet");
+        let (a, b) = (FileHash::Fnv(1), FileHash::Fnv(2));
+        state.set(AppliedHashes { bar_toml: Some(a), style_css: Some(FileHash::Missing) }, 0);
+        // The next build could not use style.css: it keeps its old version.
+        state.set(AppliedHashes { bar_toml: Some(b), style_css: None }, 3);
+        let reply = state.reply();
+        assert_eq!((reply.bar_toml, reply.style_css, reply.diagnostics), (Some(b), Some(FileHash::Missing), 3));
+        assert_eq!((reply.config_dir.as_str(), reply.log_dir.as_str()), ("cfg-dir", "log-dir"));
+    }
+
+    #[test]
+    fn every_config_swapped_in_counts_even_when_it_shows_the_same_versions() {
+        let state = AppliedState::new("c".into(), "l".into());
+        assert_eq!(state.reply().loads, 0);
+        let same = AppliedHashes { bar_toml: Some(FileHash::Fnv(1)), style_css: None };
+        state.set(same, 0);
+        state.set(same, 0);
+        assert_eq!(state.reply().loads, 2);
+    }
 }

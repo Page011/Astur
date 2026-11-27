@@ -1,0 +1,19 @@
+{
+  "code": "write_failed",
+  "exit": 1,
+  "shape": {
+    "contract": "number",
+    "error": {
+      "at": "string",
+      "code": "string",
+      "copies": [
+        "string"
+      ],
+      "file": "string",
+      "fix": "null",
+      "message": "string",
+      "next": "string"
+    },
+    "ok": "bool"
+  }
+}

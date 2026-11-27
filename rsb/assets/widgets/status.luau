@@ -13,6 +13,7 @@
 local rsb = require("@rsb")
 
 return rsb.widget {
+	about = { title = "Mic and Bluetooth" },
 	options = {
 		mic = true,
 		bluetooth = true,

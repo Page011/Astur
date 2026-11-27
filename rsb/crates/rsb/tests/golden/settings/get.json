@@ -1,0 +1,140 @@
+{
+  "bar": {
+    "config_dir": "string",
+    "diagnostics": "number",
+    "running": "bool",
+    "shows_files": "bool"
+  },
+  "bars": [
+    {
+      "center": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": [
+          "string"
+        ]
+      },
+      "center_on": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "string"
+      },
+      "floating": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "bool"
+      },
+      "fullscreen": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "string"
+      },
+      "height": {
+        "at": "string",
+        "editable": "bool",
+        "source": "string",
+        "value": "number"
+      },
+      "index": "number",
+      "left": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": [
+          "string"
+        ]
+      },
+      "margin": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "number"
+      },
+      "monitors": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": [
+          "string"
+        ]
+      },
+      "name": "string",
+      "position": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "string"
+      },
+      "radius": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "number"
+      },
+      "reserve": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": "bool"
+      },
+      "right": {
+        "at": "null",
+        "editable": "bool",
+        "source": "string",
+        "value": [
+          "string"
+        ]
+      }
+    }
+  ],
+  "colors": {
+    "accent": {
+      "dark": {
+        "at": "string",
+        "overridden": [],
+        "shadowed_by": "null",
+        "source": "string",
+        "value": "string"
+      },
+      "editable": "bool",
+      "label": "string",
+      "light": {
+        "at": "string",
+        "overridden": [
+          "string"
+        ],
+        "shadowed_by": "string",
+        "source": "string",
+        "value": "string"
+      }
+    }
+  },
+  "config_dir": "string",
+  "contract": "number",
+  "files": {
+    "bar.toml": {
+      "edited_by_hand": "bool",
+      "error": "null",
+      "hash": "string",
+      "last_good": "bool"
+    },
+    "style.css": {
+      "edited_by_hand": "bool",
+      "error": "null",
+      "hash": "string",
+      "last_good": "bool"
+    }
+  },
+  "high_contrast": "bool",
+  "kind": "string",
+  "ok": "bool",
+  "preset": {
+    "at": "string",
+    "source": "string",
+    "value": "string"
+  }
+}

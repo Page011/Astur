@@ -9,6 +9,7 @@ local function program(file: string): string
 end
 
 return rsb.widget {
+	about = { title = "Window title" },
 	options = {
 		max_width = 360,
 		show_process = false,

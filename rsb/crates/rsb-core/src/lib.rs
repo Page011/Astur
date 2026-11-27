@@ -8,17 +8,26 @@
 //! - `draw`: the draw list a renderer consumes, and the damage diff.
 //! - `services`, `io`, `msg`: what crosses thread and crate boundaries.
 //! - `ipc`: the command-pipe wire format.
+//! - `contract`, `cfgedit`, `preset`, `contrast`, `fnv`: the settings
+//!   contract, the pure edit engine for the user's files, preset metadata,
+//!   contrast checks and file versions.
+//! - `css_text`: computed styles written back as CSS.
 //! - `popup`, `key`, `fuzzy`: popup placement and dismissal, keyboard and
 //!   text input, typo-tolerant search ranking.
 
 pub mod anim;
+pub mod cfgedit;
 pub mod color;
 pub mod config;
+pub mod contract;
+pub mod contrast;
 pub mod css;
+pub mod css_text;
 pub mod diag;
 pub mod draw;
 pub mod duration;
 pub mod element;
+pub mod fnv;
 pub mod fuzzy;
 pub mod geom;
 pub mod hit;
@@ -32,6 +41,7 @@ pub mod paths;
 pub mod permissions;
 pub mod pixels;
 pub mod popup;
+pub mod preset;
 pub mod scene;
 pub mod services;
 pub mod style;

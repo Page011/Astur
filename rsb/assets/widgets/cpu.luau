@@ -6,6 +6,7 @@ local rsb = require("@rsb")
 local text = require("./lib/format")
 
 return rsb.widget {
+	about = { title = "CPU" },
 	options = {
 		format = "{value}%",
 		icon = "cpu",

@@ -483,7 +483,7 @@ pub fn run(config_dir: Option<&Path>, log_dir: Option<&Path>, o: &TimelineOpts) 
             .config
             .or_else(|| Some(rsb_core::config::default_config()));
     }
-    let first = ConfigUpdate { kind: ReloadKind::Initial, built, notified_wall_ms: 0 };
+    let first = ConfigUpdate { kind: ReloadKind::Initial, hashes: built.hashes, built, notified_wall_ms: 0 };
 
     let (width, height) = (o.screen.0 as i32, o.screen.1 as i32);
     let dpi = (96.0 * o.scale).round() as u32;

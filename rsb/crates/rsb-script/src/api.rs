@@ -172,8 +172,8 @@ pub static API_TYPES: &[ApiType] = &[
     t(
         "WidgetSpec",
         "<O>",
-        "{ name: string?, options: O?, optional: { string }?, permissions: Permissions?, setup: (props: O, ctx: Context) -> Element? }",
-        "A widget: option defaults (bar.toml overrides them), permissions, and setup returning its element; optional lists options that have no default (a table cannot hold nil), so bar.toml may still set them",
+        "{ name: string?, options: O?, optional: { string }?, permissions: Permissions?, about: { title: string?, visible: boolean?, needs_options: boolean?, opens: { string }? }?, setup: (props: O, ctx: Context) -> Element? }",
+        "A widget: option defaults (bar.toml overrides them), permissions, and setup returning its element; optional lists options that have no default (a table cannot hold nil), so bar.toml may still set them; about describes the widget to the settings commands",
     ),
     t("Widget", "", "{ name: string }", "What a widget file returns"),
     t("Task", "", "{ cancel: (self: any) -> () }", "A running task"),

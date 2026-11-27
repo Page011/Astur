@@ -15,9 +15,9 @@ use rsb_core::color::Color;
 use rsb_core::config::{self, BarSpec, Config, WidgetOptions, WidgetRef};
 use rsb_core::css::{MediaEnv, Stylesheet};
 use rsb_core::diag::Plate;
-use rsb_core::draw::{DrawCmd, DrawList, Fill};
+use rsb_core::draw::{DrawCmd, DrawList};
 use rsb_core::element::{Element, ElementKind, IconRef, InstanceId};
-use rsb_core::geom::{PointF, RectF};
+use rsb_core::geom::RectF;
 use rsb_core::hit::{Button, InputKind, PointerEvent, PointerKind};
 use rsb_core::icons::{ICON_NAMES, IconFont};
 use rsb_core::io::{ExecResult, HttpResponse, IoError, IoEventKind, IoRequest};
@@ -1620,62 +1620,11 @@ fn ensure_icons(renderer: &mut Renderer, list: &DrawList) {
 /// and are skipped; a group half way is refused (the caller settles first).
 /// Restricted to items inside `within`. Returns (what, ratio, needed ratio).
 fn contrast_of(draw: &DrawList, within: Option<RectF>) -> Vec<(String, f32, f32)> {
-    let mut out = Vec::new();
-    for (i, item) in draw.items.iter().enumerate() {
-        let (rect, label, color, need) = match &item.cmd {
-            DrawCmd::Text { rect, text, color, .. } if !text.trim().is_empty() => {
-                (*rect, text.to_string(), *color, 4.5)
-            }
-            DrawCmd::Svg { rect, key, tint: Some(color) } => (*rect, format!("icon {key}"), *color, 3.0),
-            _ => continue,
-        };
-        if let Some(w) = within
-            && !(rect.x >= w.x - 0.5
-                && rect.right() <= w.right() + 0.5
-                && rect.y >= w.y - 0.5
-                && rect.bottom() <= w.bottom() + 0.5)
-        {
-            continue;
-        }
-        let mut open = Vec::new();
-        for prev in &draw.items[..=i] {
-            match &prev.cmd {
-                DrawCmd::PushOpacity(a) => open.push(*a),
-                DrawCmd::PopOpacity => {
-                    open.pop();
-                }
-                _ => {}
-            }
-        }
-        if open.iter().any(|a| *a <= 0.001) {
-            continue;
-        }
-        assert!(open.iter().all(|a| *a >= 0.999), "{label}: group opacity half way, contrast is not measured");
-        let centre = PointF { x: rect.x + rect.w / 2.0, y: rect.y + rect.h / 2.0 };
-        let mut worst = f32::MAX;
-        for base in [Color::BLACK, Color::WHITE] {
-            let mut bg = base;
-            for prev in &draw.items[..i] {
-                if let DrawCmd::Fill { rect, fill, .. } = &prev.cmd
-                    && rect.contains(centre)
-                {
-                    match fill {
-                        Fill::Solid(c) => bg = c.over(bg),
-                        Fill::Linear { .. } => panic!("a gradient behind text: contrast is not measured"),
-                    }
-                }
-            }
-            worst = worst.min(Color::contrast_ratio(color.over(bg), bg));
-        }
-        // The off state (`--dim`) only has to reach 3:1.
-        let need = if [0x6d7477u32, 0x6b7378].iter().any(|h| color == Color::parse(&format!("#{h:06x}")).unwrap()) {
-            3.0
-        } else {
-            need
-        };
-        out.push((label, worst, need));
-    }
-    out
+    rsb_core::contrast::of_draw_list(draw, within)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .map(|c| (c.what, c.ratio, c.need))
+        .collect()
 }
 
 #[test]
@@ -1736,6 +1685,66 @@ fn text_contrast_is_at_least_4_5_to_1_in_every_preset_theme_and_state() {
     let dir = png_dir();
     std::fs::write(dir.join("contrast.txt"), lines.join("\n") + "\n").unwrap();
     eprintln!("{}", report.join("\n"));
+}
+
+/// The ratio the sheet's own colours promise for a pair of a preset's `[about.contrast]`
+/// lists and the one measured on the drawn bar for an item of the same colour on the same
+/// fills are worked out by different routes; they have to agree.
+#[test]
+fn token_and_draw_list_contrast_agree() {
+    use rsb_core::contrast;
+    use rsb_core::preset::{Scheme, parse_about};
+    let mut r = renderer();
+    let mut report = Vec::new();
+    for preset in PRESETS {
+        let config = load_preset(preset);
+        let sheet = preset_sheet(preset);
+        let about = parse_about(&preset_toml(preset).unwrap(), &format!("{preset}.toml")).unwrap();
+        for dark in [true, false] {
+            let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+            let vars = contrast::resolve_vars(&sheet, scheme);
+            let mut seen: std::collections::BTreeMap<String, f64> = std::collections::BTreeMap::new();
+            let mut widest = 0.0f64;
+            let mut compared = 0usize;
+            for scenario in Scenario::ALL {
+                for (kind, rig) in [("gallery", gallery(&config, scenario)), ("bar", native(&config, scenario))] {
+                    let d = draw(&rig, &sheet, dark, &mut r, 1920, 1.0);
+                    let items =
+                        contrast::of_draw_list(&d.draw, None).unwrap_or_else(|e| panic!("{preset} {kind}: {e}"));
+                    for a in contrast::compare_with_draw(&about, &vars, &items) {
+                        let gap = (a.token - f64::from(a.drawn)).abs();
+                        assert!(
+                            gap <= 0.05,
+                            "{preset} {} {} {kind} {:?}: sheet {:.3}, drawn {:.3}",
+                            scheme.name(),
+                            a.pair,
+                            a.item,
+                            a.token,
+                            a.drawn
+                        );
+                        widest = widest.max(gap);
+                        compared += 1;
+                        seen.insert(a.pair, a.token);
+                    }
+                }
+            }
+            let pairs = contrast::pairs(&about, &vars).len();
+            report.push(format!(
+                "{preset:14} {:5} {:3} of {pairs:3} pairs seen on the bar, {compared:4} items compared, widest gap {widest:.4}",
+                scheme.name(),
+                seen.len()
+            ));
+            let want = if preset == "default" { 12 } else { 5 };
+            assert!(seen.len() >= want, "{preset} {}: only {} pairs seen: {seen:?}", scheme.name(), seen.len());
+        }
+    }
+    eprintln!(
+        "{}",
+        report.join(
+            "
+"
+        )
+    );
 }
 
 #[test]

@@ -2493,8 +2493,8 @@ end
 -- ---------------------------------------------------------------- widget
 
 local WIDGETS = setmetatable({}, { __mode = "k" })
-local WIDGET_KEYS = { "name", "options", "optional", "permissions", "setup" }
-local WIDGET_KEY_SET = { name = true, options = true, optional = true, permissions = true, setup = true }
+local WIDGET_KEYS = { "name", "options", "optional", "permissions", "setup", "about" }
+local WIDGET_KEY_SET = { name = true, options = true, optional = true, permissions = true, setup = true, about = true }
 
 function rsb.widget(spec)
 	if type(spec) ~= "table" then
@@ -2511,6 +2511,10 @@ function rsb.widget(spec)
 	end
 	if spec.name ~= nil and type(spec.name) ~= "string" then
 		error("rsb.widget: name must be a string", 2)
+	end
+	-- Read by `rsb settings widgets` without running the widget; the bar ignores it.
+	if spec.about ~= nil and type(spec.about) ~= "table" then
+		error("rsb.widget: about must be a table", 2)
 	end
 	if spec.options ~= nil and type(spec.options) ~= "table" then
 		error("rsb.widget: options must be a table", 2)
@@ -2757,6 +2761,73 @@ function E.update_monitor(id, scale)
 	if inst and inst.ctx and inst.ctx.monitor then
 		inst.ctx.monitor.scale = scale
 	end
+end
+
+-- What `rsb inspect` reports about one instance: the reactive scopes under it and what they read. It walks
+-- the scope tree once, stops after `limit` scopes (the last value says so) and runs no widget code. Returns the
+-- `service.field` names read, then the counts of signals the widget made itself, computeds and effects. A signal
+-- nothing reads is in no scope's sources, so it is not counted.
+function E.inspect(id, limit)
+	local inst = INSTANCES[id]
+	if not inst then
+		return {}, 0, 0, 0, false
+	end
+	local named = {}
+	for name, st in pairs(svc_state) do
+		named[st.status] = name .. ".status"
+		named[st.stale] = name .. ".stale"
+		named[st.error] = name .. ".error"
+		for k, s in pairs(st.sigs) do
+			named[s] = name .. "." .. k
+		end
+	end
+	local stack, top = { inst.scope }, 1
+	local visited, effects, computeds, signals = 0, 0, 0, 0
+	local seen, fields, cut = {}, {}, false
+	while top > 0 do
+		local node = stack[top]
+		stack[top] = nil
+		top -= 1
+		visited += 1
+		if visited > limit then
+			cut = true
+			break
+		end
+		local kind = rawget(node, "kind")
+		if kind == EFFECT then
+			effects += 1
+		elseif kind == COMPUTED then
+			computeds += 1
+		end
+		local srcs = rawget(node, "sources")
+		if srcs then
+			for i = 1, #srcs do
+				local s = srcs[i]
+				if not seen[s] and rawget(s, "fn") == nil then
+					seen[s] = true
+					local name = named[s]
+					if name then
+						fields[name] = true
+					else
+						signals += 1
+					end
+				end
+			end
+		end
+		local kids = rawget(node, "kids")
+		if kids then
+			for k in pairs(kids) do
+				top += 1
+				stack[top] = k
+			end
+		end
+	end
+	local list = {}
+	for name in pairs(fields) do
+		list[#list + 1] = name
+	end
+	tsort(list)
+	return list, signals, computeds, effects, cut
 end
 
 return E, rsb

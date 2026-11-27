@@ -7,6 +7,7 @@ local rsb = require("@rsb")
 local text = require("./lib/format")
 
 return rsb.widget {
+	about = { title = "Memory" },
 	options = {
 		format = "{value}%",
 		icon = "memory",

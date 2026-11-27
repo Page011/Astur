@@ -39,7 +39,8 @@ built and tested alone.
  file watch + config reader threads: config folder,   services hub thread + one thread
  debounced; read and parse changed files and           per running source, I/O workers
  `rsb reload`, never the UI                            (COM / WinRT on their own MTA threads)
- pipe thread: \\.\pipe\RSB-<user SID>-<session>; gathers `rsb status` itself
+ pipe thread: \\.\pipe\RSB-<user SID>-<session>; gathers `rsb status`, `rsb inspect`
+   and `applied` itself and runs `settings` requests (see "Settings and inspect")
  watchdog thread: notices a script call stuck for 2 s, and a UI thread stuck
    for 2 s while a full-screen overlay is shown (it hides the overlay)
  clipboard worker: reads and writes clipboard text for inputs (500 ms limit)
@@ -522,6 +523,8 @@ sends anything).
 | `rsb types` | writes `types\rsb.d.luau`; `.luaurc` and the VS Code settings only when missing |
 | `rsb popup <name> [open\|close\|toggle]` | opens, closes or toggles the named popup on the monitor under the pointer (for hotkey tools) |
 | `rsb render --out <png>` | draws the bar to a PNG without a window, with sample values or (`--live`) this PC's |
+| `rsb settings <verb>` | reads and changes the preset, a bar's position, height and floating, the zones and the accent colour; one line of JSON, see `docs/settings.md` |
+| `rsb inspect [widget]` | what each widget draws and costs: element tree, services, timings, memory; see `docs/inspect.md` |
 
 Exit codes: 0 done (or already running), 1 the command failed, 2 bad usage,
 3 no bar is running, 4 the bar could not be reached (another user or session
@@ -602,11 +605,68 @@ to use over Remote Desktop where `compositor_frame` means nothing. The `probe`
 line (`--probe-ui`) gives the worst round trip of the run and
 `worst_after_first_frame_ms`, the worst after the first bar frame was drawn.
 
+## Settings and inspect
+
+Two groups of commands serve a settings page without any window of RSB's own.
+Both are a request on the pipe or a command line; the answer is one line of
+JSON under 65,536 bytes.
+
+```text
+rsb settings <verb>                       rsb inspect [widget]
+  CLI process                               CLI process, pipe line (paged)
+   settings::serve(Request, Ctx::cli)           |
+   edit:  cfgedit::plan_change (pure)           v
+   write: cfgwrite::apply (lock, checks,     pipe thread: inspect::serve
+          two-phase rename, undo entry)       status::snapshot asks, with one
+   log:   one `config:` line per write        1 s deadline: the script thread
+   ask the bar: pipe `applied`, every         (ScriptIn::Inspect), the hub, and
+          50 ms for up to 2 s                 the UI thread (UiMsg::Inspect: a
+                                              bounded copy of each scene)
+  the bar, pipe thread
+   `settings <json>`: settings::serve_line
+   (Ctx::pipe): reads inline, writes only
+   when the lock is free at once (else `busy`)
+```
+
+- **One function behind both transports.** `settings::serve` runs in the
+  command-line process, so it works with no bar, and on the bar's pipe thread
+  for a `settings` line. `widgets` and `preview` (Luau modules, PNGs) are
+  command line only. A write over the pipe needs a client at or above the bar's
+  level of rights, never waits for the writer's lock or retries a file that is
+  busy, and runs no widget module (so it does not check which popup menus a
+  removed widget opened).
+- **Editing the files.** `rsb-core::cfgedit` plans a change as byte splices
+  into the text of `bar.toml` and `style.css` (comments, layout and line
+  endings stay), validates every value, and checks that the new text loads with
+  the same fields. `rsb::cfgwrite` writes it: one lock file under `.undo`,
+  checks on open handles, a temporary file renamed over the target after its
+  file id is checked again, one undo entry per request (the last 20 are kept),
+  and `.undo\written` for the "edited by hand" check. A hand edit made in
+  between is kept and reported; an `--expect` version refuses a changed file.
+- **The bar reloads through its folder watch only.** Nothing sends `reload`.
+  The reader skips a save whose bytes equal the last build and keeps a
+  last-good copy of each file for `settings restore`. After every swap the UI
+  thread publishes the versions of the files it shows (`AppliedState`, FNV-1a
+  of the raw bytes); the pipe line `applied` reads them with no round trip,
+  and the command line polls it until the bar shows the change.
+- **Presets** carry an `[about]` table (title, description, schemes, the colours
+  a page may tune, the pairs the contrast check measures). `rsb-core::contrast`
+  resolves a preset's custom properties, measures every pair, and derives the
+  accent's text, line and hover shades so each pair passes in every preset.
+  `settings preview` draws a preset through the render path and caches the PNG
+  under `%LOCALAPPDATA%\rsb\previews`.
+- **Inspect.** The script thread keeps per-widget run counts and times in
+  one-second buckets, the scene attributes each built frame to the trees that
+  caused it, and the hub keeps poll times. A request copies at most 600 nodes
+  per widget on the UI thread, pages the summary, and cuts a tree to fit one
+  reply with the cut stated. Nothing is written to the log.
+
 ## Files
 
 - Config: `%APPDATA%\rsb` (or `--config-dir`, or `RSB_CONFIG_DIR`):
   `bar.toml`, `style.css`, `widgets\`, `types\rsb.d.luau`, `.luaurc`,
-  `.vscode\settings.json`.
+  `.vscode\settings.json`, and `.undo\` (the undo entries and last-good copies
+  that `rsb settings` keeps; the bar ignores the folder).
 - Logs: `%LOCALAPPDATA%\rsb\logs`, rotated. Logs hold counts, sizes and
   timings, never window titles, media names, network names or file paths
   outside the config folder.

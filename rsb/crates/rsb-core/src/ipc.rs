@@ -16,15 +16,26 @@
 //! status               reply text is one line of JSON (ASCII, \u escapes)
 //! trigger <event>      event name: a-z 0-9 _ . -, 1..=64 chars
 //! trigger <event> <json>   the rest of the line is JSON, non-ASCII escaped
+//! popup <name> [open|close|toggle]
+//! applied              the file versions the bar shows (JSON, `contract::AppliedReply`)
+//! settings <json>      one settings request (JSON, `contract::Request`), non-ASCII escaped
+//! inspect [from=<n>]   a page of the widget summary (JSON)
+//! inspect <widget> [bar=<name>] [depth=<n>] [from=<n>] [style] [redact]
 //! ```
+//!
+//! In an `inspect` line the first word is the widget unless it has an `=`,
+//! so a line without a widget starts with `from=`; `style` and `redact`
+//! are flags only after the first word.
 
 use std::fmt;
 
-use crate::config::is_valid_bar_name;
+use crate::config::{WidgetRef, is_valid_bar_name};
 
 pub const MAX_REQUEST_BYTES: usize = 4096;
 pub const MAX_REPLY_BYTES: usize = 65536;
 pub const MAX_EVENT_NAME: usize = 64;
+/// Deepest element tree `inspect` shows; also its default.
+pub const MAX_INSPECT_DEPTH: u8 = 64;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Command {
@@ -43,6 +54,21 @@ pub enum Command {
     Popup {
         name: String,
         action: crate::popup::PopupAction,
+    },
+    /// The file versions the bar shows.
+    Applied,
+    /// One settings request as JSON text. `decode` checks the line, not the
+    /// JSON: a request that does not parse gets a settings error reply.
+    Settings(String),
+    /// What each widget draws and costs. `widget` None is the summary of
+    /// every widget, paged from the `from`th.
+    Inspect {
+        widget: Option<WidgetRef>,
+        bar: Option<String>,
+        from: u32,
+        depth: u8,
+        style: bool,
+        redact: bool,
     },
 }
 
@@ -63,6 +89,8 @@ pub enum IpcError {
     BadEventName(String),
     BadJson(String),
     BadReply,
+    BadWidgetName(String),
+    BadInspectArg { arg: String, why: &'static str },
 }
 
 /// How much of a refused client word is repeated back.
@@ -101,6 +129,10 @@ impl fmt::Display for IpcError {
             }
             IpcError::BadJson(m) => write!(f, "event data is not JSON: {m}"),
             IpcError::BadReply => f.write_str("malformed reply from the running bar"),
+            IpcError::BadWidgetName(w) => {
+                write!(f, "bad widget '{}': write it as in bar.toml, like clock or my/weather", shown(w))
+            }
+            IpcError::BadInspectArg { arg, why } => write!(f, "bad inspect argument '{}': {why}", shown(arg)),
         }
     }
 }
@@ -119,7 +151,7 @@ fn is_event_name(name: &str) -> bool {
 
 /// Compact JSON with every non-ASCII character as a `\u` escape (surrogate
 /// pairs above U+FFFF), so the request stays printable ASCII.
-fn ascii_json(v: &serde_json::Value) -> String {
+pub fn ascii_json(v: &serde_json::Value) -> String {
     let text = v.to_string();
     let mut out = String::with_capacity(text.len());
     for c in text.chars() {
@@ -146,7 +178,69 @@ fn parse_json(text: &str) -> Result<serde_json::Value, IpcError> {
 }
 
 /// The commands a running bar answers, for "did you mean".
-const COMMANDS: [&str; 6] = ["reload", "quit", "toggle", "status", "trigger", "popup"];
+const COMMANDS: [&str; 9] =
+    ["reload", "quit", "toggle", "status", "trigger", "popup", "applied", "settings", "inspect"];
+
+/// The digits of an `inspect` number: no sign, at most 10 of them.
+fn inspect_number(arg: &str, text: &str) -> Result<u32, IpcError> {
+    let bad = |why| IpcError::BadInspectArg { arg: arg.to_string(), why };
+    if text.is_empty() || text.len() > 10 || !text.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(bad("use a whole number"));
+    }
+    text.parse().map_err(|_| bad("the number is too large"))
+}
+
+/// `words[0]` is `inspect`.
+fn build_inspect(words: &[&str]) -> Result<Command, IpcError> {
+    let mut rest = &words[1..];
+    let mut widget = None;
+    if let Some(first) = rest.first().filter(|w| !w.contains('=')) {
+        widget = Some(WidgetRef::parse(first).map_err(|_| IpcError::BadWidgetName(first.to_string()))?);
+        rest = &rest[1..];
+    }
+    let (mut bar, mut from, mut depth, mut style, mut redact) = (None, None, None, false, false);
+    for word in rest {
+        let refuse = |why| IpcError::BadInspectArg { arg: word.to_string(), why };
+        match word.split_once('=') {
+            Some(("bar", v)) => {
+                if bar.is_some() {
+                    return Err(refuse("given twice"));
+                }
+                if !is_valid_bar_name(v) {
+                    return Err(IpcError::BadBarName(v.to_string()));
+                }
+                bar = Some(v.to_string());
+            }
+            Some(("from", v)) => {
+                if from.is_some() {
+                    return Err(refuse("given twice"));
+                }
+                from = Some(inspect_number(word, v)?);
+            }
+            Some(("depth", v)) => {
+                if depth.is_some() {
+                    return Err(refuse("given twice"));
+                }
+                match u8::try_from(inspect_number(word, v)?) {
+                    Ok(d) if (1..=MAX_INSPECT_DEPTH).contains(&d) => depth = Some(d),
+                    _ => return Err(refuse("depth is 1 to 64")),
+                }
+            }
+            None if *word == "style" && !style => style = true,
+            None if *word == "redact" && !redact => redact = true,
+            None if *word == "style" || *word == "redact" => return Err(refuse("given twice")),
+            _ => return Err(refuse("unknown word")),
+        }
+    }
+    Ok(Command::Inspect {
+        widget,
+        bar,
+        from: from.unwrap_or(0),
+        depth: depth.unwrap_or(MAX_INSPECT_DEPTH),
+        style,
+        redact,
+    })
+}
 
 /// `words` is non-empty; `json` is the raw rest of a trigger line, if any.
 fn build(words: &[&str], json: Option<String>) -> Result<Command, IpcError> {
@@ -168,6 +262,12 @@ fn build(words: &[&str], json: Option<String>) -> Result<Command, IpcError> {
             [_, event] => Err(IpcError::BadEventName(event.to_string())),
             _ => Err(IpcError::WrongArgs { command: "trigger", expected: "<event> [json]" }),
         },
+        "applied" => simple("applied", Command::Applied),
+        "settings" => match json {
+            Some(j) => Ok(Command::Settings(j)),
+            None => Err(IpcError::WrongArgs { command: "settings", expected: "<json>" }),
+        },
+        "inspect" => build_inspect(words),
         "popup" => {
             let action = |a: &str| crate::popup::PopupAction::from_name(a);
             match words {
@@ -197,6 +297,9 @@ impl Command {
         let cmd = if first == "trigger" && args.len() == 3 {
             let json = ascii_json(&parse_json(&args[2])?);
             build(&["trigger", &args[1]], Some(json))?
+        } else if first == "settings" && args.len() == 2 {
+            let json = ascii_json(&parse_json(&args[1])?);
+            build(&["settings"], Some(json))?
         } else {
             let words: Vec<&str> = args.iter().map(String::as_str).collect();
             build(&words, None)?
@@ -219,6 +322,33 @@ impl Command {
             Command::Trigger { event, json: None } => format!("trigger {event}\n"),
             Command::Trigger { event, json: Some(j) } => format!("trigger {event} {j}\n"),
             Command::Popup { name, action } => format!("popup {name} {}\n", action.name()),
+            Command::Applied => "applied\n".into(),
+            Command::Settings(json) => format!("settings {json}\n"),
+            Command::Inspect { widget, bar, from, depth, style, redact } => {
+                let mut line = String::from("inspect");
+                match widget {
+                    Some(w) => line.push_str(&format!(" {w}")),
+                    // No widget: the first word has an `=`, so it is not read as one.
+                    None => line.push_str(&format!(" from={from}")),
+                }
+                if widget.is_some() && *from != 0 {
+                    line.push_str(&format!(" from={from}"));
+                }
+                if let Some(b) = bar {
+                    line.push_str(&format!(" bar={b}"));
+                }
+                if *depth != MAX_INSPECT_DEPTH {
+                    line.push_str(&format!(" depth={depth}"));
+                }
+                if *style {
+                    line.push_str(" style");
+                }
+                if *redact {
+                    line.push_str(" redact");
+                }
+                line.push('\n');
+                line
+            }
         }
     }
 
@@ -239,6 +369,12 @@ impl Command {
             }
             parse_json(json)?;
             return build(&["trigger", event], Some(json.to_string()));
+        }
+        if let Some(json) = text.strip_prefix("settings ") {
+            if json.is_empty() || json.starts_with(' ') {
+                return Err(IpcError::UnknownCommand(text.to_string()));
+            }
+            return build(&["settings"], Some(json.to_string()));
         }
         let words: Vec<&str> = text.split(' ').collect();
         if words.iter().any(|w| w.is_empty()) {
@@ -317,7 +453,28 @@ mod tests {
             Command::Toggle(Some("main".into())),
             Command::Trigger { event: "deploy".into(), json: None },
             Command::Trigger { event: "build.done".into(), json: Some("{\"ok\":true,\"n\":[1, 2]}".into()) },
+            Command::Applied,
+            Command::Settings("{\"verb\":\"get\"}".into()),
+            Command::Settings("{\"changes\":[{\"op\":\"set\",\"key\":\"preset\",\"value\":\"a b\"}]}".into()),
+            inspect(None, None, 0, 64, false, false),
+            inspect(None, None, 3, 64, false, false),
+            inspect(None, Some("main"), 0, 64, true, true),
+            inspect(Some("clock"), None, 0, 64, false, false),
+            inspect(Some("my/weather"), Some("main"), 0, 5, true, false),
+            inspect(Some("clock#utc"), None, 7, 1, false, true),
+            inspect(Some("style"), None, 0, 64, true, false),
         ]
+    }
+
+    fn inspect(widget: Option<&str>, bar: Option<&str>, from: u32, depth: u8, style: bool, redact: bool) -> Command {
+        Command::Inspect {
+            widget: widget.map(|w| WidgetRef::parse(w).unwrap()),
+            bar: bar.map(str::to_string),
+            from,
+            depth,
+            style,
+            redact,
+        }
     }
 
     #[test]
@@ -412,6 +569,86 @@ mod tests {
         );
         let long = IpcError::UnknownCommand("y".repeat(400)).to_string();
         assert!(long.len() < 120 && long.contains(&format!("{}...", "y".repeat(32))));
+    }
+
+    #[test]
+    fn applied_settings_and_inspect_lines_have_one_wire_form() {
+        assert_eq!(Command::Applied.encode(), "applied\n");
+        assert_eq!(Command::decode(b"applied\n"), Ok(Command::Applied));
+        assert_eq!(Command::Settings("{\"verb\":\"get\"}".into()).encode(), "settings {\"verb\":\"get\"}\n");
+        assert_eq!(inspect(None, None, 0, 64, false, false).encode(), "inspect from=0\n");
+        assert_eq!(
+            inspect(Some("my/weather"), Some("main"), 0, 5, true, true).encode(),
+            "inspect my/weather bar=main depth=5 style redact\n"
+        );
+        // A bare `inspect` is the first page of the summary.
+        assert_eq!(Command::decode(b"inspect\n"), Ok(inspect(None, None, 0, 64, false, false)));
+        // Keys and flags in any order after the first word.
+        assert_eq!(
+            Command::decode(b"inspect clock redact depth=2 bar=top style from=4\n"),
+            Ok(inspect(Some("clock"), Some("top"), 4, 2, true, true))
+        );
+        assert_eq!(Command::decode(b"inspect bar=main style\n"), Ok(inspect(None, Some("main"), 0, 64, true, false)));
+        // A widget may be called `style`: the first word is always the widget.
+        assert_eq!(Command::decode(b"inspect style\n"), Ok(inspect(Some("style"), None, 0, 64, false, false)));
+        assert!(Command::decode(b"inspect clock depth=64\n").is_ok(), "the deepest tree the scene allows");
+    }
+
+    #[test]
+    fn a_settings_line_goes_through_from_args_with_non_ascii_escaped() {
+        let request = "{\"changes\":[{\"op\":\"set\",\"key\":\"preset\",\"value\":\"caf\u{e9}\"}]}";
+        let cmd = Command::from_args(&words(&["settings", request])).unwrap();
+        let wire = cmd.encode();
+        assert!(wire.is_ascii() && wire.contains("caf\\u00e9"), "{wire}");
+        assert_eq!(Command::decode(wire.as_bytes()), Ok(cmd));
+        assert!(matches!(Command::from_args(&words(&["settings", "{nope"])), Err(IpcError::BadJson(_))));
+        assert!(matches!(
+            Command::from_args(&words(&["settings"])),
+            Err(IpcError::WrongArgs { command: "settings", .. })
+        ));
+        // The line is checked as a line; whether it is a request is for the settings reply to say.
+        assert_eq!(Command::decode(b"settings {nope\n"), Ok(Command::Settings("{nope".into())));
+        assert!(matches!(Command::decode(b"settings \n"), Err(IpcError::UnknownCommand(_))));
+        assert!(matches!(Command::decode(b"settings  {}\n"), Err(IpcError::UnknownCommand(_))));
+        assert_eq!(
+            Command::decode(b"settings\n"),
+            Err(IpcError::WrongArgs { command: "settings", expected: "<json>" })
+        );
+        assert_eq!(Command::decode("settings {\"a\":\"\u{e9}\"}\n".as_bytes()), Err(IpcError::NotAscii));
+        let mut big = b"settings {\"a\":\"".to_vec();
+        big.extend(vec![b'x'; MAX_REQUEST_BYTES]);
+        big.extend(b"\"}\n");
+        assert!(matches!(Command::decode(&big), Err(IpcError::TooLong { .. })));
+    }
+
+    #[test]
+    fn inspect_refusals_name_the_word() {
+        let arg = |arg: &str, why| IpcError::BadInspectArg { arg: arg.into(), why };
+        let cases: Vec<(&[u8], IpcError)> = vec![
+            (b"inspect Clock\n", IpcError::BadWidgetName("Clock".into())),
+            (b"inspect ../x\n", IpcError::BadWidgetName("../x".into())),
+            (b"inspect clock bar=Main\n", IpcError::BadBarName("Main".into())),
+            (b"inspect clock depth=0\n", arg("depth=0", "depth is 1 to 64")),
+            (b"inspect clock depth=65\n", arg("depth=65", "depth is 1 to 64")),
+            (b"inspect clock depth=300\n", arg("depth=300", "depth is 1 to 64")),
+            (b"inspect clock depth=-1\n", arg("depth=-1", "use a whole number")),
+            (b"inspect clock depth=\n", arg("depth=", "use a whole number")),
+            (b"inspect from=x\n", arg("from=x", "use a whole number")),
+            (b"inspect from=99999999999\n", arg("from=99999999999", "use a whole number")),
+            (b"inspect from=4294967296\n", arg("from=4294967296", "the number is too large")),
+            (b"inspect clock wide\n", arg("wide", "unknown word")),
+            (b"inspect clock colour=red\n", arg("colour=red", "unknown word")),
+            (b"inspect clock style style\n", arg("style", "given twice")),
+            (b"inspect clock bar=a bar=b\n", arg("bar=b", "given twice")),
+            (b"inspect from=1 from=2\n", arg("from=2", "given twice")),
+            ("inspect cl\u{f3}ck\n".as_bytes(), IpcError::NotAscii),
+        ];
+        for (bytes, want) in cases {
+            assert_eq!(Command::decode(bytes), Err(want), "{}", String::from_utf8_lossy(bytes));
+        }
+        assert!(matches!(Command::decode(b"inspect  clock\n"), Err(IpcError::UnknownCommand(_))));
+        assert_eq!(arg("depth=0", "depth is 1 to 64").to_string(), "bad inspect argument 'depth=0': depth is 1 to 64");
+        assert!(IpcError::BadWidgetName("Clock".into()).to_string().contains("like clock or my/weather"));
     }
 
     #[test]

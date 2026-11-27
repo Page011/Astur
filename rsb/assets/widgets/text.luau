@@ -28,6 +28,7 @@ local function argv(value: any): { string }?
 end
 
 return rsb.widget {
+	about = { title = "Text", needs_options = true },
 	options = {
 		text = "",
 		exec = (nil :: any),

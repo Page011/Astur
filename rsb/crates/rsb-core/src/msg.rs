@@ -102,6 +102,11 @@ pub struct ServiceInfo {
     /// Since the last value or liveness signal.
     pub last_update_ago: Option<Duration>,
     pub error: Option<String>,
+    /// Time the hub thread has spent on this service's reports and polls
+    /// since the hub started.
+    pub poll_total: Duration,
+    /// The same, within the last 60 seconds.
+    pub poll_last_60s: Duration,
 }
 
 // ---------------------------------------------------------------- scripts
@@ -184,6 +189,13 @@ pub enum ScriptIn {
     /// 1 s for it, never the UI thread.
     Status {
         reply: Sender<Vec<WidgetStatus>>,
+    },
+    /// For `rsb inspect`: what each instance's scripts did and what their
+    /// reactive scopes hold, one JSON object per instance (the fields are
+    /// listed in `rsb_script::inspect::InspectInfo::to_json`). Answered by
+    /// the script thread; the pipe thread waits at most 1 s for it.
+    Inspect {
+        reply: Sender<Vec<(InstanceId, serde_json::Value)>>,
     },
     Shutdown,
     /// A key, text, value, focus, scroll or popup-closed event for one

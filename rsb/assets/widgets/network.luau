@@ -26,6 +26,7 @@ local function bars(signal: number): string
 end
 
 return rsb.widget {
+	about = { title = "Network", opens = { "network" } },
 	options = {
 		format = "",
 		every = "2s",

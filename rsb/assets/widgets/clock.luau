@@ -5,6 +5,7 @@
 local rsb = require("@rsb")
 
 return rsb.widget {
+	about = { title = "Clock" },
 	options = {
 		format = "HH:mm",
 		alt_format = "ddd d MMM HH:mm:ss",

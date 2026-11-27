@@ -21,6 +21,7 @@ local text = require("./lib/format")
 local panel = require("./lib/panel")
 
 return rsb.widget {
+	about = { title = "Media", opens = { "media" } },
 	options = {
 		format = "{artist} - {title}",
 		max_width = 280,

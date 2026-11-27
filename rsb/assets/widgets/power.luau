@@ -12,6 +12,7 @@
 local rsb = require("@rsb")
 
 return rsb.widget {
+	about = { title = "Power menu", visible = false, opens = { "power" } },
 	permissions = { control = { "power", "session" }, overlay = true },
 	setup = function(props, ctx)
 		local power = rsb.services.power

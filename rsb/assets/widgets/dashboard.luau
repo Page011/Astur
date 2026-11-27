@@ -35,6 +35,7 @@ local function argv(value: any): { string }?
 end
 
 return rsb.widget {
+	about = { title = "Dashboard", opens = { "dashboard", "launcher", "power" } },
 	options = {
 		record_command = (nil :: any),
 	},

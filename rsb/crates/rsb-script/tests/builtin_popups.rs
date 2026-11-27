@@ -2149,79 +2149,16 @@ fn open_surface(name: &str, world: World, dark: bool) -> Option<Rig> {
     Some(rig)
 }
 
-/// `p` inside the polygon (even-odd).
-fn in_polygon(p: PointF, pts: &[PointF]) -> bool {
-    let mut inside = false;
-    let mut j = pts.len().wrapping_sub(1);
-    for i in 0..pts.len() {
-        let (a, b) = (pts[i], pts[j]);
-        if (a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x {
-            inside = !inside;
-        }
-        j = i;
-    }
-    inside
-}
-
 /// Contrast of one draw list: every text item against the fills drawn under it (4.5:1) and every icon
 /// (3:1); translucent fills are composited over black and over white and the worse of the two counts.
 /// Items in a fully transparent group are not on screen; a group half way is refused (settle first).
 /// Restricted to items inside `within`. Returns (what, ratio, ratio needed).
 fn contrast_of(draw: &DrawList, within: Option<RectF>) -> Vec<(String, f32, f32)> {
-    let mut out = Vec::new();
-    for (i, item) in draw.items.iter().enumerate() {
-        let (rect, label, color, need) = match &item.cmd {
-            DrawCmd::Text { rect, text, color, .. } if !text.trim().is_empty() => {
-                (*rect, text.to_string(), *color, 4.5)
-            }
-            DrawCmd::Svg { rect, key, tint: Some(color) } => (*rect, format!("icon {key}"), *color, 3.0),
-            _ => continue,
-        };
-        if let Some(w) = within
-            && !(rect.x >= w.x - 0.5
-                && rect.right() <= w.right() + 0.5
-                && rect.y >= w.y - 0.5
-                && rect.bottom() <= w.bottom() + 0.5)
-        {
-            continue;
-        }
-        let mut open = Vec::new();
-        for prev in &draw.items[..=i] {
-            match &prev.cmd {
-                DrawCmd::PushOpacity(a) => open.push(*a),
-                DrawCmd::PopOpacity => {
-                    open.pop();
-                }
-                _ => {}
-            }
-        }
-        if open.iter().any(|a| *a <= 0.001) {
-            continue;
-        }
-        assert!(open.iter().all(|a| *a >= 0.999), "{label}: group opacity half way, contrast is not measured");
-        let centre = PointF { x: rect.x + rect.w / 2.0, y: rect.y + rect.h / 2.0 };
-        let mut worst = f32::MAX;
-        for base in [Color::BLACK, Color::WHITE] {
-            let mut bg = base;
-            for prev in &draw.items[..i] {
-                match &prev.cmd {
-                    DrawCmd::Fill { rect, fill, .. } if rect.contains(centre) => match fill {
-                        Fill::Solid(c) => bg = c.over(bg),
-                        Fill::Linear { .. } => panic!("a gradient behind text: contrast is not measured"),
-                    },
-                    DrawCmd::FillPath { path, fill: Fill::Solid(c) } if in_polygon(centre, &polygon_points(path)) => {
-                        bg = c.over(bg)
-                    }
-                    _ => {}
-                }
-            }
-            worst = worst.min(Color::contrast_ratio(color.over(bg), bg));
-        }
-        // The off state (`--dim`) only has to reach 3:1.
-        let dim = [0x6d7477u32, 0x6b7378].iter().any(|h| color == Color::parse(&format!("#{h:06x}")).unwrap());
-        out.push((label, worst, if dim { 3.0 } else { need }));
-    }
-    out
+    rsb_core::contrast::of_draw_list(draw, within)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .into_iter()
+        .map(|c| (c.what, c.ratio, c.need))
+        .collect()
 }
 
 /// Worst contrast seen, scaled so that 4.5 is the pass mark for text and icons alike.
@@ -2295,6 +2232,61 @@ fn contrast_holds_on_every_panel_in_every_state_dark_and_light() {
     eprintln!("{}\nlowest {ratio:.2} (pass mark 4.5): {at}", report.join("\n"));
     assert!(worst.count > 1500, "only {} items measured", worst.count);
     assert!(ratio >= 4.5, "{ratio:.2}: {at}");
+}
+
+/// The ratio the default preset's own colours promise for a pair of its `[about.contrast]` lists
+/// and the one measured on every drawn panel for an item of the same colour on the same fills are
+/// worked out by different routes; they have to agree.
+#[test]
+fn token_and_draw_list_contrast_agree_on_every_panel() {
+    use rsb_core::contrast;
+    use rsb_core::preset::{Scheme, parse_about};
+    let toml = std::fs::read_to_string(assets().join("presets").join("default.toml")).unwrap();
+    let about = parse_about(&toml, "default.toml").unwrap();
+    let sheet = sheet_for("default");
+    let mut report = Vec::new();
+    for dark in [true, false] {
+        let scheme = if dark { Scheme::Dark } else { Scheme::Light };
+        let vars = contrast::resolve_vars(&sheet, scheme);
+        let mut seen = std::collections::BTreeSet::new();
+        let (mut widest, mut compared) = (0.0f64, 0usize);
+        for world in World::ALL {
+            for name in SURFACES {
+                let Some(mut rig) = open_surface(name, world, dark) else { continue };
+                let draw = rig.frame_pop();
+                let items = contrast::of_draw_list(&draw, None).unwrap_or_else(|e| panic!("{name}: {e}"));
+                for a in contrast::compare_with_draw(&about, &vars, &items) {
+                    let gap = (a.token - f64::from(a.drawn)).abs();
+                    assert!(
+                        gap <= 0.05,
+                        "{} {name} {} {:?}: sheet {:.3}, drawn {:.3}",
+                        scheme.name(),
+                        a.pair,
+                        a.item,
+                        a.token,
+                        a.drawn
+                    );
+                    widest = widest.max(gap);
+                    compared += 1;
+                    seen.insert(a.pair);
+                }
+            }
+        }
+        report.push(format!(
+            "{:5} {:3} of {} pairs seen on the panels, {compared:4} items compared, widest gap {widest:.4}",
+            scheme.name(),
+            seen.len(),
+            contrast::pairs(&about, &vars).len()
+        ));
+        assert!(seen.len() >= 20, "{}: only {} pairs seen: {seen:?}", scheme.name(), seen.len());
+    }
+    eprintln!(
+        "{}",
+        report.join(
+            "
+"
+        )
+    );
 }
 
 // ---------------------------------------------------------------- no one-edge accent stripes

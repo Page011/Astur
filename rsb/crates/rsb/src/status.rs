@@ -8,15 +8,18 @@
 use std::sync::mpsc::{Sender, channel};
 use std::time::{Duration, Instant};
 
+use rsb_core::element::InstanceId;
 use rsb_core::msg::{HubPort, HubRequest, ScriptIn, ServiceInfo, WidgetSource, WidgetState, WidgetStatus};
 use rsb_core::wake::Wake;
 use rsb_services::HubSender;
 use serde_json::{Value, json};
 
+use crate::inspect::{InspectQuery, UiPart};
 use crate::msg::{BarInfo, UiMsg};
 use crate::stats;
 
-const PART_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long the pipe thread waits for the threads it asks, all together.
+pub const PART_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// Everything the pipe thread needs to ask the other threads.
 pub struct Sources {
@@ -266,29 +269,70 @@ pub fn table(reply: &str) -> String {
     out.trim_end().to_string()
 }
 
-/// Asks the three threads and builds the reply line.
-pub fn gather(src: &Sources) -> String {
+/// What the threads answered, for `rsb status` and `rsb inspect` alike. A
+/// part that missed the deadline is None.
+#[derive(Default)]
+pub struct Snapshot {
+    pub widgets: Option<Vec<WidgetStatus>>,
+    pub services: Option<Vec<ServiceInfo>>,
+    /// Only asked for by `status`.
+    pub bars: Option<Vec<BarInfo>>,
+    /// Only asked for by `inspect`: the script thread's numbers per instance.
+    pub script: Option<Vec<(InstanceId, Value)>>,
+    /// Only asked for by `inspect`: the UI thread's copy of the bars.
+    pub ui: Option<UiPart>,
+}
+
+/// Asks the threads at the same time and waits for each against one
+/// shared deadline. `inspect` None is the plain status snapshot (widgets,
+/// services, bars); with a query it also asks the script thread for its
+/// inspect numbers and the UI thread for the bars' frame cost and trees, and
+/// leaves out the bars list.
+pub fn snapshot(src: &Sources, inspect: Option<&InspectQuery>) -> Snapshot {
     let (wtx, wrx) = channel();
     let _ = src.script_tx.send(ScriptIn::Status { reply: wtx });
     let (stx, srx) = channel();
     src.hub.send(HubRequest::Status { reply: stx });
     let (btx, brx) = channel();
-    let asked_ui = src.ui_tx.send(UiMsg::BarsQuery { reply: btx }).is_ok();
+    let (itx, irx) = channel();
+    let (utx, urx) = channel();
+    let asked_ui = match inspect {
+        None => src.ui_tx.send(UiMsg::BarsQuery { reply: btx }).is_ok(),
+        Some(query) => {
+            let _ = src.script_tx.send(ScriptIn::Inspect { reply: itx });
+            src.ui_tx.send(UiMsg::Inspect { query: query.clone(), reply: utx }).is_ok()
+        }
+    };
     if asked_ui {
         src.waker.wake();
     }
-    // The three parts are working at the same time: wait for each in turn
-    // against one shared deadline.
+    // The parts are working at the same time: wait for each in turn
+    // against one deadline.
     let deadline = Instant::now() + PART_TIMEOUT;
     let left = || deadline.saturating_duration_since(Instant::now());
     let widgets = wrx.recv_timeout(left()).ok();
     let services = srx.recv_timeout(left()).ok();
-    let bars = brx.recv_timeout(left()).ok();
+    if inspect.is_some() {
+        Snapshot {
+            widgets,
+            services,
+            bars: None,
+            script: irx.recv_timeout(left()).ok(),
+            ui: urx.recv_timeout(left()).ok(),
+        }
+    } else {
+        Snapshot { widgets, services, bars: brx.recv_timeout(left()).ok(), script: None, ui: None }
+    }
+}
+
+/// Asks the three threads and builds the reply line.
+pub fn gather(src: &Sources) -> String {
+    let snap = snapshot(src, None);
     let body = build(
         src.started.elapsed().as_secs(),
-        bars.as_deref(),
-        widgets.as_deref(),
-        services.as_deref(),
+        snap.bars.as_deref(),
+        snap.widgets.as_deref(),
+        snap.services.as_deref(),
         stats::memory_mb(),
     );
     ascii_json(&body)
@@ -339,6 +383,8 @@ mod tests {
             version: 3,
             last_update_ago: Some(Duration::from_millis(1200)),
             error: None,
+            poll_total: Duration::ZERO,
+            poll_last_60s: Duration::ZERO,
         };
         let v = build(12, Some(&[bar(None)]), Some(&[widget(WidgetState::Running)]), Some(&[svc]), (11.8, 19.4));
         assert_eq!(v["version"], env!("CARGO_PKG_VERSION"));
@@ -386,6 +432,8 @@ mod tests {
             version: 3,
             last_update_ago: Some(Duration::from_millis(1200)),
             error: None,
+            poll_total: Duration::ZERO,
+            poll_last_60s: Duration::ZERO,
         };
         let mut stopped = widget(WidgetState::Stopped("STOPPED - x ran over 10 ms; fix it and save".into()));
         stopped.widget = "notes".into();

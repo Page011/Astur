@@ -11,6 +11,7 @@ use std::fmt;
 use toml::Spanned as TomlSpanned;
 use toml::de::{DeInteger, DeTable, DeValue};
 
+use crate::contract::Source;
 use crate::css::parse::LineIndex;
 use crate::diag::{DiagKind, Diagnostic, Severity, SourcePos};
 use crate::value::Value;
@@ -291,6 +292,35 @@ struct PartialBar {
     /// The ref as written and where.
     center_on: Option<(String, SourcePos)>,
     pos: Option<SourcePos>,
+    /// Where each key that was read was written (its key, not its value).
+    at: BTreeMap<&'static str, SourcePos>,
+}
+
+/// A value with the layer it came from.
+fn wrap<T>(value: T, (source, at): (Source, Option<SourcePos>)) -> Sourced<T> {
+    Sourced { value, source, at }
+}
+
+impl PartialBar {
+    /// Whether the key was read to a usable value.
+    fn has(&self, key: &str) -> bool {
+        match key {
+            "name" => self.name.is_some(),
+            "monitors" => self.monitors.is_some(),
+            "position" => self.position.is_some(),
+            "height" => self.height.is_some(),
+            "floating" => self.floating.is_some(),
+            "margin" => self.margin.is_some(),
+            "radius" => self.radius.is_some(),
+            "reserve" => self.reserve.is_some(),
+            "fullscreen" => self.fullscreen.is_some(),
+            "left" => self.left.is_some(),
+            "center" => self.center.is_some(),
+            "right" => self.right.is_some(),
+            "center_on" => self.center_on.is_some(),
+            _ => false,
+        }
+    }
 }
 
 type OptionTable = BTreeMap<String, Spanned<Value>>;
@@ -300,6 +330,8 @@ type OptionTable = BTreeMap<String, Spanned<Value>>;
 struct Layer {
     config_version: Option<(i64, SourcePos)>,
     preset: Option<(String, SourcePos)>,
+    /// Where the `preset` key itself is.
+    preset_key: Option<SourcePos>,
     /// None = no `bar` key; Some(empty) = `bar = []`.
     bars: Option<Vec<PartialBar>>,
     /// Ref text -> (where the table is, options).
@@ -311,6 +343,8 @@ struct Reader<'a> {
     file: &'a str,
     li: LineIndex,
     diags: Vec<Diagnostic>,
+    /// Reading a preset: its `[about]` table is metadata, not a setting.
+    preset: bool,
 }
 
 /// Keys a `[[bar]]` table takes.
@@ -331,6 +365,173 @@ pub const BAR_KEYS: &[&str] = &[
 ];
 /// Keys the top of `bar.toml` takes.
 pub const TOP_KEYS: &[&str] = &["config_version", "preset", "bar", "widget"];
+
+/// What a `[[bar]]` key accepts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyKind {
+    /// An integer in `lo..=hi`.
+    Int {
+        lo: i64,
+        hi: i64,
+    },
+    Bool,
+    /// One of these words (compared without regard to case).
+    Choice(&'static [&'static str]),
+    /// A list of monitor selectors; an index must be at most `max_index`.
+    Monitors {
+        max_index: u32,
+    },
+    /// A list of widget refs.
+    Zone,
+    /// A bar name.
+    Name,
+    Text,
+}
+
+/// One key of a `[[bar]]` table, as the parser reads it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct KeySpec {
+    pub name: &'static str,
+    pub kind: KeyKind,
+    /// Settings commands may change it (the others are changed in the file).
+    pub editable: bool,
+}
+
+/// The keys of a `[[bar]]` table with their limits. The parser, the settings
+/// schema and the tests all read it, so no limit is written twice.
+pub const BAR_SPECS: &[KeySpec] = &[
+    KeySpec { name: "name", kind: KeyKind::Name, editable: false },
+    KeySpec { name: "monitors", kind: KeyKind::Monitors { max_index: 64 }, editable: false },
+    KeySpec { name: "position", kind: KeyKind::Choice(&["top", "bottom"]), editable: true },
+    KeySpec { name: "height", kind: KeyKind::Int { lo: 16, hi: 128 }, editable: true },
+    KeySpec { name: "floating", kind: KeyKind::Bool, editable: true },
+    KeySpec { name: "margin", kind: KeyKind::Int { lo: 0, hi: 64 }, editable: false },
+    KeySpec { name: "radius", kind: KeyKind::Int { lo: 0, hi: 64 }, editable: false },
+    KeySpec { name: "reserve", kind: KeyKind::Bool, editable: false },
+    KeySpec { name: "fullscreen", kind: KeyKind::Choice(&["below", "hide", "stay"]), editable: false },
+    KeySpec { name: "left", kind: KeyKind::Zone, editable: true },
+    KeySpec { name: "center", kind: KeyKind::Zone, editable: true },
+    KeySpec { name: "right", kind: KeyKind::Zone, editable: true },
+    KeySpec { name: "center_on", kind: KeyKind::Text, editable: false },
+];
+
+/// The spec of a `[[bar]]` key. Every key the parser reads has one (a test
+/// holds the two lists together), so the fallback is never used.
+pub fn bar_spec(name: &str) -> &'static KeySpec {
+    BAR_SPECS.iter().find(|s| s.name == name).unwrap_or(&BAR_SPECS[0])
+}
+
+/// The limits of an integer key.
+fn int_limits(name: &str) -> (i64, i64) {
+    match bar_spec(name).kind {
+        KeyKind::Int { lo, hi } => (lo, hi),
+        _ => (0, 0),
+    }
+}
+
+/// The words a choice key takes.
+fn choice_words(name: &str) -> &'static [&'static str] {
+    match bar_spec(name).kind {
+        KeyKind::Choice(words) => words,
+        _ => &[],
+    }
+}
+
+/// The highest monitor index a `monitors` entry may name.
+fn max_monitor_index() -> i64 {
+    match bar_spec("monitors").kind {
+        KeyKind::Monitors { max_index } => i64::from(max_index),
+        _ => 0,
+    }
+}
+
+/// A value with the layer that supplied it and, for the user's layer, where
+/// it was written.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Sourced<T> {
+    pub value: T,
+    pub source: Source,
+    pub at: Option<SourcePos>,
+}
+
+impl<T> Sourced<T> {
+    /// A value nothing set: it comes from the built-in defaults.
+    pub fn default_of(value: T) -> Sourced<T> {
+        Sourced { value, source: Source::Default, at: None }
+    }
+}
+
+/// Where each setting of one bar came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BarSources {
+    pub name: Sourced<String>,
+    pub monitors: Sourced<Vec<MonitorSelector>>,
+    pub position: Sourced<Position>,
+    pub height: Sourced<u32>,
+    pub floating: Sourced<bool>,
+    pub margin: Sourced<u32>,
+    pub radius: Sourced<u32>,
+    pub reserve: Sourced<bool>,
+    pub fullscreen: Sourced<FullscreenMode>,
+    pub left: Sourced<Vec<ZoneItem>>,
+    pub center: Sourced<Vec<ZoneItem>>,
+    pub right: Sourced<Vec<ZoneItem>>,
+    pub center_on: Sourced<Option<String>>,
+}
+
+/// Where each setting of a loaded config came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConfigSources {
+    pub preset: Sourced<String>,
+    /// One entry per bar of the config, in order.
+    pub bars: Vec<BarSources>,
+}
+
+impl ConfigSources {
+    /// Every value marked as built in.
+    pub fn all_default(config: &Config) -> ConfigSources {
+        ConfigSources {
+            preset: Sourced::default_of(config.preset.clone()),
+            bars: config
+                .bars
+                .iter()
+                .map(|b| BarSources {
+                    name: Sourced::default_of(b.name.clone()),
+                    monitors: Sourced::default_of(b.monitors.clone()),
+                    position: Sourced::default_of(b.position),
+                    height: Sourced::default_of(b.height),
+                    floating: Sourced::default_of(b.floating),
+                    margin: Sourced::default_of(b.margin),
+                    radius: Sourced::default_of(b.radius),
+                    reserve: Sourced::default_of(b.reserve),
+                    fullscreen: Sourced::default_of(b.fullscreen),
+                    left: Sourced::default_of(b.left.clone()),
+                    center: Sourced::default_of(b.center.clone()),
+                    right: Sourced::default_of(b.right.clone()),
+                    center_on: Sourced::default_of(b.center_on.clone()),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// `load_config` plus the layer each setting came from.
+#[derive(Clone, Debug)]
+pub struct ConfigLoadSourced {
+    pub load: ConfigLoad,
+    /// None when `load.config` is None.
+    pub sources: Option<ConfigSources>,
+}
+
+/// `load_config`, and for each setting of each bar which layer supplied it:
+/// the user's `bar.toml` (with the line), the preset, or the built-in default.
+pub fn load_config_sourced(
+    user: Option<(&str, &str)>,
+    preset_toml: &dyn Fn(&str) -> Option<String>,
+) -> ConfigLoadSourced {
+    let (load, sources) = load_inner(user, preset_toml);
+    ConfigLoadSourced { load, sources }
+}
 
 fn type_name(v: &DeValue) -> &'static str {
     match v {
@@ -437,9 +638,9 @@ impl Reader<'_> {
     fn monitor(&mut self, v: &TomlSpanned<DeValue>) -> Option<MonitorSelector> {
         match v.get_ref() {
             DeValue::Integer(i) => match int_of(i) {
-                Some(n) if (0..=64).contains(&n) => Some(MonitorSelector::Index(n as u32)),
+                Some(n) if (0..=max_monitor_index()).contains(&n) => Some(MonitorSelector::Index(n as u32)),
                 _ => {
-                    self.warn(v.span().start, "'monitors' index must be 0 to 64");
+                    self.warn(v.span().start, format!("'monitors' index must be 0 to {}", max_monitor_index()));
                     None
                 }
             },
@@ -528,16 +729,25 @@ impl Reader<'_> {
                 "monitors" => b.monitors = self.monitors(v),
                 "position" => {
                     b.position = self
-                        .choice(key, v, &["top", "bottom"])
+                        .choice(key, v, choice_words("position"))
                         .map(|i| if i == 0 { Position::Top } else { Position::Bottom })
                 }
-                "height" => b.height = self.uint(key, v, 16, 128),
+                "height" => {
+                    let (lo, hi) = int_limits("height");
+                    b.height = self.uint(key, v, lo, hi)
+                }
                 "floating" => b.floating = self.boolean(key, v),
-                "margin" => b.margin = self.uint(key, v, 0, 64),
-                "radius" => b.radius = self.uint(key, v, 0, 64),
+                "margin" => {
+                    let (lo, hi) = int_limits("margin");
+                    b.margin = self.uint(key, v, lo, hi)
+                }
+                "radius" => {
+                    let (lo, hi) = int_limits("radius");
+                    b.radius = self.uint(key, v, lo, hi)
+                }
                 "reserve" => b.reserve = self.boolean(key, v),
                 "fullscreen" => {
-                    b.fullscreen = self.choice(key, v, &["below", "hide", "stay"]).map(|i| match i {
+                    b.fullscreen = self.choice(key, v, choice_words("fullscreen")).map(|i| match i {
                         0 => FullscreenMode::Below,
                         1 => FullscreenMode::Hide,
                         _ => FullscreenMode::Stay,
@@ -555,6 +765,11 @@ impl Reader<'_> {
                     let hint = crate::suggest::hint(key, BAR_KEYS.iter().copied());
                     self.warn(k.span().start, format!("unknown key '{key}' in [[bar]]{hint}"));
                 }
+            }
+            if let Some(name) = BAR_KEYS.iter().find(|n| **n == key)
+                && b.has(name)
+            {
+                b.at.insert(name, self.pos(k.span().start));
             }
         }
         b
@@ -597,7 +812,12 @@ impl Reader<'_> {
                     };
                     l.config_version = Some((n, self.pos(v.span().start)));
                 }
-                "preset" => l.preset = self.string(key, v).map(|s| (s, self.pos(v.span().start))),
+                "preset" => {
+                    l.preset = self.string(key, v).map(|s| (s, self.pos(v.span().start)));
+                    if l.preset.is_some() {
+                        l.preset_key = Some(self.pos(k.span().start));
+                    }
+                }
                 "bar" => match v.get_ref() {
                     DeValue::Array(a) => {
                         let mut bars = Vec::new();
@@ -622,6 +842,12 @@ impl Reader<'_> {
                     DeValue::Table(t) => self.widget_tables(t, &mut l),
                     _ => self.wrong_type(key, "a table", v),
                 },
+                "about" if self.preset => {
+                    if !matches!(v.get_ref(), DeValue::Table(_)) {
+                        self.wrong_type(key, "a table", v);
+                    }
+                }
+                "about" => self.warn(k.span().start, "'about' is read from presets only; it is ignored here"),
                 _ => {
                     // The usual slip: a bar key written without its [[bar]] line above it.
                     let hint = if BAR_KEYS.contains(&key) {
@@ -638,7 +864,7 @@ impl Reader<'_> {
 }
 
 /// The TOML parser's wording for the mistakes people actually make, in plain words.
-fn plain_toml_message(msg: &str) -> String {
+pub(crate) fn plain_toml_message(msg: &str) -> String {
     if msg.starts_with("invalid basic string") {
         return "missing closing quote (\") at the end of the text".to_string();
     }
@@ -647,7 +873,7 @@ fn plain_toml_message(msg: &str) -> String {
 
 /// Parses one TOML file into a layer. A syntax error is returned as an error
 /// diagnostic, with the quote hint when it is an unquoted widget ref.
-fn read_layer(text: &str, file: &str, diags: &mut Vec<Diagnostic>) -> Option<Layer> {
+fn read_layer(text: &str, file: &str, preset: bool, diags: &mut Vec<Diagnostic>) -> Option<Layer> {
     let li = LineIndex::new(text);
     let parsed = match DeTable::parse(text) {
         Ok(p) => p,
@@ -672,7 +898,7 @@ fn read_layer(text: &str, file: &str, diags: &mut Vec<Diagnostic>) -> Option<Lay
             return None;
         }
     };
-    let mut r = Reader { text, file, li, diags: Vec::new() };
+    let mut r = Reader { text, file, li, diags: Vec::new(), preset };
     let layer = r.layer(parsed.get_ref());
     diags.extend(r.diags);
     Some(layer)
@@ -698,11 +924,19 @@ fn read_layer(text: &str, file: &str, diags: &mut Vec<Diagnostic>) -> Option<Lay
 /// Monitor selectors accept `"DISPLAY2"` as a short form of the full device
 /// name.
 pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Option<String>) -> ConfigLoad {
+    load_inner(user, preset_toml).0
+}
+
+/// `load_config` and the layer each setting came from, in one merge.
+fn load_inner(
+    user: Option<(&str, &str)>,
+    preset_toml: &dyn Fn(&str) -> Option<String>,
+) -> (ConfigLoad, Option<ConfigSources>) {
     let mut diags = Vec::new();
     let user_layer = match user {
-        Some((text, file)) => match read_layer(text, file, &mut diags) {
+        Some((text, file)) => match read_layer(text, file, false, &mut diags) {
             Some(l) => Some(l),
-            None => return ConfigLoad { config: None, diagnostics: diags },
+            None => return (ConfigLoad { config: None, diagnostics: diags }, None),
         },
         None => None,
     };
@@ -714,7 +948,7 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
             Some(pos),
             format!("this rsb reads config_version {CONFIG_VERSION}"),
         ));
-        return ConfigLoad { config: None, diagnostics: diags };
+        return (ConfigLoad { config: None, diagnostics: diags }, None);
     }
 
     // The preset layer.
@@ -736,7 +970,7 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
     let mut preset_layer = Layer::default();
     if let Some(text) = preset_text {
         let mut pd = Vec::new();
-        if let Some(l) = read_layer(&text, &format!("presets/{preset_name}.toml"), &mut pd) {
+        if let Some(l) = read_layer(&text, &format!("presets/{preset_name}.toml"), true, &mut pd) {
             preset_layer = l;
         }
         // A broken built-in preset must not stop the bar from starting.
@@ -755,15 +989,27 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
         None => preset_bars.clone(),
     };
     let mut bars: Vec<BarSpec> = Vec::new();
+    let mut bar_sources: Vec<BarSources> = Vec::new();
     for (n, ub) in user_bars.iter().enumerate() {
         let same_index = preset_bars.get(n);
         let base = same_index.or(preset_bars.last()).cloned().unwrap_or_default();
         let d = default_bar(n);
         let d_center_on = d.center_on.clone();
         let floating = ub.floating.or(base.floating).unwrap_or(d.floating);
-        bars.push(BarSpec {
+        // Which layer a key came from: the user's own `[[bar]]` (only when
+        // the user wrote bars), else the preset's bar, else the built-ins.
+        let from = |key: &str| -> (Source, Option<SourcePos>) {
+            if user_wrote_bars && ub.has(key) {
+                (Source::User, ub.at.get(key).cloned())
+            } else if ub.has(key) || base.has(key) {
+                (Source::Preset, None)
+            } else {
+                (Source::Default, None)
+            }
+        };
+        let bar = BarSpec {
             name: ub.name.clone().or_else(|| same_index.and_then(|p| p.name.clone())).unwrap_or(d.name),
-            monitors: ub.monitors.clone().or(base.monitors).unwrap_or(d.monitors),
+            monitors: ub.monitors.clone().or(base.monitors.clone()).unwrap_or(d.monitors),
             position: ub.position.or(base.position).unwrap_or(d.position),
             height: ub.height.or(base.height).unwrap_or(d.height),
             floating,
@@ -771,17 +1017,48 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
             radius: ub.radius.or(base.radius).unwrap_or(if floating { 10 } else { 0 }),
             reserve: ub.reserve.or(base.reserve).unwrap_or(d.reserve),
             fullscreen: ub.fullscreen.or(base.fullscreen).unwrap_or(d.fullscreen),
-            left: ub.left.clone().or(base.left).unwrap_or(d.left),
-            center: ub.center.clone().or(base.center).unwrap_or(d.center),
-            right: ub.right.clone().or(base.right).unwrap_or(d.right),
+            left: ub.left.clone().or(base.left.clone()).unwrap_or(d.left),
+            center: ub.center.clone().or(base.center.clone()).unwrap_or(d.center),
+            right: ub.right.clone().or(base.right.clone()).unwrap_or(d.right),
             center_on: None,
             pos: ub.pos.clone(),
-        });
+        };
+        // A bar's name falls back to the preset bar of the same index only.
+        let name_source = if user_wrote_bars && ub.name.is_some() {
+            from("name")
+        } else if ub.name.is_some() || same_index.is_some_and(|p| p.name.is_some()) {
+            (Source::Preset, None)
+        } else {
+            (Source::Default, None)
+        };
+        let mut sources = BarSources {
+            name: wrap(bar.name.clone(), name_source),
+            monitors: wrap(bar.monitors.clone(), from("monitors")),
+            position: wrap(bar.position, from("position")),
+            height: wrap(bar.height, from("height")),
+            floating: wrap(bar.floating, from("floating")),
+            margin: wrap(bar.margin, from("margin")),
+            radius: wrap(bar.radius, from("radius")),
+            reserve: wrap(bar.reserve, from("reserve")),
+            fullscreen: wrap(bar.fullscreen, from("fullscreen")),
+            left: wrap(bar.left.clone(), from("left")),
+            center: wrap(bar.center.clone(), from("center")),
+            right: wrap(bar.right.clone(), from("right")),
+            center_on: Sourced::default_of(None),
+        };
+        bars.push(bar);
         // The pinned widget must be one of the centre zone's. A pin the
         // user wrote is reported when it is not; one that only came from the
         // preset is dropped without a word, since the user never wrote it
         // (they replaced `center` and the preset's pin simply does not fit).
         let written = user_wrote_bars && ub.center_on.is_some();
+        let (pin_source, pin_at) = if written {
+            from("center_on")
+        } else if ub.center_on.is_some() || base.center_on.is_some() {
+            (Source::Preset, None)
+        } else {
+            (Source::Default, None)
+        };
         let pinned = ub
             .center_on
             .clone()
@@ -791,7 +1068,10 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
         if let (Some((text, at)), Some(bar)) = (pinned, bars.last_mut()) {
             let found = WidgetRef::parse(&text).ok().filter(|r| bar.center.iter().any(|z| z.widget == *r));
             match found {
-                Some(_) => bar.center_on = Some(text),
+                Some(_) => {
+                    bar.center_on = Some(text.clone());
+                    sources.center_on = Sourced { value: Some(text), source: pin_source, at: pin_at };
+                }
                 None if !written => {}
                 None => diags.push(Diagnostic::warning(
                     DiagKind::Config,
@@ -800,6 +1080,7 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
                 )),
             }
         }
+        bar_sources.push(sources);
     }
     // Names must be unique: `rsb toggle <name>` and the CSS class use them.
     let mut seen: Vec<String> = Vec::new();
@@ -814,7 +1095,8 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
                 bar.pos.clone(),
                 format!("bar name '{}' is used twice; this bar is called '{fresh}'", bar.name),
             ));
-            bar.name = fresh;
+            bar.name = fresh.clone();
+            bar_sources[n].name.value = fresh;
         }
         seen.push(bar.name.clone());
     }
@@ -852,10 +1134,17 @@ pub fn load_config(user: Option<(&str, &str)>, preset_toml: &dyn Fn(&str) -> Opt
     }
 
     diags.sort_by_key(|d| d.pos.as_ref().map(|p| (p.file.clone(), p.line, p.col)));
-    ConfigLoad {
-        config: Some(Config { config_version: CONFIG_VERSION, preset: preset_name, bars, widgets }),
-        diagnostics: diags,
-    }
+    let preset_source = match user_layer.as_ref().and_then(|l| l.preset_key.clone()) {
+        Some(at) => Sourced { value: preset_name.clone(), source: Source::User, at: Some(at) },
+        None => Sourced::default_of(preset_name.clone()),
+    };
+    (
+        ConfigLoad {
+            config: Some(Config { config_version: CONFIG_VERSION, preset: preset_name, bars, widgets }),
+            diagnostics: diags,
+        },
+        Some(ConfigSources { preset: preset_source, bars: bar_sources }),
+    )
 }
 
 #[cfg(test)]
@@ -909,5 +1198,19 @@ mod tests {
         assert!(is_valid_bar_name("main") && is_valid_bar_name("bar-2_x"));
         assert!(!is_valid_bar_name("") && !is_valid_bar_name("Main") && !is_valid_bar_name("a b"));
         assert!(!is_valid_bar_name(&"a".repeat(33)));
+    }
+
+    #[test]
+    fn a_sourced_load_returns_the_plain_load_with_one_source_entry_per_bar() {
+        let preset = |_: &str| None;
+        let plain = load_config(None, &preset);
+        let sourced = load_config_sourced(None, &preset);
+        assert_eq!(sourced.load.config, plain.config);
+        let sources = sourced.sources.expect("sources for a usable config");
+        let config = plain.config.expect("config");
+        assert_eq!(sources.bars.len(), config.bars.len());
+        assert_eq!(sources.bars[0].height, Sourced::default_of(config.bars[0].height));
+        let broken = load_config_sourced(Some(("height = ", "bar.toml")), &preset);
+        assert!(broken.load.config.is_none() && broken.sources.is_none());
     }
 }

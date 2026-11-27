@@ -11,6 +11,7 @@ local text = require("./lib/format")
 local panel = require("./lib/panel")
 
 return rsb.widget {
+	about = { title = "Volume", opens = { "volume" } },
 	options = {
 		format = "{value}%",
 		muted_format = "",

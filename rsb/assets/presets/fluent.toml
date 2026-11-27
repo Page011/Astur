@@ -13,3 +13,19 @@ fullscreen = "below"
 left = ["workspaces", "title"]
 center = ["clock"]
 right = ["media", "network", "volume", "battery", "cpu", "memory", "date"]
+
+[about]
+title = "Fluent"
+description = "A full-width translucent bar in Windows' own style, with accent pills."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }, { var = "bg", label = "Background" }]
+
+[about.contrast]
+text = [
+    "fg on bg bg+hover bg+press bg+pill",
+    "muted on bg bg+pill",
+    "warn on bg",
+    "error on bg",
+    "accent-fg on bg+accent",
+]
+line = ["accent-line on bg bg+pill"]

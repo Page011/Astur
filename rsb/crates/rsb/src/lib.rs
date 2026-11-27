@@ -10,6 +10,7 @@ pub mod args;
 pub mod assets;
 pub mod capture;
 pub mod cfgload;
+pub mod cfgwrite;
 pub mod cli;
 pub mod clock;
 pub mod console;
@@ -22,6 +23,7 @@ pub mod gesture;
 pub mod headless;
 pub mod icons;
 pub mod images;
+pub mod inspect;
 pub mod instance;
 pub mod logger;
 pub mod msg;
@@ -30,10 +32,12 @@ pub mod pipe;
 pub mod plan;
 pub mod pngread;
 pub mod popups;
+pub mod preview;
 pub mod reader;
 pub mod render_cmd;
 pub mod run;
 pub mod service_images;
+pub mod settings;
 pub mod sim;
 pub mod stats;
 pub mod status;
@@ -74,6 +78,8 @@ pub fn main_with(args: Vec<String>) -> ExitCode {
         args::Cmd::Types => cli::types(&paths::config_dir(parsed.config_dir.as_deref())),
         args::Cmd::Render(opts) => render_cmd::run(parsed.config_dir.as_deref(), parsed.log_dir.as_deref(), opts),
         args::Cmd::Timeline(opts) => timeline_run::run(parsed.config_dir.as_deref(), parsed.log_dir.as_deref(), opts),
+        args::Cmd::Settings(cmd) => cli::settings(parsed.config_dir.as_deref(), parsed.log_dir.as_deref(), cmd),
+        args::Cmd::Inspect(opts) => cli::inspect(opts),
         args::Cmd::Run(opts) => run::run(&parsed, opts),
     }
 }

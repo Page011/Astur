@@ -19,6 +19,7 @@ local function clock_time(seconds: number): string
 end
 
 return rsb.widget {
+	about = { title = "Battery" },
 	options = {
 		format = "{value}%",
 		hover_format = "",

@@ -26,6 +26,24 @@ usage:
              [--preset NAME] [--live] [--wait-ms N]
                                draw the bar to a PNG without a window (sample data;
                                --live reads this PC; --preset draws that preset as shipped)
+  rsb inspect [widget] [--bar NAME] [--style] [--depth N] [--redact] [--json]
+                               what each widget draws and costs: element tree, services,
+                               timings and memory (--style adds the computed style)
+  rsb settings get [--bar NAME]    the settings in effect and where each came from
+  rsb settings presets             the presets, with what a gallery page shows
+  rsb settings preview <preset>|--all [--theme dark|light|both] [--width N] [--scale S] [--mine [--zones mine|preset]]
+  rsb settings widgets             every widget, its options and where it is used
+  rsb settings schema              every key these commands may change, with types and limits
+  rsb settings set <key> <value>   e.g. preset glass, bar.main.height 40, color.accent #e5a50a,
+                                   bar.main.right '[\"status\",\"clock\"]'
+  rsb settings unset <key>         back to the preset's value (removes your line)
+  rsb settings move <widget> <bar>.<zone>[:<index>] [--from BAR[.ZONE[:INDEX]]]
+  rsb settings add <widget> <bar>.<zone>[:<index>]
+  rsb settings remove <widget> [--from BAR[.ZONE[:INDEX]]]
+  rsb settings change <file.json | ->   several changes at once, all or none (- reads stdin)
+  rsb settings undo [N]            undo the last settings change (N must be the newest)
+  rsb settings restore <bar.toml|style.css>   put back the last copy that loaded clean
+  rsb settings log [--last N]      the settings changes that can be undone, newest first
   rsb --help | --version
 
 options:
@@ -33,8 +51,13 @@ options:
                                (default: %APPDATA%\\rsb, or RSB_CONFIG_DIR)
   --log-dir <dir>              where rsb.log is written (default: %LOCALAPPDATA%\\rsb\\logs)
 
+settings verbs also take --contract N. The ones that write also take --expect
+bar.toml=<version> or style.css=<version>, --dry-run and --no-wait; set takes
+--reset; preview takes --cache-dir <dir>. Each prints one line of JSON.
+
 exit codes: 0 done, 1 the command failed, 2 bad usage, 3 no bar is running,
-4 the bar could not be reached, 5 the bar could not start";
+4 the bar could not be reached, 5 the bar could not start
+(the settings verbs answer 0, 1 or 2 only)";
 
 /// What the user asked for.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,6 +74,10 @@ pub enum Cmd {
     Render(RenderOpts),
     /// `render --timeline`: a scripted run with no window, captured to pictures.
     Timeline(TimelineOpts),
+    /// `settings <verb>`: read or change the settings, answered in this process.
+    Settings(crate::settings::grammar::SettingsCmd),
+    /// `inspect`: what the running bar's widgets draw and cost.
+    Inspect(crate::inspect::InspectOpts),
     Help,
     Version,
 }
@@ -427,6 +454,51 @@ fn parse_timeline(rest: &[String]) -> Result<TimelineOpts, String> {
     Ok(opts)
 }
 
+/// `inspect [widget] [--bar NAME] [--style] [--depth N] [--redact] [--json]`.
+fn parse_inspect(rest: &[String]) -> Result<crate::inspect::InspectOpts, String> {
+    const USAGE_LINE: &str = "usage: rsb inspect [widget] [--bar NAME] [--style] [--depth N] [--redact] [--json]";
+    let mut opts = crate::inspect::InspectOpts {
+        widget: None,
+        bar: None,
+        style: false,
+        depth: ipc::MAX_INSPECT_DEPTH,
+        redact: false,
+        json: false,
+    };
+    let mut it = rest.iter();
+    while let Some(arg) = it.next() {
+        let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value; {USAGE_LINE}"));
+        match arg.as_str() {
+            "--bar" => {
+                let name = value("--bar")?;
+                if !rsb_core::config::is_valid_bar_name(&name) {
+                    return Err(format!("--bar: '{name}' is not a bar name"));
+                }
+                opts.bar = Some(name);
+            }
+            "--style" => opts.style = true,
+            "--redact" => opts.redact = true,
+            "--json" => opts.json = true,
+            "--depth" => {
+                let text = value("--depth")?;
+                opts.depth = match text.parse::<u8>() {
+                    Ok(d) if (1..=ipc::MAX_INSPECT_DEPTH).contains(&d) => d,
+                    _ => return Err(format!("--depth: '{text}' is not 1 to {}", ipc::MAX_INSPECT_DEPTH)),
+                };
+            }
+            flag if flag.starts_with("--") => return Err(format!("inspect: unknown option '{flag}'; {USAGE_LINE}")),
+            word if opts.widget.is_none() => {
+                opts.widget = Some(rsb_core::config::WidgetRef::parse(word).map_err(|e| format!("inspect: {e}"))?);
+            }
+            _ => return Err(USAGE_LINE.into()),
+        }
+    }
+    if opts.style && opts.widget.is_none() && opts.bar.is_none() {
+        return Err(format!("--style needs a widget or --bar; {USAGE_LINE}"));
+    }
+    Ok(opts)
+}
+
 /// Parses the arguments after the program name. An `Err` is a usage error
 /// (exit code 2): the text says what to fix.
 pub fn parse(args: &[String]) -> Result<Parsed, String> {
@@ -500,13 +572,18 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
         Some("types") => Err("usage: rsb types".into()),
         Some("render") if rest.iter().any(|a| a == "--timeline") => done(Cmd::Timeline(parse_timeline(&rest[1..])?)),
         Some("render") => done(Cmd::Render(parse_render(&rest[1..])?)),
+        Some("settings") => done(Cmd::Settings(crate::settings::grammar::parse(&rest[1..]))),
+        Some("inspect") => done(Cmd::Inspect(parse_inspect(&rest[1..])?)),
         Some(other) => {
             let hint = rsb_core::suggest::hint(
                 other,
-                ["reload", "quit", "toggle", "status", "trigger", "popup", "eject", "types", "render"],
+                [
+                    "reload", "quit", "toggle", "status", "trigger", "popup", "eject", "types", "render", "settings",
+                    "inspect",
+                ],
             );
             Err(format!(
-                "unknown command '{other}'{hint} (reload, quit, toggle, status, trigger, popup, eject, types, render)"
+                "unknown command '{other}'{hint} (reload, quit, toggle, status, trigger, popup, eject, types, render, settings, inspect)"
             ))
         }
     }
@@ -781,5 +858,74 @@ mod tests {
         assert!(p(&["--simulate-theme", "100:grey"]).is_err());
         assert!(p(&["--service-storm", "20:5"]).unwrap_err().contains("--fake-services"));
         assert!(p(&["--test-script-stall", "nocolon"]).is_err());
+    }
+
+    #[test]
+    fn every_settings_verb_and_inspect_are_in_the_usage_text() {
+        for verb in crate::settings::grammar::VERBS {
+            assert!(USAGE.contains(&format!("rsb settings {verb}")), "{verb}");
+        }
+        for line in [
+            "rsb settings get [--bar NAME]",
+            "rsb settings preview <preset>|--all [--theme dark|light|both] [--width N] [--scale S] [--mine [--zones mine|preset]]",
+            "rsb settings move <widget> <bar>.<zone>[:<index>] [--from BAR[.ZONE[:INDEX]]]",
+            "rsb settings change <file.json | ->",
+            "rsb settings undo [N]",
+            "rsb settings restore <bar.toml|style.css>",
+            "rsb settings log [--last N]",
+            "rsb inspect [widget] [--bar NAME] [--style] [--depth N] [--redact] [--json]",
+        ] {
+            assert!(USAGE.contains(line), "{line}");
+        }
+        assert!(USAGE.contains("(the settings verbs answer 0, 1 or 2 only)"));
+    }
+
+    #[test]
+    fn settings_words_become_a_settings_command_and_a_mistake_stays_in_it() {
+        use crate::settings::grammar::Call;
+        let Cmd::Settings(cmd) = p(&["--config-dir", "c", "settings", "get", "--bar", "main"]).unwrap().cmd else {
+            panic!()
+        };
+        assert!(matches!(cmd.call, Call::Request(_)));
+        // A mistake is still a settings command, so its refusal is the usual JSON line.
+        let Cmd::Settings(cmd) = p(&["settings", "gett"]).unwrap().cmd else { panic!() };
+        assert!(matches!(cmd.call, Call::Refused(_)));
+        let Cmd::Settings(cmd) = p(&["settings"]).unwrap().cmd else { panic!() };
+        assert!(matches!(cmd.call, Call::Refused(_)));
+        assert!(p(&["setings"]).unwrap_err().contains("unknown command 'setings'; did you mean 'settings'?"));
+        assert!(p(&["inspet"]).unwrap_err().contains("did you mean 'inspect'?"));
+        assert!(p(&["frobnicate"]).unwrap_err().contains("settings, inspect"));
+    }
+
+    #[test]
+    fn inspect_arguments() {
+        let Cmd::Inspect(o) = p(&["inspect"]).unwrap().cmd else { panic!() };
+        assert_eq!(
+            (o.widget.clone(), o.bar.clone(), o.style, o.depth, o.redact, o.json),
+            (None, None, false, 64, false, false)
+        );
+        let Cmd::Inspect(o) =
+            p(&["inspect", "clock#utc", "--bar", "main", "--style", "--depth", "3", "--redact", "--json"]).unwrap().cmd
+        else {
+            panic!()
+        };
+        assert_eq!(o.widget.as_ref().map(|w| (w.name.as_str(), w.instance.as_deref())), Some(("clock", Some("utc"))));
+        assert_eq!((o.bar.as_deref(), o.style, o.depth, o.redact, o.json), (Some("main"), true, 3, true, true));
+        // `--style` with only a bar shows the bar's own root node.
+        assert!(p(&["inspect", "--style", "--bar", "main"]).is_ok());
+        for bad in [
+            &["inspect", "--style"][..],
+            &["inspect", "--depth", "0"],
+            &["inspect", "--depth", "65"],
+            &["inspect", "--depth", "x"],
+            &["inspect", "--depth"],
+            &["inspect", "--bar", "Bad Name"],
+            &["inspect", "Bad Name"],
+            &["inspect", "a", "b"],
+            &["inspect", "--yaml"],
+        ] {
+            assert!(p(bad).is_err(), "{bad:?}");
+        }
+        assert!(p(&["inspect", "--yaml"]).unwrap_err().contains("usage: rsb inspect"));
     }
 }

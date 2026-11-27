@@ -1,0 +1,19 @@
+{
+  "code": "unknown_widget",
+  "exit": 2,
+  "shape": {
+    "contract": "number",
+    "error": {
+      "at": "string",
+      "code": "string",
+      "copies": [
+        "string"
+      ],
+      "file": "string",
+      "fix": "null",
+      "message": "string",
+      "next": "string"
+    },
+    "ok": "bool"
+  }
+}

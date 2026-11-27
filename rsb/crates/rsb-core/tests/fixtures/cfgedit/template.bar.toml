@@ -1,0 +1,40 @@
+config_version = 1
+
+# This file chooses which bars RSB draws and which widgets go where.
+# Delete everything below and you get the same bar; uncomment a line to
+# change it. Save the file and the bar updates at once. The full list of
+# keys is in the authoring guide (docs\authoring.md).
+
+# Look: "default", "fluent", "astur-classic" or "glass". style.css changes it
+# further.
+# preset = "default"
+
+# One [[bar]] per bar. Left out, you get one bar on every monitor. To
+# change a bar, uncomment the [[bar]] line AND the lines you want under it.
+# [[bar]]
+# name = "main"              # also the name for: rsb toggle main
+# monitors = "*"             # "*", "primary", 0, 1, "DISPLAY2", or a list
+# position = "top"           # "top" or "bottom"
+# height = 36                # logical pixels, 16 to 128
+# floating = false           # true: a rounded bar away from the screen edge
+# reserve = true             # keep maximised windows clear of the bar
+# fullscreen = "below"       # "below", "hide" or "stay" over a fullscreen app
+# left = ["workspaces", "media"]
+# center = ["memory", "cpu", "dashboard", "clock", "date"]
+# center_on = "dashboard"    # this widget sits in the middle of the bar
+# right = ["status", "battery", "tray", "record", "power"]    # power: the invisible anchor of the power menu
+
+# Options for one widget. Built-ins: workspaces title clock date cpu memory
+# battery volume network media text status tray record dashboard power.
+# [widget.clock]
+# format = "HH:mm"
+#
+# A second clock: add "clock#utc" to a zone, then give it its own options.
+# [widget."clock#utc"]
+# format = "HH:mm 'UTC'"
+# timezone = "utc"
+#
+# Your own widget: widgets\my\weather.luau is "my/weather".
+# [widget."my/weather"]
+# latitude = -30.51
+# longitude = 151.67

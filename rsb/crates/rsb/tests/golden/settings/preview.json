@@ -1,0 +1,18 @@
+{
+  "contract": "number",
+  "kind": "string",
+  "ok": "bool",
+  "previews": [
+    {
+      "cached": "bool",
+      "height": "number",
+      "mine": "bool",
+      "name": "string",
+      "path": "string",
+      "scale": "number",
+      "theme": "string",
+      "width": "number",
+      "zones": "string"
+    }
+  ]
+}

@@ -55,6 +55,8 @@ use rsb_core::time::{Clock, ThreadTime};
 
 pub mod api;
 mod convert;
+pub mod describe;
+pub mod inspect;
 mod natives;
 mod runtime;
 mod shared;

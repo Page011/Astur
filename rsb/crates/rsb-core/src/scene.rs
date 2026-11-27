@@ -397,6 +397,20 @@ pub struct Scene {
     /// Elements marked `autofocus` that were already in the tree, so one that
     /// arrives with a page change is told apart from one that stays.
     autofocus_seen: HashSet<NodeKey>,
+
+    /// When the scene was made: the second counter of the 60 s ring counts from it.
+    born: Instant,
+    /// What the built frames cost, for the inspector.
+    totals: FrameTotals,
+    /// Frame cost attributed to each widget instance (a small list: a bar
+    /// holds a dozen instances, and one lookup per built frame is all it
+    /// takes).
+    costs: Vec<(InstanceId, InstanceCost)>,
+    /// Instances whose tree arrived since the last built frame.
+    fresh: Vec<InstanceId>,
+    /// Built frames are added to `totals` and `costs` (on unless a caller
+    /// turns it off to measure what it costs).
+    accounting: bool,
 }
 
 /// Initial state of the bar element's classes and `border-radius`.
@@ -493,6 +507,11 @@ impl Scene {
             reveal_seen: HashMap::new(),
             pending_reveals: Vec::new(),
             autofocus_seen: HashSet::new(),
+            born: Instant::now(),
+            totals: FrameTotals::default(),
+            costs: Vec::new(),
+            fresh: Vec::new(),
+            accounting: true,
         }
     }
 
@@ -560,6 +579,8 @@ impl Scene {
             slots.left.iter().chain(&slots.center).chain(&slots.right).map(|s| s.instance).collect();
         self.trees.retain(|i, _| keep.contains(i));
         self.widget_plates.retain(|i, _| keep.contains(i));
+        self.costs.retain(|(i, _)| keep.contains(i));
+        self.fresh.retain(|i| keep.contains(i));
         self.slots = slots;
         self.touch();
     }
@@ -579,6 +600,9 @@ impl Scene {
             return;
         }
         self.trees.insert(instance, tree);
+        if !self.fresh.contains(&instance) {
+            self.fresh.push(instance);
+        }
         self.touch();
     }
 
@@ -713,6 +737,9 @@ impl Scene {
         let next_frame = if busy { Some(now + trans::FRAME_INTERVAL) } else { self.wake };
         let backdrop = self.arena.get(self.root_idx).map_or(Backdrop::None, |n| n.style.backdrop);
         self.last_stats = stats.clone();
+        if self.accounting && self.popup.is_none() {
+            self.account(now, &stats);
+        }
         FrameOut { draw: list, dirty, next_frame, cursor: self.cursor, backdrop, stats }
     }
 
@@ -962,6 +989,408 @@ impl Scene {
                 style: (*n.style).clone(),
             })
             .collect()
+    }
+}
+
+// ---------------------------------------------------------------- inspector
+
+/// What a bar's built frames cost. A frame that finds nothing to do returns
+/// early and adds nothing here.
+#[derive(Clone, Debug)]
+pub struct FrameTotals {
+    /// Frames that restyled, laid out or painted.
+    pub frames: u64,
+    pub style_us: u64,
+    pub layout_us: u64,
+    pub paint_us: u64,
+    /// The longest single frame (style + layout + paint).
+    pub frame_us_max: u32,
+    /// Frames no widget tree arrived for (hover, transitions, a new scale).
+    pub no_tree_frames: u64,
+    /// The `now` of the last built frame.
+    pub last_frame_at: Option<Instant>,
+    /// One slot per second: (second number + 1, microseconds spent in it).
+    ring: [(u64, u64); 60],
+}
+
+impl Default for FrameTotals {
+    fn default() -> Self {
+        FrameTotals {
+            frames: 0,
+            style_us: 0,
+            layout_us: 0,
+            paint_us: 0,
+            frame_us_max: 0,
+            no_tree_frames: 0,
+            last_frame_at: None,
+            ring: [(0, 0); 60],
+        }
+    }
+}
+
+/// Frame cost attributed to one widget instance. The scene lays the whole
+/// bar out at once, so no widget has a timer of its own: a frame that
+/// followed one instance's new tree and no other counts as that instance's
+/// own, a frame that followed several is split evenly between them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct InstanceCost {
+    pub own: u64,
+    pub own_us: u64,
+    pub own_us_max: u32,
+    pub shared: u64,
+    pub shared_us: u64,
+}
+
+/// One node of a widget's tree as the inspector shows it.
+#[derive(Clone, Debug)]
+pub struct InspectNode {
+    pub kind: ElementKind,
+    pub id: Option<Arc<str>>,
+    pub classes: Vec<Arc<str>>,
+    /// The text the node holds. None for a password input: its value is
+    /// never copied, only its length.
+    pub text: Option<Arc<str>>,
+    /// Characters in the text or input value.
+    pub text_len: usize,
+    pub password: bool,
+    /// The picture's path or key, for an image node.
+    pub image: Option<Arc<str>>,
+    /// Border box in logical px, bar-relative.
+    pub rect: [f32; 4],
+    /// `display: none`.
+    pub hidden: bool,
+    /// Bit set over `STATE_NAMES`.
+    pub states: u8,
+    /// Bit set over `HANDLER_NAMES`.
+    pub handlers: u16,
+    /// 1 for the widget's root element.
+    pub depth: u8,
+    /// Index of the parent in the same list; None for the widget root.
+    pub parent: Option<u32>,
+    /// Child elements the node has, whether or not they were copied.
+    pub children: u32,
+    /// The style as drawn; kept only when asked for.
+    pub style: Option<Arc<ComputedStyle>>,
+}
+
+pub const STATE_NAMES: [&str; 5] = ["hover", "active", "focus", "checked", "disabled"];
+pub const HANDLER_NAMES: [&str; 10] =
+    ["click", "right_click", "middle_click", "wheel", "enter", "leave", "key", "scroll", "focus", "blur"];
+
+impl InspectNode {
+    pub fn state_names(&self) -> Vec<&'static str> {
+        STATE_NAMES.iter().enumerate().filter(|(i, _)| self.states & (1 << i) != 0).map(|(_, n)| *n).collect()
+    }
+
+    pub fn handler_names(&self) -> Vec<&'static str> {
+        HANDLER_NAMES.iter().enumerate().filter(|(i, _)| self.handlers & (1 << i) != 0).map(|(_, n)| *n).collect()
+    }
+}
+
+/// A popup, menu or tooltip a widget declares. It is not part of the bar's
+/// layout; its nodes live in the scene of its own surface.
+#[derive(Clone, Debug)]
+pub struct InspectPopup {
+    /// Its first name, empty when it has none.
+    pub name: String,
+    pub kind: ElementKind,
+    /// The script says it is open.
+    pub open: bool,
+    /// Elements it declares.
+    pub nodes: usize,
+    /// Index in `InstanceNodes::nodes` of the element it hangs from; None
+    /// when that element was not copied.
+    pub anchor: Option<u32>,
+}
+
+/// What `Scene::nodes_of` copies of one widget instance.
+#[derive(Clone, Debug, Default)]
+pub struct InstanceNodes {
+    /// Breadth first: a parent always comes before its children.
+    pub nodes: Vec<InspectNode>,
+    /// Nodes the instance has in all, copied or not.
+    pub total: usize,
+    /// The copy stopped at the node limit (else, when `nodes.len() < total`,
+    /// at the depth limit).
+    pub limit_hit: bool,
+    pub popups: Vec<InspectPopup>,
+    /// The style of what the widget root hangs from, for inheritance.
+    pub base_style: Option<Arc<ComputedStyle>>,
+}
+
+fn count_elements(e: &crate::element::Element) -> usize {
+    1 + e.children.iter().map(count_elements).sum::<usize>()
+}
+
+impl Scene {
+    fn account(&mut self, now: Instant, stats: &FrameStats) {
+        let total = u64::from(stats.style_us) + u64::from(stats.layout_us) + u64::from(stats.draw_us);
+        let total_u32 = total.min(u64::from(u32::MAX)) as u32;
+        let second = now.saturating_duration_since(self.born).as_secs();
+        let t = &mut self.totals;
+        t.frames += 1;
+        t.style_us += u64::from(stats.style_us);
+        t.layout_us += u64::from(stats.layout_us);
+        t.paint_us += u64::from(stats.draw_us);
+        t.frame_us_max = t.frame_us_max.max(total_u32);
+        t.last_frame_at = Some(now);
+        let slot = &mut t.ring[(second % 60) as usize];
+        if slot.0 != second + 1 {
+            *slot = (second + 1, 0);
+        }
+        slot.1 += total;
+        match self.fresh.len() {
+            0 => self.totals.no_tree_frames += 1,
+            1 => {
+                let c = Self::cost_of(&mut self.costs, self.fresh[0]);
+                c.own += 1;
+                c.own_us += total;
+                c.own_us_max = c.own_us_max.max(total_u32);
+            }
+            n => {
+                let share = total / n as u64;
+                for i in &self.fresh {
+                    let c = Self::cost_of(&mut self.costs, *i);
+                    c.shared += 1;
+                    c.shared_us += share;
+                }
+            }
+        }
+        self.fresh.clear();
+    }
+
+    fn cost_of(costs: &mut Vec<(InstanceId, InstanceCost)>, instance: InstanceId) -> &mut InstanceCost {
+        let at = match costs.iter().position(|(i, _)| *i == instance) {
+            Some(at) => at,
+            None => {
+                costs.push((instance, InstanceCost::default()));
+                costs.len() - 1
+            }
+        };
+        &mut costs[at].1
+    }
+
+    /// Turns the per-frame accounting on or off (on by default). Off, `frame_totals`
+    /// and `instance_cost` stop growing.
+    pub fn set_accounting(&mut self, on: bool) {
+        self.accounting = on;
+        self.fresh.clear();
+    }
+
+    /// Runs the accounting step `frames` times as a frame that followed one
+    /// widget's tree would, and returns how long that took. It exists to
+    /// measure the step on its own: its cost is far below the noise of timing
+    /// whole frames.
+    #[doc(hidden)]
+    pub fn accounting_probe(&mut self, instance: InstanceId, frames: u32, now: Instant) -> Duration {
+        let stats = FrameStats { style_us: 90, layout_us: 120, draw_us: 60, ..FrameStats::default() };
+        let t = Instant::now();
+        for _ in 0..frames {
+            self.fresh.push(instance);
+            self.account(now, &stats);
+        }
+        t.elapsed()
+    }
+
+    /// What this bar's built frames cost so far.
+    pub fn frame_totals(&self) -> &FrameTotals {
+        &self.totals
+    }
+
+    /// Microseconds spent in built frames during the last 60 seconds up to `now`.
+    pub fn frame_us_last_60s(&self, now: Instant) -> u64 {
+        let second = now.saturating_duration_since(self.born).as_secs();
+        self.totals
+            .ring
+            .iter()
+            .filter(|(s, _)| *s != 0 && second + 1 >= *s && second + 1 - *s < 60)
+            .map(|(_, us)| us)
+            .sum()
+    }
+
+    /// The frame cost attributed to `instance`.
+    pub fn instance_cost(&self, instance: InstanceId) -> InstanceCost {
+        self.costs.iter().find(|(i, _)| *i == instance).map(|(_, c)| *c).unwrap_or_default()
+    }
+
+    /// Nodes in the scene: the root and everything below it.
+    pub fn node_count(&self) -> usize {
+        self.arena.len().saturating_sub(self.root_idx)
+    }
+
+    /// A newer tree or style is waiting for the next frame.
+    pub fn pending(&self) -> bool {
+        self.rebuild || self.layout_dirty
+    }
+
+    /// Whether the bar is styled for a dark colour scheme.
+    pub fn dark(&self) -> bool {
+        self.env.media.dark
+    }
+
+    /// The value of the custom property `name` (with or without the leading
+    /// `--`) on the root node, as text: a colour is written `#rrggbb`.
+    pub fn root_var(&self, name: &str) -> Option<String> {
+        let name = name.strip_prefix("--").unwrap_or(name);
+        let root = self.arena.get(self.root_idx)?;
+        let def = root.vars.map.get(format!("--{name}").as_str())?;
+        Some(Color::parse(&def.value).map_or_else(|_| def.value.to_string(), crate::css_text::color_hex))
+    }
+
+    /// The root node (the bar, or a popup's own root) as the inspector shows it.
+    pub fn root_node(&self, with_style: bool) -> Option<InspectNode> {
+        self.arena.get(self.root_idx)?;
+        Some(self.inspect_node(self.root_idx, 1, None, with_style))
+    }
+
+    fn inspect_node(&self, i: usize, depth: u8, parent: Option<u32>, with_style: bool) -> InspectNode {
+        let n = &self.arena[i];
+        let scale = self.geometry.scale.max(0.01);
+        let r = n.laid.rect;
+        let mut states = 0u8;
+        for (bit, on) in [
+            self.hover.contains(&n.key),
+            self.active.contains(&n.key),
+            self.focus.node == Some(n.key),
+            n.interaction.checked == Some(true),
+            n.interaction.disabled,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            states |= u8::from(on) << bit;
+        }
+        let h = &n.handlers;
+        let mut handlers = 0u16;
+        for (bit, on) in [
+            h.click.is_some(),
+            h.right_click.is_some(),
+            h.middle_click.is_some(),
+            h.wheel.is_some(),
+            h.enter.is_some(),
+            h.leave.is_some(),
+            h.key.is_some(),
+            h.scroll.is_some(),
+            h.focus.is_some(),
+            h.blur.is_some(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            handlers |= u16::from(on) << bit;
+        }
+        let password = n.input.as_ref().is_some_and(|p| p.password);
+        let (text, text_len) = match &n.input {
+            Some(p) if p.password => (None, p.value.chars().count()),
+            Some(p) => (Some(p.value.clone()), p.value.chars().count()),
+            None => {
+                let t = n.text.clone().or_else(|| n.laid.text.clone());
+                let len = t.as_ref().map_or(0, |t| t.chars().count());
+                (t, len)
+            }
+        };
+        InspectNode {
+            kind: n.kind,
+            id: n.id.clone(),
+            classes: n.classes.clone(),
+            text,
+            text_len,
+            password,
+            image: n.image.as_ref().map(|i| i.path.clone()),
+            rect: [r.x / scale, r.y / scale, r.w / scale, r.h / scale],
+            hidden: n.style.display_none,
+            states,
+            handlers,
+            depth,
+            parent,
+            children: n.children.len() as u32,
+            style: with_style.then(|| n.style.clone()),
+        }
+    }
+
+    /// Copies the tree under `roots` breadth first. Returns the copy and the
+    /// arena index each copied node came from.
+    fn nodes_below(&self, roots: &[usize], max: usize, max_depth: u8, with_style: bool) -> (InstanceNodes, Vec<usize>) {
+        let mut total = 0usize;
+        let mut stack: Vec<usize> = roots.to_vec();
+        while let Some(i) = stack.pop() {
+            total += 1;
+            stack.extend(self.arena[i].children.iter().copied());
+        }
+        let mut nodes: Vec<InspectNode> = Vec::with_capacity(max.min(total));
+        let mut from: Vec<usize> = Vec::with_capacity(max.min(total));
+        let mut queue: std::collections::VecDeque<(usize, Option<u32>, u8)> =
+            roots.iter().map(|r| (*r, None, 1u8)).collect();
+        let mut limit_hit = false;
+        while let Some((i, parent, depth)) = queue.pop_front() {
+            if nodes.len() >= max {
+                limit_hit = true;
+                break;
+            }
+            let at = nodes.len() as u32;
+            nodes.push(self.inspect_node(i, depth, parent, with_style));
+            from.push(i);
+            if depth < max_depth {
+                for &c in &self.arena[i].children {
+                    queue.push_back((c, Some(at), depth + 1));
+                }
+            }
+        }
+        (InstanceNodes { nodes, total, limit_hit, popups: Vec::new(), base_style: None }, from)
+    }
+
+    /// The nodes of one widget instance, breadth first, at most `max` of
+    /// them and no deeper than `max_depth` (the widget root is depth 1); the
+    /// rest are counted in `total`. Popups the widget declares are listed
+    /// with the element they hang from. `with_style` keeps each node's
+    /// style. Empty when the instance is not on this bar.
+    pub fn nodes_of(&self, instance: InstanceId, max: usize, max_depth: u8, with_style: bool) -> InstanceNodes {
+        let Some(wrapper) =
+            self.arena.iter().position(|n| n.kind == ElementKind::Widget && n.instance == Some(instance))
+        else {
+            return InstanceNodes::default();
+        };
+        let roots = self.arena[wrapper].children.clone();
+        let (mut out, from) = self.nodes_below(&roots, max, max_depth, with_style);
+        out.base_style = Some(self.arena[wrapper].style.clone());
+        out.popups = self
+            .recs
+            .iter()
+            .filter(|r| r.instance == instance)
+            .map(|r| {
+                let nodes = r
+                    .tree
+                    .root
+                    .as_ref()
+                    .and_then(|root| popup::element_at(root, &r.path))
+                    .map_or(0, |(el, _)| count_elements(el));
+                let anchor = self
+                    .arena
+                    .iter()
+                    .position(|n| n.key == r.anchor)
+                    .and_then(|a| from.iter().position(|f| *f == a))
+                    .map(|at| at as u32);
+                InspectPopup {
+                    name: r.props.names.first().map(|n| n.to_string()).unwrap_or_default(),
+                    kind: r.kind,
+                    open: r.props.open,
+                    nodes,
+                    anchor,
+                }
+            })
+            .collect();
+        out
+    }
+
+    /// A popup scene's content: its root element and everything below, at
+    /// most `max` nodes (the rest are counted in `total`).
+    pub fn popup_nodes(&self, max: usize, max_depth: u8, with_style: bool) -> InstanceNodes {
+        if self.popup.is_none() || self.arena.len() <= self.root_idx {
+            return InstanceNodes::default();
+        }
+        let (mut out, _) = self.nodes_below(&[self.root_idx], max, max_depth, with_style);
+        out.base_style = self.root_idx.checked_sub(1).and_then(|p| self.arena.get(p)).map(|n| n.style.clone());
+        out
     }
 }
 

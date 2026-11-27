@@ -63,6 +63,8 @@ pub(crate) struct Core {
     rr_last: Option<InstanceId>,
     /// A popup closed since the last turn ended: its tree is garbage now, so the VMs are swept once.
     sweep: bool,
+    /// When each instance last ran and sent a tree, for `rsb inspect`.
+    activity: crate::inspect::Activity,
 }
 
 fn split_pos(msg: &str) -> (Option<SourcePos>, String) {
@@ -115,6 +117,7 @@ impl Core {
             next_vm: 0,
             rr_last: None,
             sweep: false,
+            activity: crate::inspect::Activity::default(),
         }
     }
 
@@ -156,6 +159,9 @@ impl Core {
             ScriptIn::ClockChanged => self.clock_changed(),
             ScriptIn::Status { reply } => {
                 let _ = reply.send(self.status());
+            }
+            ScriptIn::Inspect { reply } => {
+                let _ = reply.send(self.inspect());
             }
             ScriptIn::Shutdown => {
                 self.shutdown();
@@ -425,6 +431,7 @@ impl Core {
                 };
                 let declared = from_lua(&perms_lv, &mut Walk::new(&check))?;
                 check_permission_keys(&declared)?;
+                self.activity.declared(id, defaults.clone(), optional.clone());
                 let mut perms = Permissions::from_value(&declared).map_err(mlua::Error::runtime)?;
                 if !builtin {
                     perms.grant_user_defaults();
@@ -1142,6 +1149,7 @@ impl Core {
     fn collect_due(&mut self) {
         let sh = self.sh.clone();
         let now = sh.mono();
+        self.activity.begin_turn(now);
         let mut restarts: Vec<InstanceId> = Vec::new();
         {
             let mut st = sh.st.borrow_mut();
@@ -1256,6 +1264,7 @@ impl Core {
         }
         self.settle();
         self.flush_out();
+        self.activity.end_turn(&self.sh.st.borrow().instances);
         if std::mem::take(&mut self.sweep) {
             // The incremental collector would hold a closed popup's tree for a long time on an idle bar.
             for vm in self.vms.values() {
@@ -1319,6 +1328,7 @@ impl Core {
                 if let Some(i) = st.instances.get_mut(&id) {
                     i.dirty = false;
                     i.version += 1;
+                    self.activity.tree_sent(id, now);
                     trees.push(Arc::new(WidgetTree {
                         instance: id,
                         widget: i.spec.widget.clone(),
@@ -1345,6 +1355,7 @@ impl Core {
             let mut st = sh.st.borrow_mut();
             if let Some(i) = st.instances.get_mut(&id) {
                 i.version += 1;
+                self.activity.tree_sent(id, now);
                 trees.push(Arc::new(WidgetTree {
                     instance: id,
                     widget: i.spec.widget.clone(),
@@ -1392,6 +1403,67 @@ impl Core {
             }
         }
         best
+    }
+
+    /// What `rsb inspect` needs from this thread, one JSON object per instance.
+    fn inspect(&mut self) -> Vec<(InstanceId, serde_json::Value)> {
+        use crate::inspect::{InspectInfo, ReadInfo, ScriptTimes, WALK_LIMIT};
+        let sh = self.sh.clone();
+        let now = sh.mono();
+        let second = Duration::from_secs(1);
+        // First what the state alone tells, so no borrow is held while Luau runs.
+        let mut rows: Vec<(InstanceId, InspectInfo, VmId)> = Vec::new();
+        {
+            let st = sh.st.borrow();
+            let ms = |d: Duration| d.as_secs_f64() * 1000.0;
+            for i in st.instances.values() {
+                let last_s: Duration =
+                    i.cpu.iter().filter(|(t, _)| now.saturating_duration_since(*t) < second).map(|(_, d)| *d).sum();
+                let info = InspectInfo {
+                    script: ScriptTimes {
+                        ms: ms(i.script_time),
+                        ms_max: ms(i.script_time_max),
+                        calls: i.calls,
+                        ms_last_s: ms(last_s),
+                        ms_last_60s: ms(self.activity.last_60s(i.id, now)),
+                    },
+                    trees: i.version,
+                    last_tree_ms_ago: self.activity.tree_ms_ago(i.id, now),
+                    last_run_ms_ago: self.activity.run_ms_ago(i.id, now),
+                    reads: ReadInfo {
+                        timers: st.timers.values().filter(|t| t.inst == i.id).count() as u32,
+                        listeners: st.event_subs.values().filter(|e| e.inst == i.id).count() as u32,
+                        tasks: st.tasks.values().filter(|t| t.inst == i.id).count() as u32,
+                        ..ReadInfo::default()
+                    },
+                    options: self.activity.options(i.id, &i.spec.options),
+                    subscriptions: {
+                        let mut names: Vec<String> = i.subs.iter().map(|s| s.name().to_string()).collect();
+                        names.sort();
+                        names
+                    },
+                };
+                rows.push((i.id, info, i.vm));
+            }
+        }
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, mut info, vm_id) in rows {
+            if let Some(vm) = self.vms.get(&vm_id) {
+                // The walk reads tables only and runs no widget code, so it needs no call budget; a Luau
+                // error leaves the counts at zero.
+                if let Ok((names, signals, computeds, effects, cut)) =
+                    vm.entry.inspect.call::<(Table, u32, u32, u32, bool)>((id.0, WALK_LIMIT as i64))
+                {
+                    info.reads.service_fields = names.sequence_values::<String>().flatten().collect();
+                    info.reads.signals = signals;
+                    info.reads.computeds = computeds;
+                    info.reads.effects = effects;
+                    info.reads.walk_cut = cut;
+                }
+            }
+            out.push((id, info.to_json()));
+        }
+        out
     }
 
     fn status(&self) -> Vec<WidgetStatus> {

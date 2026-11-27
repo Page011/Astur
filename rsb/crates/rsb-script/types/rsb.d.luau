@@ -152,8 +152,8 @@ export type Context = { id: string, name: string, bar: string, monitor: MonitorI
 --- What the widget may do besides drawing and reading services (read: private service values; user widgets get window, media and network without asking; session: restart, shut down, sign out; overlay: a popup that covers the monitor; popups: open or close another widget's popup by name)
 export type Permissions = { exec: { string }?, file: { string }?, net: { string }?, control: { "audio" | "media" | "workspaces" | "microphone" | "bluetooth" | "apps" | "power" | "wifi" | "session" }?, read: { "window" | "media" | "network" | "bluetooth" | "apps" | "wifi" }?, overlay: boolean?, popups: { string }? }
 
---- A widget: option defaults (bar.toml overrides them), permissions, and setup returning its element; optional lists options that have no default (a table cannot hold nil), so bar.toml may still set them
-export type WidgetSpec<O> = { name: string?, options: O?, optional: { string }?, permissions: Permissions?, setup: (props: O, ctx: Context) -> Element? }
+--- A widget: option defaults (bar.toml overrides them), permissions, and setup returning its element; optional lists options that have no default (a table cannot hold nil), so bar.toml may still set them; about describes the widget to the settings commands
+export type WidgetSpec<O> = { name: string?, options: O?, optional: { string }?, permissions: Permissions?, about: { title: string?, visible: boolean?, needs_options: boolean?, opens: { string }? }?, setup: (props: O, ctx: Context) -> Element? }
 
 --- What a widget file returns
 export type Widget = { name: string }

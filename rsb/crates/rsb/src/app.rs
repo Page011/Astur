@@ -31,7 +31,7 @@ use crate::fallback;
 use crate::fonts::FontRegistry;
 use crate::icons::BundledIcons;
 use crate::images::{ImageLoader, ImageRequests, files_of};
-use crate::msg::{BarInfo, ConfigUpdate, ReloadKind, SimAction, SimSurface, UiMsg};
+use crate::msg::{AppliedHashes, AppliedState, BarInfo, ConfigUpdate, ReloadKind, SimAction, SimSurface, UiMsg};
 use crate::plan::{BarInstances, BarPlan, InstanceTable, build_instances, plan_bars};
 use crate::popups::{Env, OverlayWatch, PopupOptions, Popups, SLOW_STEP, SlowStep};
 use crate::reader::Reader;
@@ -116,6 +116,12 @@ pub struct App {
     images: ImageLoader,
     renderer: Renderer,
     config: Config,
+    /// The versions of the files the bars show, for the pipe thread's `applied` and `settings` answers.
+    applied: Option<Arc<AppliedState>>,
+    /// Versions of a config swapped in whose frame is not drawn yet; published to `applied` after it.
+    unpublished: Option<(AppliedHashes, u32)>,
+    /// The custom properties the active preset lists as tunable, shown on each bar's root by `rsb inspect`.
+    tune_vars: Vec<String>,
     sheet: Arc<Stylesheet>,
     table: InstanceTable,
     bars: Vec<BarRt>,
@@ -196,6 +202,9 @@ impl App {
             images,
             renderer,
             config: default_config(),
+            applied: None,
+            unpublished: None,
+            tune_vars: Vec::new(),
             sheet: Arc::new(Stylesheet::empty()),
             table: InstanceTable::new(),
             bars: Vec::new(),
@@ -223,6 +232,11 @@ impl App {
             popups,
             capture: None,
         }
+    }
+
+    /// Where the versions of the shown files are published after every config swap.
+    pub fn set_applied(&mut self, applied: Arc<AppliedState>) {
+        self.applied = Some(applied);
     }
 
     /// Starts writing every presented frame (`--capture`).
@@ -303,6 +317,31 @@ impl App {
         }
     }
 
+    /// What `rsb inspect` needs from the bars and the open popups.
+    fn inspect_part(&self, query: &crate::inspect::InspectQuery) -> crate::inspect::UiPart {
+        use crate::inspect::{BarView, DEFAULT_ROOT_VARS, PopupView, ui_part};
+        let tuned: Vec<&str> = self.tune_vars.iter().map(String::as_str).collect();
+        let vars: &[&str] = if tuned.is_empty() { &DEFAULT_ROOT_VARS } else { &tuned };
+        let bars: Vec<BarView> = self
+            .bars
+            .iter()
+            .map(|b| BarView {
+                name: &b.plan.spec.name,
+                monitor: b.plan.monitor.index,
+                scale: b.scale,
+                scene: &b.scene,
+                instances: b.insts.all().map(|p| (p.slot.instance, &p.spec.widget)).collect(),
+            })
+            .collect();
+        let popups: Vec<PopupView> = self
+            .popups
+            .inspect_views()
+            .into_iter()
+            .map(|(instance, name, scene)| PopupView { instance, name, scene })
+            .collect();
+        ui_part(query, &bars, &popups, vars, clock::now())
+    }
+
     pub fn bars_info(&self, ui: &dyn Win) -> Vec<BarInfo> {
         self.bars
             .iter()
@@ -335,6 +374,9 @@ impl App {
             }
             UiMsg::BarsQuery { reply } => {
                 let _ = reply.send(self.bars_info(ui));
+            }
+            UiMsg::Inspect { query, reply } => {
+                let _ = reply.send(self.inspect_part(&query));
             }
             UiMsg::Image { key, result } => self.on_image(&key, result),
             UiMsg::Svg { key, result } => self.on_svg(&key, result),
@@ -536,13 +578,16 @@ impl App {
     // ---------------------------------------------------------------- config
 
     fn apply_update(&mut self, ui: &mut dyn Win, update: ConfigUpdate, first: bool) {
-        let ConfigUpdate { kind, built, notified_wall_ms } = update;
+        let ConfigUpdate { kind, built, notified_wall_ms, hashes } = update;
         for d in &built.diagnostics {
             log_diag(d);
         }
         self.config_diags = built.diagnostics;
         let config_changed = built.config.is_some() || first;
         if let Some(config) = built.config {
+            self.tune_vars = crate::assets::preset_about(&config.preset)
+                .map(|about| about.tune.into_iter().map(|t| t.var).collect())
+                .unwrap_or_default();
             self.config = config;
         }
         let sheet = built.sheet.or_else(|| first.then(|| built.base_sheet.clone()));
@@ -582,6 +627,17 @@ impl App {
             self.reconcile(ui);
         }
         self.refresh_plate();
+        // Published once the bars have drawn it (`publish_applied`): a caller that sees these versions finds the
+        // look on screen, not only built. A file a second update leaves unused keeps the version the first one had.
+        let diags = u32::try_from(self.config_diags.len()).unwrap_or(u32::MAX);
+        let held = self.unpublished.map_or_else(AppliedHashes::default, |(h, _)| h);
+        self.unpublished = Some((
+            AppliedHashes {
+                bar_toml: hashes.bar_toml.or(held.bar_toml),
+                style_css: hashes.style_css.or(held.style_css),
+            },
+            diags,
+        ));
         if kind != ReloadKind::Initial {
             self.pending = Some(Pending { kind: kind.name(), notified: notified_wall_ms, armed: true });
         }
@@ -750,12 +806,24 @@ impl App {
         let popup_next = self.frame_popups(ui, now);
         let next = self.bars.iter().filter_map(|b| b.next_frame).chain(popup_next).min();
         ui.set_frame_deadline(next);
+        self.publish_applied();
         if let Some(p) = self.pending.take_if(|p| p.armed) {
             self.stats.emit(
                 "reload",
                 json!({"kind": p.kind, "notify_wall_ms": p.notified, "present_wall_ms": wall_ms(),
                        "delta_ms": wall_ms().saturating_sub(p.notified)}),
             );
+        }
+    }
+
+    /// Tells the pipe thread which file versions the bars show, once every bar has drawn a frame since the swap (a
+    /// bar whose drawing failed shows its plate, which is all it will show, so it does not hold this back).
+    fn publish_applied(&mut self) {
+        if self.unpublished.is_none() || !self.bars.iter().all(|b| b.presented || b.render_failed) {
+            return;
+        }
+        if let (Some(applied), Some((hashes, diags))) = (&self.applied, self.unpublished.take()) {
+            applied.set(hashes, diags);
         }
     }
 
@@ -1024,6 +1092,9 @@ impl App {
                 Reply::Ok("sent".into())
             }
             Command::Status => Reply::Err("status is answered by the pipe thread".into()),
+            Command::Applied | Command::Settings(_) | Command::Inspect { .. } => {
+                Reply::Err("this command is answered by the pipe thread".into())
+            }
         }
     }
 
@@ -1277,5 +1348,76 @@ impl App {
                 self.frame_all(ui);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::mpsc::channel;
+
+    use rsb_core::wake::Wake;
+    use rsb_render::FontConfig;
+
+    use super::*;
+    use crate::cfgload::build_cached;
+    use crate::fonts::FontCache;
+    use crate::headless::Headless;
+    use crate::testutil::TempDir;
+
+    struct NoWake;
+    impl Wake for NoWake {
+        fn wake(&self) {}
+    }
+
+    fn update(dir: &TempDir, kind: ReloadKind) -> ConfigUpdate {
+        let built = build_cached(dir.path(), None, "default", &mut FontCache::default());
+        ConfigUpdate { kind, hashes: built.hashes, built, notified_wall_ms: 0 }
+    }
+
+    #[test]
+    fn a_swapped_in_version_is_published_after_the_bars_have_drawn_it() {
+        let dir = TempDir::new("app-applied");
+        let (ui_tx, ui_rx) = channel::<UiMsg>();
+        let (script_tx, _script_rx) = channel::<ScriptIn>();
+        let o = AppOptions {
+            config_dir: dir.path().to_path_buf(),
+            log_file: dir.path().join("rsb.log"),
+            no_reserve: true,
+            offscreen: true,
+            simulated_pointer: true,
+            no_hook: true,
+            no_activate: true,
+            gated: true,
+            overlays: Arc::new(OverlayWatch::default()),
+        };
+        let mut app = App::new(
+            o,
+            Arc::new(Stats::off()),
+            ui_rx,
+            script_tx,
+            ImageLoader::start(ui_tx, Arc::new(NoWake)),
+            Renderer::new(FontConfig::default()),
+            true,
+        );
+        let state = Arc::new(AppliedState::new("c".into(), "l".into()));
+        app.set_applied(Arc::clone(&state));
+        let mut win = Headless::new(&[(1920, 1080, 96)]);
+        let first = update(&dir, ReloadKind::Initial);
+        let first_css = first.hashes.style_css;
+        app.start_in(&mut win, first);
+        // No widget has reported, so a new bar waits for its first frame.
+        assert_eq!(state.snapshot().hashes.style_css, None, "nothing is drawn yet");
+        std::thread::sleep(FIRST_FRAME_WAIT + Duration::from_millis(30));
+        app.frame_all(&mut win);
+        assert_eq!(state.snapshot().hashes.style_css, first_css, "the first look is published after its first frame");
+
+        std::fs::write(dir.path().join("style.css"), ":root { --accent: #123456; }\n").unwrap();
+        let second = update(&dir, ReloadKind::Css);
+        let second_css = second.hashes.style_css;
+        assert_ne!(first_css, second_css);
+        app.apply_update(&mut win, second, false);
+        assert_eq!(state.snapshot().hashes.style_css, first_css, "built is not drawn: not shown yet");
+        app.frame_all(&mut win);
+        assert_eq!(state.snapshot().hashes.style_css, second_css, "drawn: shown");
     }
 }

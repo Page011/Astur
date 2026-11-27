@@ -58,3 +58,41 @@ icons = "svg"
 [widget.status]
 mic = true
 bluetooth = true
+
+[about]
+title = "Default"
+description = "Chevron segments along the top edge, with a panel for every widget."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }, { var = "seg1", label = "Segments" }, { var = "panel", label = "Panels" }]
+
+[about.contrast]
+text = [
+    "fg on seg0 seg1 seg2 seg0-hover seg1-hover seg2-hover",
+    "fg on seg0-press seg1-press seg2-press panel card row",
+    "fg on row-hover row-press row-selected input row+audio-fill row+audio-fill-hover",
+    "fg on row+audio-fill-drag",
+    "mem on seg1 seg1-hover",
+    "muted on seg1 seg0 seg2 panel card row",
+    "accent-text on seg1 seg1-hover row-selected row-connected row-connected-on row",
+    "warn on seg1 seg2",
+    "accent-fg on accent accent-hover accent-press",
+    "placeholder on input panel",
+    "error on row card",
+]
+icon = [
+    "accent-text on seg0 seg2 seg2-hover tile-hover tile-press panel",
+    "accent-text on row",
+    "dim on seg0 row panel",
+    "muted on card",
+    "fg on icon-hover icon-press panel power-fill-1 power-fill-2 power-fill-3",
+    "fg on power-fill-4",
+    "power-icon-hover on power-tile power-tile-press",
+]
+line = ["accent-line on seg0 panel row-selected card power-fill-4 power-fill-1"]
+decorative = [
+    "overlay-dim",
+    "overlay-dim-blur",
+    "lock-curtain",
+    "scrollbar-thumb",
+    "row-tint",
+]

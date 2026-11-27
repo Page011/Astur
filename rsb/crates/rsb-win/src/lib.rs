@@ -74,6 +74,7 @@ mod bar;
 mod clip;
 mod dib;
 mod fullscreen;
+pub mod hicontrast;
 mod hook;
 mod keys;
 mod menu;

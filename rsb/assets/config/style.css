@@ -2,6 +2,8 @@
    once; a mistake shows on the bar with its line number and the last good
    style stays.
 
+   If the colours block made by rsb settings is at the end of this file, change the accent there.
+
    Change a colour of the preset by setting its custom property. --accent is
    the fill of the centre button and of today in the calendar; --accent-text colours
    text and icons in the accent and --accent-line the focus rings and

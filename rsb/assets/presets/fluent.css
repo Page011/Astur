@@ -1,7 +1,8 @@
 /* fluent: a full-width translucent bar in Windows' own style, dark or light
    with Windows, accent pills for workspaces. Change a colour by setting the
    custom property in your own style.css, for example
-   :root { --accent: #e5a50a; }  */
+   :root { --accent: #e5a50a; }
+   If the colours block made by rsb settings is at the end of your style.css, change the accent there.  */
 
 @media (prefers-color-scheme: dark) {
 	:root {
@@ -15,6 +16,10 @@
 		--press: rgba(255, 255, 255, 0.22);
 		--accent: #4cc2ff;
 		--accent-fg: #06202e;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
 	}
 }
 
@@ -30,6 +35,10 @@
 		--press: rgba(0, 0, 0, 0.16);
 		--accent: #0f6cbd;
 		--accent-fg: #ffffff;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
 	}
 }
 
@@ -58,7 +67,7 @@ box.workspaces {
 }
 
 .ws.visible {
-	border-color: var(--accent);
+	border-color: var(--accent-line);
 }
 
 .ws.focused,

@@ -33,6 +33,7 @@ pub(crate) struct Entry {
     pub update_monitor: Function,
     pub popup_cmd: Function,
     pub popup_event: Function,
+    pub inspect: Function,
 }
 
 pub(crate) struct Vm {
@@ -210,6 +211,7 @@ pub(crate) fn create(sh: &Rc<Shared>, prelude: &[u8], limit: usize, dark: bool, 
         update_monitor: entry_fn(&e, "update_monitor")?,
         popup_cmd: entry_fn(&e, "popup_cmd")?,
         popup_event: entry_fn(&e, "popup_event")?,
+        inspect: entry_fn(&e, "inspect")?,
     };
     *load_cell.borrow_mut() = Some(entry.load.clone());
     if stall {

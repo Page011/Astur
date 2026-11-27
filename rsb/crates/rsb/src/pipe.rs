@@ -31,8 +31,8 @@ use windows::Win32::Security::Authorization::{
     ConvertStringSecurityDescriptorToSecurityDescriptorW, GetSecurityInfo, SDDL_REVISION_1, SE_KERNEL_OBJECT,
 };
 use windows::Win32::Security::{
-    DACL_SECURITY_INFORMATION, GetTokenInformation, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
-    TokenUser,
+    DACL_SECURITY_INFORMATION, GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, PSECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TOKEN_USER, TokenIntegrityLevel, TokenUser,
 };
 use windows::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_FLAG_OVERLAPPED, FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_NONE,
@@ -40,9 +40,9 @@ use windows::Win32::Storage::FileSystem::{
 };
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
 use windows::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, NAMED_PIPE_MODE,
-    PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT, SetNamedPipeHandleState,
-    WaitNamedPipeW,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeClientProcessId, GetNamedPipeServerProcessId,
+    NAMED_PIPE_MODE, PIPE_READMODE_MESSAGE, PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT,
+    SetNamedPipeHandleState, WaitNamedPipeW,
 };
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::System::Threading::{
@@ -145,6 +145,78 @@ fn sid_string_of(token: &Owned) -> Result<String, String> {
     // SAFETY: frees the string allocated by ConvertSidToStringSidW, once.
     unsafe { LocalFree(Some(HLOCAL(text.0.cast()))) };
     out
+}
+
+/// The mandatory integrity level of the process with this id: the last
+/// sub-authority of its token's integrity SID (0x1000 low, 0x2000 medium,
+/// 0x3000 high, 0x4000 system). Fails when the process or its token cannot be
+/// opened.
+fn integrity_of_pid(pid: u32) -> Result<u32, String> {
+    // SAFETY: plain flag and id; the returned handle is owned below.
+    let process = Owned(
+        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }
+            .map_err(|e| format!("OpenProcess: {e}"))?,
+    );
+    let mut token = HANDLE::default();
+    // SAFETY: `process` is a live handle; `token` receives a new handle.
+    unsafe { OpenProcessToken(process.0, TOKEN_QUERY, &mut token) }.map_err(|e| format!("OpenProcessToken: {e}"))?;
+    let token = Owned(token);
+    let mut len = 0u32;
+    // SAFETY: a size query; the call is expected to fail with the needed length.
+    let _ = unsafe { GetTokenInformation(token.0, TokenIntegrityLevel, None, 0, &mut len) };
+    if len == 0 {
+        return Err("GetTokenInformation reported no size".to_string());
+    }
+    // u64 elements so the buffer is aligned for the label's pointer field.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: `buf` holds at least `len` bytes and is suitably aligned.
+    unsafe { GetTokenInformation(token.0, TokenIntegrityLevel, Some(buf.as_mut_ptr().cast()), len, &mut len) }
+        .map_err(|e| format!("GetTokenInformation: {e}"))?;
+    // SAFETY: the call above filled `buf` with a TOKEN_MANDATORY_LABEL whose SID points into the same buffer.
+    let sid = unsafe { (*buf.as_ptr().cast::<TOKEN_MANDATORY_LABEL>()).Label.Sid };
+    // SAFETY: `sid` is a valid SID for the life of `buf`; the count and the sub-authority are read, not kept.
+    let count = unsafe { *GetSidSubAuthorityCount(sid) };
+    if count == 0 {
+        return Err("the integrity SID has no sub-authority".to_string());
+    }
+    // SAFETY: `count - 1` is below the sub-authority count just read.
+    Ok(unsafe { *GetSidSubAuthority(sid, u32::from(count) - 1) })
+}
+
+/// A client may change settings when it runs at the bar's level of rights or
+/// above.
+pub fn integrity_allows(client: u32, bar: u32) -> bool {
+    client >= bar
+}
+
+/// Whether the process on the other end of `pipe` runs at or above this
+/// process's integrity level. A client whose level cannot be read is not
+/// trusted.
+fn client_integrity_ok(pipe: HANDLE) -> bool {
+    let mut pid = 0u32;
+    // SAFETY: `pipe` is a connected pipe handle; the out pointer is live.
+    if unsafe { GetNamedPipeClientProcessId(pipe, &mut pid) }.is_err() {
+        return false;
+    }
+    // SAFETY: no arguments.
+    let ours = unsafe { GetCurrentProcessId() };
+    match (integrity_of_pid(pid), integrity_of_pid(ours)) {
+        (Ok(client), Ok(bar)) => integrity_allows(client, bar),
+        _ => false,
+    }
+}
+
+thread_local! {
+    /// Set by the pipe thread around a `settings` request: the client's
+    /// integrity level is not below ours.
+    static CLIENT_MAY_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether the client of the request being served may change settings. Only
+/// meaningful on the pipe thread, inside the handler of a `settings` line;
+/// false everywhere else.
+pub fn client_may_write() -> bool {
+    CLIENT_MAY_WRITE.with(std::cell::Cell::get)
 }
 
 fn session_id() -> Result<u32, String> {
@@ -460,7 +532,14 @@ fn serve_one(pipe: HANDLE, event: HANDLE, stop: HANDLE, handler: &Handler) -> Re
         Err(other) => return Err(other),
     };
     match Command::decode(&buf[..n]) {
-        Ok(command) => Ok(handler(command).encode()),
+        Ok(command) => {
+            // Only a settings line can write, so only it pays for the check.
+            let trusted = matches!(command, Command::Settings(_)) && client_integrity_ok(pipe);
+            CLIENT_MAY_WRITE.with(|c| c.set(trusted));
+            let reply = handler(command).encode();
+            CLIENT_MAY_WRITE.with(|c| c.set(false));
+            Ok(reply)
+        }
         Err(e) => {
             log::warn!("pipe: refused a request ({n} bytes): {e}");
             Ok(Reply::Err(e.to_string()).encode())
@@ -691,8 +770,33 @@ mod tests {
     }
 
     #[test]
+    fn a_client_below_the_bars_level_of_rights_may_not_write() {
+        assert!(integrity_allows(0x2000, 0x2000));
+        assert!(integrity_allows(0x3000, 0x2000));
+        assert!(!integrity_allows(0x1000, 0x2000));
+        assert!(!integrity_allows(0, 0x2000));
+        let ours = integrity_of_pid(std::process::id()).unwrap();
+        assert!((0x1000..=0x4000).contains(&ours), "{ours:#x}");
+        assert!(integrity_of_pid(u32::MAX - 1).is_err(), "a process that does not exist has no level");
+    }
+
+    #[test]
+    fn only_a_settings_line_is_checked_and_the_answer_is_seen_inside_the_handler() {
+        let name = test_name();
+        let handler: Handler = Arc::new(|_: Command| Reply::Ok(client_may_write().to_string()));
+        let server = PipeServer::start_named(&name, handler).unwrap();
+        let settings = Command::Settings("{\"verb\":\"get\"}".into());
+        // The client here is this process: its level equals the bar's.
+        assert_eq!(send_to(&name, &settings, Duration::from_secs(5)), Ok(Reply::Ok("true".into())));
+        assert_eq!(send_to(&name, &Command::Reload, Duration::from_secs(5)), Ok(Reply::Ok("false".into())));
+        assert!(!client_may_write(), "outside a handler the answer is no");
+        server.stop();
+    }
+
+    #[test]
     fn the_name_carries_the_sid_and_the_session() {
-        let name = pipe_name().unwrap();
+        // Without a test tag: the suite itself runs with one set.
+        let name = pipe_name_tagged(None).unwrap();
         assert!(name.starts_with(r"\\.\pipe\RSB-S-1-"), "{name}");
         assert!(name.ends_with(&format!("-{}", session_id().unwrap())), "{name}");
     }

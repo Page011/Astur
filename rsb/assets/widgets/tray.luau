@@ -5,6 +5,7 @@
 local rsb = require("@rsb")
 
 return rsb.widget {
+	about = { title = "Tray" },
 	permissions = {},
 	setup = function(props, ctx)
 		return rsb.row { class = "item tray" }

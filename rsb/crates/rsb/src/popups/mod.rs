@@ -218,6 +218,13 @@ pub struct Popups {
     dirty_bars: Vec<BarId>,
 }
 
+impl Popups {
+    /// The popup surfaces that exist: the instance each belongs to, its name and the scene that draws it.
+    pub fn inspect_views(&self) -> Vec<(InstanceId, &str, &Scene)> {
+        self.managed.iter().map(|m| (m.instance, m.name.as_str(), &m.scene)).collect()
+    }
+}
+
 /// Which popup element in the tree uses a service image under `prefix`.
 fn uses_prefix(el: &Element, prefix: &str) -> bool {
     el.image.as_ref().is_some_and(|i| i.path.starts_with(prefix)) || el.children.iter().any(|c| uses_prefix(c, prefix))

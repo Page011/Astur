@@ -55,6 +55,21 @@ fn send_shaped(
     }
 }
 
+/// `rsb settings <verb>`: answered in this process, one line of JSON on
+/// stdout, exit 0, 1 or 2.
+pub fn settings(
+    config_dir: Option<&Path>,
+    log_dir: Option<&Path>,
+    cmd: &crate::settings::grammar::SettingsCmd,
+) -> ExitCode {
+    crate::settings::run::run(config_dir, log_dir, cmd)
+}
+
+/// `rsb inspect`: asked of the running bar.
+pub fn inspect(opts: &crate::inspect::InspectOpts) -> ExitCode {
+    crate::inspect::run(opts)
+}
+
 pub fn eject(config_dir: &Path, widget: &str) -> ExitCode {
     match firstrun::eject(config_dir, widget) {
         Ok(done) => {

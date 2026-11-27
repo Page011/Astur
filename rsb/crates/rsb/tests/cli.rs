@@ -117,6 +117,16 @@ fn exit_codes_are_the_ones_cmd_exe_reports() {
         ("rendernoout", format!("render {dirs}")),
         ("renderpreset", format!("render --out \"{}\" --preset nope {dirs}", dir.join("x.png").display())),
         ("render", format!("render --out \"{}\" --wait-ms 100 {dirs}", dir.join("ok.png").display())),
+        ("settingsnone", format!("settings {dirs}")),
+        ("settingstypo", format!("settings gett {dirs}")),
+        ("settingsschema", format!("settings schema {dirs}")),
+        ("settingswidgets", format!("settings widgets {dirs}")),
+        ("settingsnoval", format!("settings set preset {dirs}")),
+        ("settingsnew", format!("settings schema --contract 9 {dirs}")),
+        ("settingsflag", format!("settings get --dry-run {dirs}")),
+        ("inspectstyle", format!("inspect --style {dirs}")),
+        ("inspectdepth", format!("inspect --depth 99 {dirs}")),
+        ("inspectname", format!("inspect \"Bad Name\" {dirs}")),
     ];
     let got = errorlevels(&dir, "codes", &lines);
     let get = |n: &str| got.iter().find(|(name, _)| name == n).map(|(_, c)| *c);
@@ -143,6 +153,16 @@ fn exit_codes_are_the_ones_cmd_exe_reports() {
         ("rendernoout", 2),
         ("renderpreset", 1),
         ("render", 0),
+        ("settingsnone", 2),
+        ("settingstypo", 2),
+        ("settingsschema", 0),
+        ("settingswidgets", 0),
+        ("settingsnoval", 2),
+        ("settingsnew", 2),
+        ("settingsflag", 2),
+        ("inspectstyle", 2),
+        ("inspectdepth", 2),
+        ("inspectname", 2),
     ];
     for (name, code) in expected {
         assert_eq!(get(name), Some(code), "{name}: all codes {got:?}");
@@ -157,9 +177,33 @@ fn exit_codes_are_the_ones_cmd_exe_reports() {
 fn help_names_every_command_and_the_hidden_flags_stay_out_of_it() {
     let (code, out, _) = run(rsb("help").arg("--help"));
     assert_eq!(code, 0);
-    for word in
-        ["reload", "quit", "toggle", "status", "trigger", "eject", "types", "render", "--config-dir", "--log-dir"]
-    {
+    for word in [
+        "reload",
+        "quit",
+        "toggle",
+        "status",
+        "trigger",
+        "eject",
+        "types",
+        "render",
+        "settings get",
+        "settings presets",
+        "settings preview",
+        "settings widgets",
+        "settings schema",
+        "settings set",
+        "settings unset",
+        "settings move",
+        "settings add",
+        "settings remove",
+        "settings change",
+        "settings undo",
+        "settings restore",
+        "settings log",
+        "inspect",
+        "--config-dir",
+        "--log-dir",
+    ] {
         assert!(out.contains(word), "{word} missing from the help");
     }
     for hidden in ["--seconds", "--no-reserve", "--stats-out", "--fake-services", "--test-offscreen", "--simulate"] {
@@ -167,6 +211,104 @@ fn help_names_every_command_and_the_hidden_flags_stay_out_of_it() {
     }
     let (code, out, _) = run(rsb("help").arg("--version"));
     assert_eq!((code, out.trim()), (0, concat!("rsb ", env!("CARGO_PKG_VERSION"))));
+}
+
+/// One line of JSON on stdout: the reply as a caller reads it.
+fn json_line(out: &str) -> serde_json::Value {
+    assert_eq!(out.trim_end().lines().count(), 1, "one line: {out:?}");
+    assert!(out.is_ascii(), "ascii only: {out:?}");
+    serde_json::from_str(out.trim()).unwrap_or_else(|e| panic!("{e}: {out:?}"))
+}
+
+#[test]
+fn a_settings_mistake_prints_one_line_of_json_and_the_message_on_stderr() {
+    let dir = scratch("settings-usage");
+    let dirs = [
+        "--config-dir".to_string(),
+        dir.join("cfg").display().to_string(),
+        "--log-dir".into(),
+        dir.join("logs").display().to_string(),
+    ];
+    let (code, out, err) = run(rsb("su").args(["settings", "gett"]).args(&dirs));
+    assert_eq!(code, 2);
+    let v = json_line(&out);
+    assert_eq!(
+        (v["ok"].clone(), v["contract"].clone(), v["error"]["code"].clone()),
+        (false.into(), 1.into(), "bad_usage".into())
+    );
+    assert!(v["error"]["message"].as_str().unwrap().contains("did you mean 'get'?"), "{v}");
+    assert!(err.starts_with("rsb: unknown settings command 'gett'; did you mean 'get'?"), "{err}");
+    let (code, out, _) = run(rsb("su").args(["settings", "move", "clock", "main"]).args(&dirs));
+    assert_eq!(code, 2);
+    let v = json_line(&out);
+    assert_eq!(
+        v["error"]["next"],
+        "usage: rsb settings move <widget> <bar>.<zone>[:<index>] [--from BAR[.ZONE[:INDEX]]]"
+    );
+    let (code, out, _) = run(rsb("su").args(["settings", "schema", "--contract", "7"]).args(&dirs));
+    assert_eq!(code, 2);
+    assert_eq!(json_line(&out)["error"]["code"], "contract_too_new");
+    let (code, out, _) =
+        run(rsb("su").args(["settings", "preview", "glas", "--cache-dir"]).arg(dir.join("cache")).args(&dirs));
+    assert_eq!(code, 2);
+    let v = json_line(&out);
+    assert_eq!(v["error"]["code"], "unknown_preset");
+    assert!(v["error"]["message"].as_str().unwrap().contains("did you mean 'glass'?"), "{v}");
+    assert!(!dir.join("cfg").exists(), "a refused request creates nothing");
+}
+
+#[test]
+fn a_change_file_that_is_not_json_or_is_too_large_is_refused_before_anything_is_read() {
+    let dir = scratch("settings-change");
+    write(&dir, "plan.json", "{nope");
+    write(&dir, "big.json", &format!("{{\"changes\":[],\"pad\":\"{}\"}}", "x".repeat(70_000)));
+    let cfg = dir.join("cfg");
+    let run_change = |file: &str| {
+        run(rsb("sc")
+            .args(["settings", "change"])
+            .arg(dir.join(file))
+            .arg("--config-dir")
+            .arg(&cfg)
+            .arg("--log-dir")
+            .arg(dir.join("logs")))
+    };
+    let (code, out, _) = run_change("plan.json");
+    assert_eq!(code, 2);
+    assert_eq!(json_line(&out)["error"]["code"], "bad_json");
+    let (code, out, _) = run_change("big.json");
+    assert_eq!(code, 2);
+    assert!(json_line(&out)["error"]["message"].as_str().unwrap().contains("65536"), "{out}");
+    let (code, out, _) = run_change("missing.json");
+    assert_eq!(code, 2);
+    assert_eq!(json_line(&out)["error"]["code"], "bad_usage");
+    assert!(!cfg.exists());
+}
+
+#[test]
+fn settings_schema_and_widgets_answer_with_no_bar_and_no_config_folder() {
+    let dir = scratch("settings-read");
+    let cfg = dir.join("cfg");
+    let call = |verb: &str| {
+        run(rsb("sr").args(["settings", verb, "--config-dir"]).arg(&cfg).arg("--log-dir").arg(dir.join("logs")))
+    };
+    let (code, out, _) = call("schema");
+    assert_eq!(code, 0);
+    let v = json_line(&out);
+    assert_eq!((v["kind"].clone(), v["ok"].clone()), ("schema".into(), true.into()));
+    let keys: Vec<&str> = v["keys"].as_array().unwrap().iter().map(|k| k["key"].as_str().unwrap()).collect();
+    assert!(keys.contains(&"preset") && keys.contains(&"color.accent"), "{keys:?}");
+    let (code, out, _) = call("widgets");
+    assert_eq!(code, 0, "{out}");
+    let v = json_line(&out);
+    assert_eq!(v["kind"], "widgets");
+    assert_eq!(v["failed"], serde_json::json!([]), "{v}");
+    let names: Vec<&str> = v["widgets"].as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
+    for built_in in ["clock", "cpu", "dashboard", "power", "text", "workspaces"] {
+        assert!(names.contains(&built_in), "{built_in} in {names:?}");
+    }
+    let power = v["widgets"].as_array().unwrap().iter().find(|w| w["name"] == "power").unwrap();
+    assert_eq!((power["visible"].clone(), power["opens"].clone()), (false.into(), serde_json::json!(["power"])));
+    assert!(!cfg.exists(), "reading creates nothing");
 }
 
 #[test]

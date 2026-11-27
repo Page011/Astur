@@ -147,6 +147,10 @@ struct Slot {
     tick_at: Option<Instant>,
     stale_after: Duration,
     stale_since: Option<Instant>,
+    /// Hub-thread time spent on this service's reports and polls.
+    poll_total: Duration,
+    /// One slot per second: (second number + 1, microseconds spent in it).
+    poll_ring: [(u64, u64); 60],
 }
 
 impl Slot {
@@ -169,7 +173,29 @@ impl Slot {
             tick_at: None,
             stale_after: Duration::from_secs(180),
             stale_since: None,
+            poll_total: Duration::ZERO,
+            poll_ring: [(0, 0); 60],
         }
+    }
+
+    /// Adds `spent` to the totals: two adds, one into the running total and one into the ring.
+    fn add_poll(&mut self, spent: Duration, second: u64) {
+        self.poll_total += spent;
+        let slot = &mut self.poll_ring[(second % 60) as usize];
+        if slot.0 != second + 1 {
+            *slot = (second + 1, 0);
+        }
+        slot.1 += spent.as_nanos() as u64;
+    }
+
+    fn poll_last_60s(&self, second: u64) -> Duration {
+        let ns: u64 = self
+            .poll_ring
+            .iter()
+            .filter(|(s, _)| *s != 0 && second + 1 >= *s && second + 1 - *s < 60)
+            .map(|(_, us)| us)
+            .sum();
+        Duration::from_nanos(ns)
     }
 
     /// The fastest period any subscriber asked for.
@@ -187,6 +213,8 @@ struct Core {
     slots: Vec<Slot>,
     next_generation: u64,
     timing: HubTiming,
+    /// The second counter of every slot's 60 s ring counts from here.
+    born: Instant,
 }
 
 impl Core {
@@ -199,7 +227,7 @@ impl Core {
         timing: HubTiming,
     ) -> Core {
         let slots = ServiceId::ALL.iter().map(|id| Slot::new(*id, &timing)).collect();
-        Core { options, factory, sink, io, tx, slots, next_generation: 0, timing }
+        Core { options, factory, sink, io, tx, slots, next_generation: 0, timing, born: Instant::now() }
     }
 
     fn index(id: ServiceId) -> usize {
@@ -438,6 +466,8 @@ impl Core {
                 version: s.version,
                 last_update_ago: s.running.then(|| now.saturating_duration_since(s.last_update)),
                 error: s.error.clone(),
+                poll_total: s.poll_total,
+                poll_last_60s: s.poll_last_60s(now.saturating_duration_since(self.born).as_secs()),
             })
             .collect()
     }
@@ -538,6 +568,12 @@ impl Core {
         self.set_status(i, status, reason, now);
     }
 
+    /// Charges the time since `started` to `service`.
+    fn charge(&mut self, service: ServiceId, started: Instant) {
+        let second = started.saturating_duration_since(self.born).as_secs();
+        self.slots[Core::index(service)].add_poll(started.elapsed(), second);
+    }
+
     // ----------------------------------------------------------- timers
 
     fn deadline(&self) -> Option<Instant> {
@@ -574,10 +610,13 @@ impl Core {
                 }
             }
             if self.slots[i].running && self.slots[i].tick_at.is_some_and(|t| t <= now) {
+                let started = Instant::now();
+                let second = started.saturating_duration_since(self.born).as_secs();
                 let slot = &mut self.slots[i];
                 let svc = slot.service.as_mut().expect("running");
                 svc.tick();
                 slot.tick_at = svc.tick_after().map(|d| now + d);
+                slot.add_poll(started.elapsed(), second);
             }
             let slot = &self.slots[i];
             if slot.running
@@ -615,11 +654,16 @@ fn run(mut core: Core, rx: Receiver<HubMsg>, wakes: &AtomicU64) {
                 }
             }
             Ok(HubMsg::Publish { service, generation, value, status }) => {
-                core.handle_publish(service, generation, value, status, now)
+                core.handle_publish(service, generation, value, status, now);
+                core.charge(service, now);
             }
-            Ok(HubMsg::Alive { service, generation }) => core.handle_alive(service, generation, now),
+            Ok(HubMsg::Alive { service, generation }) => {
+                core.handle_alive(service, generation, now);
+                core.charge(service, now);
+            }
             Ok(HubMsg::Status { service, generation, status, reason }) => {
-                core.handle_status(service, generation, status, reason, now)
+                core.handle_status(service, generation, status, reason, now);
+                core.charge(service, now);
             }
             Ok(HubMsg::Image { service, generation, key, image }) => core.handle_image(service, generation, key, image),
             Err(RecvTimeoutError::Timeout) => {}
@@ -628,4 +672,76 @@ fn run(mut core: Core, rx: Receiver<HubMsg>, wakes: &AtomicU64) {
         core.timers(Instant::now());
     }
     core.shutdown();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fake::FakeWorld;
+    use rsb_core::msg::HubPort;
+
+    fn system_value() -> Value {
+        Value::Map(
+            [
+                ("cpu".to_string(), Value::Num(10.0)),
+                ("memory".to_string(), Value::Num(40.0)),
+                ("memory_used".to_string(), Value::Int(4_000)),
+                ("memory_total".to_string(), Value::Int(10_000)),
+            ]
+            .into_iter()
+            .collect(),
+        )
+    }
+
+    fn info_of(hub: &Hub, id: ServiceId) -> ServiceInfo {
+        let (tx, rx) = mpsc::channel();
+        hub.port().send(HubRequest::Status { reply: tx });
+        rx.recv_timeout(Duration::from_secs(2)).expect("the hub answers").into_iter().find(|i| i.id == id).unwrap()
+    }
+
+    #[test]
+    fn the_ring_keeps_the_last_minute_and_forgets_older_seconds() {
+        let mut s = Slot::new(ServiceId::System, &HubTiming::default());
+        s.add_poll(Duration::from_micros(300), 0);
+        s.add_poll(Duration::from_micros(200), 0);
+        s.add_poll(Duration::from_micros(500), 30);
+        assert_eq!(s.poll_total, Duration::from_micros(1000));
+        assert_eq!(s.poll_last_60s(30), Duration::from_micros(1000));
+        assert_eq!(s.poll_last_60s(59), Duration::from_micros(1000), "second 0 is still inside the last 60 s");
+        assert_eq!(s.poll_last_60s(60), Duration::from_micros(500), "second 0 has just left");
+        assert_eq!(s.poll_last_60s(200), Duration::ZERO);
+        // A slot reused a minute later starts from zero.
+        s.add_poll(Duration::from_micros(40), 60);
+        assert_eq!(s.poll_last_60s(60), Duration::from_micros(540));
+        assert_eq!(s.poll_total, Duration::from_micros(1040), "the running total never forgets");
+    }
+
+    #[test]
+    fn reports_from_a_service_are_charged_to_it_and_to_no_other() {
+        let world = FakeWorld::new();
+        world.set(ServiceId::System, system_value());
+        let (tx, _rx) = mpsc::channel();
+        let tx = std::sync::Mutex::new(tx);
+        let hub = Hub::start(
+            HubOptions::default(),
+            Box::new(world.clone()),
+            Box::new(move |e| {
+                let _ = tx.lock().unwrap().send(e);
+            }),
+        );
+        assert_eq!(info_of(&hub, ServiceId::System).poll_total, Duration::ZERO, "nothing has run");
+        hub.port().send(HubRequest::Subscribe { service: ServiceId::System, owner: InstanceId(1), interval: None });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let info = loop {
+            let info = info_of(&hub, ServiceId::System);
+            if info.poll_total > Duration::ZERO || Instant::now() > deadline {
+                break info;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(info.poll_total > Duration::ZERO, "the first report was charged");
+        assert_eq!(info.poll_last_60s, info.poll_total, "all of it is recent");
+        assert_eq!(info_of(&hub, ServiceId::Audio).poll_total, Duration::ZERO, "another service is not charged");
+        hub.shutdown(Duration::from_secs(2));
+    }
 }

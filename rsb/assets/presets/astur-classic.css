@@ -13,13 +13,18 @@
    palette is the base here; the light one applies while Windows is in light
    mode, so this bar follows Windows where Astur's own default does not.
    The window title sits in the middle of the bar, not of the space left
-   between the zones. */
+   between the zones.
+   If the colours block made by rsb settings is at the end of your style.css, change the accent there. */
 
 :root {
 	--bg: #1a1b26;
 	--fg: #c0caf5;
 	--accent: #66aaff;
 	--accent-fg: #1a1b26;
+	--accent-hover: var(--accent);
+	--accent-press: var(--accent);
+	--accent-text: var(--accent);
+	--accent-line: var(--accent);
 	--inactive: #565f89;
 	--inactive-text: #8189b4;
 	--muted: #8189b4;
@@ -35,6 +40,10 @@
 		--fg: #1b1e24;
 		--accent: #336382;
 		--accent-fg: #eceef2;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
 		--inactive: #778291;
 		--inactive-text: #5b6573;
 		--muted: #5b6573;
@@ -84,7 +93,7 @@ box.workspaces {
 }
 
 .ws.visible {
-	border-color: var(--accent);
+	border-color: var(--accent-line);
 }
 
 .ws.focused,

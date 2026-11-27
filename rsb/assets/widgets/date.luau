@@ -137,6 +137,7 @@ local function calendar(keys: { fn: ((any) -> ())? }): { any }
 end
 
 return rsb.widget {
+	about = { title = "Date", opens = { "calendar" } },
 	options = {
 		format = "ddd d MMM",
 		hover_format = "",

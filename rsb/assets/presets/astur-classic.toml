@@ -38,3 +38,21 @@ absent = "hide"
 [widget.clock]
 format = "HH:mm"
 alt_format = ""
+
+[about]
+title = "Astur classic"
+description = "Astur's own bar: square workspace cells and text labels."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }, { var = "bg", label = "Background" }]
+
+[about.contrast]
+text = [
+    "fg on bg bg+hover bg+press",
+    "muted on bg",
+    "warn on bg",
+    "error on bg",
+    "accent-fg on bg+accent",
+    "inactive-text on bg",
+]
+line = ["accent-line on bg"]
+decorative = ["inactive"]

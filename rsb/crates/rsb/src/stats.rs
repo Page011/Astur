@@ -272,3 +272,125 @@ mod tests {
         assert!(since_process_start_ms().is_some_and(|ms| ms < 3_600_000));
     }
 }
+
+/// Process CPU time over the last minute, from samples of `cpu_ms` taken
+/// once every 10 seconds. Six samples are kept, so the oldest is 50 to 60
+/// seconds old and the window the answer covers is reported with it.
+#[derive(Clone, Debug, Default)]
+pub struct CpuRoll {
+    /// (when in ms on the roll's own clock, process CPU ms), oldest overwritten first.
+    samples: [Option<(u64, f64)>; 6],
+    next: usize,
+}
+
+impl CpuRoll {
+    /// Samples are taken this far apart.
+    pub const EVERY_MS: u64 = 10_000;
+
+    pub fn new() -> CpuRoll {
+        CpuRoll::default()
+    }
+
+    fn newest_ms(&self) -> Option<u64> {
+        self.samples.iter().flatten().map(|s| s.0).max()
+    }
+
+    /// Takes a sample when 10 seconds have passed since the last one. True
+    /// when it did.
+    pub fn tick(&mut self, now_ms: u64, cpu_ms: f64) -> bool {
+        if self.newest_ms().is_some_and(|t| now_ms < t + CpuRoll::EVERY_MS) {
+            return false;
+        }
+        self.samples[self.next] = Some((now_ms, cpu_ms));
+        self.next = (self.next + 1) % self.samples.len();
+        true
+    }
+
+    /// CPU milliseconds used since the oldest sample, and how many
+    /// milliseconds that covers. With no sample the window is the whole run
+    /// (`now_ms` since the roll's clock started).
+    pub fn last_minute(&self, now_ms: u64, cpu_now: f64) -> (f64, u64) {
+        match self.samples.iter().flatten().min_by_key(|s| s.0) {
+            Some(&(t, cpu)) => ((cpu_now - cpu).max(0.0), now_ms.saturating_sub(t)),
+            None => (cpu_now, now_ms),
+        }
+    }
+}
+
+/// The roll's clock counts milliseconds from the process start, and the first
+/// sample is the start itself (no CPU used), so the first minute is reported
+/// as the whole run.
+static ROLL: Mutex<Option<(std::time::Instant, CpuRoll)>> = Mutex::new(None);
+
+fn new_roll() -> (std::time::Instant, CpuRoll) {
+    let up = since_process_start_ms().unwrap_or(0);
+    let now = std::time::Instant::now();
+    let epoch = now.checked_sub(Duration::from_millis(up)).unwrap_or(now);
+    let mut roll = CpuRoll::new();
+    roll.tick(0, 0.0);
+    (epoch, roll)
+}
+
+/// Takes the 10 s process CPU sample when it is due. Cheap enough to call
+/// every second: it is one lock and one comparison unless a sample is due.
+pub fn roll_tick() {
+    let mut guard = ROLL.lock().unwrap_or_else(|e| e.into_inner());
+    let (epoch, roll) = guard.get_or_insert_with(new_roll);
+    let now_ms = epoch.elapsed().as_millis() as u64;
+    if roll.newest_ms().is_none_or(|t| now_ms >= t + CpuRoll::EVERY_MS) {
+        roll.tick(now_ms, cpu_ms());
+    }
+}
+
+/// Process CPU time in the last minute and the milliseconds it covers (see
+/// `CpuRoll::last_minute`). Takes a sample first when one is due.
+pub fn cpu_last_minute() -> (f64, u64) {
+    roll_tick();
+    let guard = ROLL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some((epoch, roll)) = guard.as_ref() else { return (cpu_ms(), 0) };
+    roll.last_minute(epoch.elapsed().as_millis() as u64, cpu_ms())
+}
+
+#[cfg(test)]
+mod cpu_roll_tests {
+    use super::*;
+
+    #[test]
+    fn a_sample_is_taken_every_ten_seconds_and_six_are_kept() {
+        let mut r = CpuRoll::new();
+        assert!(r.tick(0, 0.0));
+        assert!(!r.tick(9_999, 10.0), "not due yet");
+        assert!(r.tick(10_000, 100.0));
+        for k in 2..=8 {
+            assert!(r.tick(k * 10_000, k as f64 * 100.0));
+        }
+        // Samples at 30 s to 80 s are kept; 0, 10 and 20 s were overwritten.
+        let (cpu, window) = r.last_minute(85_000, 850.0);
+        assert_eq!((cpu, window), (850.0 - 300.0, 55_000), "against the oldest kept sample, 55 s back");
+    }
+
+    #[test]
+    fn with_no_sample_the_window_is_the_whole_run_and_with_the_start_sample_it_is_the_same() {
+        let mut r = CpuRoll::new();
+        assert_eq!(r.last_minute(4_000, 40.0), (40.0, 4_000), "no sample yet");
+        r.tick(0, 0.0);
+        assert_eq!(r.last_minute(4_000, 40.0), (40.0, 4_000), "the start sample says the same");
+        r.tick(10_000, 120.0);
+        assert_eq!(r.last_minute(12_000, 150.0), (150.0, 12_000), "the start sample is still the oldest");
+    }
+
+    #[test]
+    fn the_cpu_never_runs_backwards() {
+        let mut r = CpuRoll::new();
+        r.tick(0, 500.0);
+        assert_eq!(r.last_minute(5_000, 400.0).0, 0.0);
+    }
+
+    #[test]
+    fn the_live_roll_covers_the_run_so_far() {
+        let (cpu, window) = cpu_last_minute();
+        assert!(cpu >= 0.0);
+        let up = since_process_start_ms().unwrap_or(0);
+        assert!(window + 2_000 >= up.min(60_000) && window <= up + 2_000, "window {window} ms, uptime {up} ms");
+    }
+}

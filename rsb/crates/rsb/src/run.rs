@@ -24,15 +24,16 @@ use crate::capture::Capture;
 use crate::fonts::{self, FontCache};
 use crate::gate::{self, Gate};
 use crate::images::ImageLoader;
+use crate::inspect::InspectQuery;
 use crate::instance::{self, Instance};
-use crate::msg::{ConfigUpdate, ReloadKind, UiMsg};
+use crate::msg::{AppliedState, ConfigUpdate, ReloadKind, UiMsg};
 use crate::pipe::{Handler, PipeServer};
 use crate::popups::OverlayWatch;
 use crate::reader::Reader;
 use crate::stats::{self, Stats, wall_ms};
 use crate::status::{self, Sources};
 use crate::watchdog::{OverlayGuard, Watchdog};
-use crate::{assets, cfgload, console, engine, firstrun, logger, paths, sim};
+use crate::{assets, cfgload, console, engine, firstrun, inspect, logger, paths, reader, settings, sim};
 
 /// Exit code: the bar could not start (instance mutex, window creation,
 /// config folder not writable on first run).
@@ -49,6 +50,12 @@ impl ScriptSink for UiSink {
             self.waker.wake();
         }
     }
+}
+
+/// The folder as the settings commands compare it with their own: canonical
+/// when it exists, and written as a person writes it (no `\\?\` prefix).
+fn canonical_text(dir: &std::path::Path) -> String {
+    crate::cfgwrite::shown_path(&std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf()))
 }
 
 /// `Connect("...")` -> `Connect`.
@@ -222,7 +229,9 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
             .or_else(|| Some(default_config()));
     }
     let preset = built.config.as_ref().map_or_else(|| "default".to_string(), |c| c.preset.clone());
-    let first = ConfigUpdate { kind: ReloadKind::Initial, built, notified_wall_ms: wall_ms() };
+    // A copy of what loaded clean, so `rsb settings restore` has something to put back after a bad hand edit.
+    reader::keep_last_good_soon(&config_dir, &built);
+    let first = ConfigUpdate { kind: ReloadKind::Initial, hashes: built.hashes, built, notified_wall_ms: wall_ms() };
 
     let extra_monitors = opts
         .simulate_monitors
@@ -297,8 +306,10 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
     if let Some(c) = capture {
         app.set_capture(c);
     }
+    let applied = Arc::new(AppliedState::new(canonical_text(&config_dir), canonical_text(&log_dir)));
+    app.set_applied(Arc::clone(&applied));
     app.set_reader(Reader::start(
-        config_dir,
+        config_dir.clone(),
         preset,
         ui_tx.clone(),
         engine.script_tx.clone(),
@@ -306,7 +317,8 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
         font_cache,
     ));
 
-    // The command pipe: everything but `status` is answered by the UI thread.
+    // The command pipe: `status`, `applied`, `settings` and `inspect` are answered on the pipe thread, which
+    // asks the other threads with short timeouts; everything else is answered by the UI thread.
     let sources = Arc::new(Sources {
         script_tx: engine.script_tx.clone(),
         hub: engine.hub_port.clone(),
@@ -316,8 +328,19 @@ pub fn run(parsed: &Parsed, opts: &RunOpts) -> ExitCode {
     });
     let handler: Handler = {
         let (tx, waker) = (ui_tx.clone(), waker.clone());
+        let (config_dir, log_dir) = (config_dir.clone(), log_dir.clone());
         Arc::new(move |command: Command| match command {
             Command::Status => Reply::Ok(status::gather(&sources)),
+            Command::Applied => Reply::Ok(rsb_core::ipc::ascii_json(
+                &serde_json::to_value(applied.reply()).unwrap_or(serde_json::Value::Null),
+            )),
+            Command::Settings(text) => {
+                let ctx = settings::Ctx::pipe(config_dir.clone(), log_dir.clone(), Arc::clone(&applied));
+                Reply::Ok(settings::serve_line(&text, &ctx).to_line())
+            }
+            Command::Inspect { widget, bar, from, depth, style, redact } => {
+                inspect::serve(&InspectQuery { widget, bar, from, depth, style, redact }, &sources)
+            }
             other => {
                 let (reply_tx, reply_rx) = channel();
                 if tx.send(UiMsg::Pipe { command: other, reply: reply_tx }).is_err() {
@@ -440,6 +463,15 @@ mod tests {
 
     use super::*;
     use crate::testutil::TempDir;
+
+    #[test]
+    fn the_folders_the_bar_reports_have_no_verbatim_prefix() {
+        let dir = TempDir::new("canon");
+        let text = canonical_text(dir.path());
+        assert!(!text.starts_with(r"\\?\"), "{text}");
+        assert!(std::path::Path::new(&text).is_dir(), "{text}");
+        assert_eq!(canonical_text(&dir.path().join("not-there")), dir.path().join("not-there").display().to_string());
+    }
 
     fn lines(path: &std::path::Path) -> usize {
         std::fs::read_to_string(path).map_or(0, |t| t.lines().filter(|l| l.contains("service_command")).count())

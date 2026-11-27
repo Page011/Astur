@@ -78,6 +78,8 @@ rsb popup <name> [open|close|toggle]  open, close or toggle a popup (for a hotke
 rsb eject <widget>        copy a built-in widget into widgets\ to change it
 rsb types                 write types\rsb.d.luau for luau-lsp autocomplete
 rsb render --out bar.png  draw the bar to a PNG without a window
+rsb settings <verb>       read or change the preset, bar, zones and accent colour (JSON)
+rsb inspect [widget]      what each widget draws and costs
 rsb --help
 ```
 
@@ -117,11 +119,32 @@ Each line of the file is `<ms> pointer main move 1100 18`, `<ms> popup <name>
 open`, `<ms> fake <service> {"muted": true}` or `<ms> capture <name> [screen]`.
 The output folder must be under a `scratch` or `target` folder.
 
+## Settings and inspection
+
+`rsb settings` reads and changes the preset, a bar's position, height and
+floating, which widgets sit in which zone, and the accent colour, by editing
+`bar.toml` and `style.css` in place (comments and layout stay; a hand edit made
+in between is kept):
+
+```text
+rsb settings get
+rsb settings set preset glass
+rsb settings set color.accent #e5a50a
+rsb settings move clock main.right:0
+rsb settings undo
+```
+
+Every command prints one line of JSON, so a program can drive it; the same
+requests work over the running bar's pipe. `rsb inspect` shows what each widget
+draws and costs: its element tree, computed style, services, timings and memory.
+
 ## Docs
 
 - `docs/authoring.md`: `bar.toml`, the CSS subset, and the Luau API, with
   examples in `docs/examples`.
 - `docs/architecture.md`: crates, threads, data flow and the stop order.
+- `docs/settings.md`: the settings commands, their replies, errors and versions.
+- `docs/inspect.md`: `rsb inspect`, its output and what each number measures.
 
 ## Licence
 

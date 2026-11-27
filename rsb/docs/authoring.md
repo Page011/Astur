@@ -181,6 +181,65 @@ accent (`--accent`, `--accent-fg`, `--accent-text` for text on a tinted row,
 once for dark and once for light, and `--d`, the depth of a chevron point
 (13 px). Change a colour in your `style.css` by setting the property there.
 
+Every preset sets the same six accent tokens on `:root`, so one accent works on
+all of them and survives a preset switch: `--accent` (fills, the focused
+workspace), `--accent-fg` (text and icons on the accent), `--accent-hover` and
+`--accent-press` (the accent while hovered and pressed), `--accent-text` (text
+and icons in the accent colour) and `--accent-line` (rings and outlines). Where a
+preset has no separate shade for one of them it is `var(--accent)`, so setting
+`--accent` alone still changes everything.
+
+If the colours block made by rsb settings is at the end of your style.css, change the accent there.
+
+### Preset metadata: `[about]`
+
+Each preset's TOML ends with an `[about]` table: its name for a gallery, the
+colours worth tuning and every colour pair the preset draws, so contrast can be
+measured without running the bar. Only a built-in preset takes it; in your own
+`bar.toml` it is ignored with a warning.
+
+```toml
+[about]
+title = "Glass"
+description = "A floating acrylic bar with a rounded pill behind each zone."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }]
+
+[about.contrast]
+text = ["fg on bg+zone bg+zone+hover bg+zone+pill", "accent-fg on bg+zone+accent"]
+icon = ["dim on row"]
+line = ["accent-line on bg+zone bg+zone+pill"]
+decorative = ["overlay-dim"]
+```
+
+The pairs are written under `[about.contrast]`.
+
+| Field | Meaning |
+|---|---|
+| `title` | one line, 32 characters at most, different for every preset |
+| `description` | one line, 100 characters at most |
+| `schemes` | the schemes the sheet defines: `"dark"`, `"light"` or both. Each one defines every `tune` variable and every name used in `contrast` |
+| `tune` | the colours a settings page may offer, in page order: `var` is a custom property of the preset written without `--`, `label` is 20 characters at most. `accent` is required |
+| `contrast.text` | pairs that need 4.5:1: text and anything read like text |
+| `contrast.icon` | pairs that need 3:1: icons, large text, the off state |
+| `contrast.line` | pairs that need 3:1: rings, outlines and progress bars |
+| `contrast.decorative` | colours that carry no text and are not measured (dimming layers, scrollbar thumbs) |
+
+A pair line is `<colour> on <surface> <surface> ...`: names are custom
+properties without `--`, and a surface written `a+b` is a stack of translucent
+layers, bottom first (`bg+zone+pill`). A surface that is translucent is measured
+over black and over white, and the worse result counts. A test checks that every
+colour the preset's sheet draws with appears in a pair or in `decorative`.
+
+### What is checked, and what is not
+
+Contrast is measured for custom properties only. A colour set inside a rule
+(`.item { color: #888888; }`) is not a token, belongs to no pair and is not
+checked, so when you write one yourself, check it yourself. The colours rsb
+settings derives from an accent (`--accent-fg`, `--accent-text` and the others)
+are chosen so every pair of every built-in preset still passes; colours you set
+by hand are not.
+
 ## 4. style.css
 
 A small, fixed subset of CSS. The whole sheet is re-read on every save, so
@@ -474,6 +533,26 @@ optional = { "api_key" },
 ```
 
 `props.api_key` is then `string?`: nil until `bar.toml` sets it.
+
+### Describing a widget: `about`
+
+A settings page lists widgets with a title, whether they draw anything and which
+popups they open. The table given to `rsb.widget` may carry an optional `about`
+for that; the bar itself ignores it.
+
+```text
+about = { title = "Power menu", visible = false, opens = { "power" } },
+```
+
+| Field | Meaning |
+|---|---|
+| `title` | what the page calls the widget: 1 to 20 characters, one line. Default: the widget's name |
+| `visible` | `false` for a widget that draws nothing and only anchors a popup, like `power`. Default `true` |
+| `needs_options` | `true` when the widget draws nothing until `bar.toml` gives it options, like `text`. Default `false` |
+| `opens` | the popups it hosts or opens: a list of up to 8 names. Default empty |
+
+Every built-in widget has one. A field of another type, or one that is not in the
+table above, is an error when the page lists the widget.
 
 ### Reactivity
 

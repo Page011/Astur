@@ -2,7 +2,8 @@
    zone. The bar's own background is the translucent colour Windows shows
    when acrylic is off (and over Remote Desktop), kept dark or light enough
    that text stays readable on any wallpaper. No shadow on the bar: the
-   window edge would cut it off. */
+   window edge would cut it off.
+   If the colours block made by rsb settings is at the end of your style.css, change the accent there. */
 
 @media (prefers-color-scheme: dark) {
 	:root {
@@ -17,6 +18,10 @@
 		--press: rgba(255, 255, 255, 0.2);
 		--accent: #8ab4ff;
 		--accent-fg: #0c1630;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
 	}
 }
 
@@ -33,6 +38,10 @@
 		--press: rgba(0, 0, 0, 0.15);
 		--accent: #1f4fb4;
 		--accent-fg: #ffffff;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
 	}
 }
 
@@ -68,7 +77,7 @@ zone {
 }
 
 .ws.visible {
-	border-color: var(--accent);
+	border-color: var(--accent-line);
 }
 
 .ws.focused,

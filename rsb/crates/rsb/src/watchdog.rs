@@ -92,6 +92,8 @@ impl Watchdog {
                         break;
                     }
                     drop(guard);
+                    // The process CPU roll `rsb inspect` reports; one lock and a comparison unless a sample is due.
+                    crate::stats::roll_tick();
                     if let Some(g) = &overlays
                         && g.watch.shown.load(Ordering::Acquire)
                         && (g.busy_for)() >= STALL_AFTER

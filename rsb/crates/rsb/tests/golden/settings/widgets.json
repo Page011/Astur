@@ -1,0 +1,41 @@
+{
+  "contract": "number",
+  "failed": [
+    {
+      "message": "string",
+      "name": "string",
+      "source": "string"
+    }
+  ],
+  "kind": "string",
+  "ok": "bool",
+  "widgets": [
+    {
+      "name": "string",
+      "needs_options": "bool",
+      "opens": [
+        "string"
+      ],
+      "options": [
+        {
+          "default": "string",
+          "key": "string",
+          "type": "string"
+        }
+      ],
+      "replaces_builtin": "bool",
+      "source": "string",
+      "summary": "string",
+      "title": "string",
+      "used": [
+        {
+          "bar": "string",
+          "index": "number",
+          "ref": "string",
+          "zone": "string"
+        }
+      ],
+      "visible": "bool"
+    }
+  ]
+}

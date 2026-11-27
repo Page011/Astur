@@ -5,7 +5,15 @@
 use std::borrow::Cow;
 use std::path::{Component, Path, PathBuf};
 
+use std::sync::OnceLock;
+
+use rsb_core::config::BUILTIN_PRESETS;
+use rsb_core::contract::{FileHash, PresetContrast};
+use rsb_core::contrast::{self, AccentSurfaces};
+use rsb_core::css::{BASE_SHEET, PRESET_SHEET, Stylesheet};
+use rsb_core::diag::{DiagKind, Diagnostic, SourcePos};
 use rsb_core::paths::MAX_SOURCE_BYTES;
+use rsb_core::preset::{About, Scheme, parse_about};
 use rsb_script::SourceStore;
 
 include!(concat!(env!("OUT_DIR"), "/assets.rs"));
@@ -48,6 +56,58 @@ pub fn preset_css(name: &str) -> Option<&'static str> {
 
 pub fn base_css() -> &'static str {
     file("themes/base.css").unwrap_or("")
+}
+
+/// The base theme and a preset's sheet stacked as the bar stacks them, or
+/// None for a name that is not a built-in preset.
+pub fn preset_chain(name: &str) -> Option<Stylesheet> {
+    let css = preset_css(name)?;
+    let mut sheet = Stylesheet::empty();
+    sheet.append(Stylesheet::parse(base_css(), BASE_SHEET).0);
+    sheet.append(Stylesheet::parse(css, PRESET_SHEET).0);
+    Some(sheet)
+}
+
+/// The `[about]` table of a built-in preset.
+pub fn preset_about(name: &str) -> Result<About, Diagnostic> {
+    let text = preset_toml(name).ok_or_else(|| {
+        Diagnostic::error(
+            DiagKind::Config,
+            Some(SourcePos::new(name, 0, 0)),
+            "there is no built-in preset of this name",
+        )
+    })?;
+    parse_about(text, &format!("presets/{name}.toml"))
+}
+
+/// The contrast of a built-in preset as shipped, for each scheme it lists.
+pub fn preset_contrast(name: &str) -> Result<PresetContrast, Diagnostic> {
+    let about = preset_about(name)?;
+    let chain = preset_chain(name).unwrap_or_default();
+    let of = |scheme: Scheme| {
+        about
+            .schemes
+            .contains(&scheme)
+            .then(|| contrast::summary(&contrast::pairs(&about, &contrast::resolve_vars(&chain, scheme))))
+    };
+    Ok(PresetContrast { dark: of(Scheme::Dark), light: of(Scheme::Light) })
+}
+
+/// The surfaces an accent has to stay readable on: those of `accent-text` and
+/// `accent-line` in the pairs of every built-in preset, in each scheme. Built
+/// once; `contrast::derive_accent` takes it.
+pub fn accent_surfaces() -> &'static AccentSurfaces {
+    static SURFACES: OnceLock<AccentSurfaces> = OnceLock::new();
+    SURFACES.get_or_init(|| {
+        let mut out = AccentSurfaces::default();
+        for name in BUILTIN_PRESETS {
+            let (Ok(about), Some(chain)) = (preset_about(name), preset_chain(name)) else { continue };
+            for scheme in &about.schemes {
+                contrast::collect_accent_surfaces(&about, &contrast::resolve_vars(&chain, *scheme), *scheme, &mut out);
+            }
+        }
+        out
+    })
 }
 
 /// Modules a built-in widget requires from `./lib/`, followed through the
@@ -93,6 +153,20 @@ pub struct Store {
     pub config_dir: PathBuf,
 }
 
+impl Store {
+    /// `SourceStore::user`, and the version of the raw bytes the text was
+    /// made from, from the same read.
+    pub fn user_hashed(&self, rel_path: &str) -> std::io::Result<Option<(String, FileHash)>> {
+        // The script runtime only asks for resolved paths inside `widgets/`;
+        // this guards the folder boundary anyway.
+        let rel = Path::new(rel_path);
+        if rel.is_absolute() || rel.components().any(|c| !matches!(c, Component::Normal(_))) {
+            return Ok(None);
+        }
+        crate::cfgload::read_capped_hashed(&self.config_dir.join(rel), MAX_SOURCE_BYTES).map_err(std::io::Error::other)
+    }
+}
+
 impl SourceStore for Store {
     fn builtin(&self, rel_path: &str) -> Option<Cow<'static, str>> {
         file(rel_path).map(Cow::Borrowed)
@@ -103,16 +177,7 @@ impl SourceStore for Store {
     }
 
     fn user(&self, rel_path: &str) -> std::io::Result<Option<String>> {
-        // The script runtime only asks for resolved paths inside `widgets/`;
-        // this guards the folder boundary anyway.
-        let rel = Path::new(rel_path);
-        if rel.is_absolute() || rel.components().any(|c| !matches!(c, Component::Normal(_))) {
-            return Ok(None);
-        }
-        match crate::cfgload::read_capped(&self.config_dir.join(rel), MAX_SOURCE_BYTES) {
-            Ok(text) => Ok(text),
-            Err(e) => Err(std::io::Error::other(e)),
-        }
+        Ok(self.user_hashed(rel_path)?.map(|(text, _)| text))
     }
 }
 
@@ -171,7 +236,9 @@ mod tests {
         for preset in BUILTIN_PRESETS {
             let toml = preset_toml(preset).unwrap_or_else(|| panic!("no toml for {preset}"));
             let load = load_config(Some((toml, "preset.toml")), &|n| preset_toml(n).map(str::to_string));
-            assert!(load.config.is_some() && load.diagnostics.is_empty(), "{preset}: {:?}", load.diagnostics);
+            // A preset's `[about]` table is read from presets only; read as a user file it is a warning.
+            let diags: Vec<_> = load.diagnostics.iter().filter(|d| !d.message.contains("'about'")).collect();
+            assert!(load.config.is_some() && diags.is_empty(), "{preset}: {diags:?}");
             let (_, diags) = Stylesheet::parse(preset_css(preset).expect("css"), "preset.css");
             assert!(diags.is_empty(), "{preset}: {diags:?}");
         }
@@ -196,5 +263,47 @@ mod tests {
         assert!(matches!(store.user("C:/x.luau"), Ok(None)));
         assert!(matches!(store.user("widgets/definitely-missing.luau"), Ok(None)));
         assert!(store.builtin("widgets/clock.luau").is_some());
+        assert!(matches!(store.user_hashed("../x.luau"), Ok(None)));
+    }
+
+    #[test]
+    fn every_built_in_preset_has_metadata_and_passing_contrast() {
+        for name in BUILTIN_PRESETS {
+            let about = preset_about(name).unwrap_or_else(|d| panic!("{name}: {d}"));
+            let c = preset_contrast(name).unwrap();
+            for (scheme, got) in [(Scheme::Dark, &c.dark), (Scheme::Light, &c.light)] {
+                let got = got.as_ref().unwrap_or_else(|| panic!("{name} {}", scheme.name()));
+                assert!(
+                    got.pass && got.text.lowest >= 4.59 && got.graphic.lowest >= 3.0,
+                    "{name} {}: {got:?}",
+                    scheme.name()
+                );
+            }
+            assert!(!about.title.is_empty());
+        }
+        assert!(preset_about("nope").is_err() && preset_chain("nope").is_none());
+    }
+
+    #[test]
+    fn the_accent_surfaces_come_from_every_preset_in_both_schemes() {
+        let s = accent_surfaces();
+        assert!(s.dark.text.len() >= 8 && s.light.text.len() >= 8, "{s:?}");
+        assert!(s.dark.line.len() >= 10 && s.light.line.len() >= 10, "the flat presets add their rings: {s:?}");
+        assert!(std::ptr::eq(s, accent_surfaces()), "built once");
+    }
+
+    #[test]
+    fn every_embedded_text_file_has_unix_line_endings() {
+        // The files a first start writes (bar.toml and style.css) must not differ in line ending,
+        // and a Windows checkout must not leak CRLF into what is embedded.
+        let mut checked = 0;
+        for (name, bytes) in EMBEDDED {
+            let text_file = [".toml", ".css", ".luau", ".md"].iter().any(|e| name.ends_with(e));
+            if text_file {
+                assert!(!bytes.windows(2).any(|w| w == b"\r\n"), "{name} has CRLF line endings");
+                checked += 1;
+            }
+        }
+        assert!(checked >= 20, "only {checked} text files were checked");
     }
 }
