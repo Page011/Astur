@@ -1631,7 +1631,7 @@ impl App {
             f,
             (
                 "Peek at the edges",
-                "How much of the next column shows at a screen edge while there is one that way. Click it to bring that column in. 0 = columns edge to edge.",
+                "How much of the next column shows at a screen edge while there is one that way. Click it to bring that column in. 0 = columns edge to edge (an outer gap wider than the inner gap still shows the difference).",
                 "scroll_peek",
             ),
             &mut c.scroll_peek,

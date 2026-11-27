@@ -1470,9 +1470,11 @@ impl Config {
         }
     }
 
-    /// `outer_gap` per edge: top, right, bottom, left.
+    /// `outer_gap` per edge: top, right, bottom, left, each 0..=500 as
+    /// `parse_gaps` (a Settings draft can raise the base past an edge's room).
     pub fn outer_gaps(&self) -> [i32; 4] {
-        self.outer_gap_extra.map(|e| self.outer_gap + e)
+        self.outer_gap_extra
+            .map(|e| (self.outer_gap + e).clamp(0, 500))
     }
 
     /// Monitor `index`'s outer gaps (0-based, as layout_for_monitor): its
@@ -1666,7 +1668,8 @@ scroll_center = never
 # while there is a column that way: a strip end sits at the outer gap, and
 # columns that fit fill the screen. Click a sliver to bring its column in.
 # Widths of a strip that does not fit are shares of the screen less two
-# slivers.  0 = columns edge to edge, nothing peeks.  int 0 - 200
+# slivers.  0 = columns edge to edge, no sliver (an outer_gap wider than
+# inner_gap still shows the difference of the next column).  int 0 - 200
 scroll_peek = 32
 # What Alt+Shift+Left / Right (Up / Down on scrolling_vertical) move along
 # the strip, and Alt+Shift+J / K, Shift+wheel and the move_column IPC
@@ -2877,15 +2880,29 @@ fn plan_move(
     (from != to && is_dir(&from) && !is_dir(&to)).then_some((from, to))
 }
 
-/// The override (ASTUR_CONFIG / ASTUR_NAVBAR) that points inside `from`:
-/// moving that folder would strand the file it names, so the WM does not.
-/// Case-insensitive, as Windows paths are; `..` and relative overrides are
-/// made absolute first (std, lexical).
+/// The override (any `config_path` env: ASTUR_CONFIG, ASTUR_NAVBAR, ...)
+/// that points inside `from`: moving that folder would strand the file it
+/// names (and its writer would recreate the folder), so the WM does not.
+/// Case-insensitive, as Windows paths are; `..` and relative paths (the
+/// override, or `.\.astur` without USERPROFILE) are made absolute first
+/// (std, lexical).
 // ponytail: 8.3 short names and \\?\ verbatim overrides are not matched;
 // canonicalising would need the file to exist.
 pub fn pinned_by(from: &Path, var: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let from = std::path::absolute(from).unwrap_or_else(|_| from.to_path_buf());
     let from = from.to_string_lossy().to_lowercase();
-    ["ASTUR_CONFIG", "ASTUR_NAVBAR"].into_iter().find(|k| {
+    [
+        "ASTUR_CONFIG",
+        "ASTUR_NAVBAR",
+        "ASTUR_RESCUE",
+        "ASTUR_STATE",
+        "ASTUR_MRU",
+        "ASTUR_LOG",
+        "ASTUR_WALLPAPERS",
+        "ASTUR_CHECK",
+    ]
+    .into_iter()
+    .find(|k| {
         var(k).is_some_and(|v| {
             let v = std::path::absolute(&v).unwrap_or(v.into());
             Path::new(&v.to_string_lossy().to_lowercase()).starts_with(&from)
@@ -5053,6 +5070,13 @@ outer_gap = 4
             parse_text("outer_gap = 900, 0, -5, 3").outer_gaps(),
             [500, 0, 0, 3]
         );
+        // A Settings draft raising the base past an edge's room: still 500.
+        let c = Config {
+            outer_gap: 20,
+            outer_gap_extra: [0, 0, 500, 0],
+            ..Config::defaults()
+        };
+        assert_eq!(c.outer_gaps(), [20, 20, 500, 20]);
         // Two or three values, or a non-number: the old value stays.
         for v in ["8 60", "8, 8, 60", "8, 8, 60, 8, 8", "8px", ""] {
             let c = parse_text(&format!("outer_gap = 20\nouter_gap = {v}"));
@@ -6044,6 +6068,23 @@ floating = true"
             Some("ASTUR_CONFIG"),
             "a `..` spelling still pins it"
         );
+        // No USERPROFILE: the folder is the relative `.\.astur`.
+        assert_eq!(
+            pinned_by(Path::new(r".\.astur"), at(r".\.astur\a.conf")),
+            Some("ASTUR_CONFIG")
+        );
+        // Every override config_path reads, not just the two confs.
+        for k in [
+            "ASTUR_RESCUE",
+            "ASTUR_STATE",
+            "ASTUR_MRU",
+            "ASTUR_LOG",
+            "ASTUR_WALLPAPERS",
+            "ASTUR_CHECK",
+        ] {
+            let var = |v: &str| (v == k).then(|| r"C:\U\.astur\x".to_string());
+            assert_eq!(pinned_by(old, var), Some(k));
+        }
     }
 
     #[test]

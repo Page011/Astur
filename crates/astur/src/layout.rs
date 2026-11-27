@@ -559,8 +559,9 @@ pub(crate) fn mosaic_pick(
 /// averaged), so the biggest window sits in the middle and smaller ones go
 /// around it, as in GNOME's mockups. It appends unless another index gains
 /// more than MOSAIC_MARGIN (a mirror image or a 1 px rounding is no gain);
-/// ties among the rest go to the later index. n + 1 layouts, once per new
-/// window.
+/// ties among the rest go to the later index. Like `mosaic_pick`, it never
+/// takes an index that falls back to the grid while appending does not.
+/// n + 1 layouts, once per new window.
 pub(crate) fn mosaic_insert(
     area: RECT,
     sizes: &[(i32, i32)],
@@ -568,6 +569,8 @@ pub(crate) fn mosaic_insert(
     outer: i32,
     inner: i32,
 ) -> usize {
+    let n = sizes.len();
+    let grid = grid_layout(area, n + 1, outer, inner);
     let (cx, cy) = (area.left + area.right, area.top + area.bottom);
     let mut s = sizes.to_vec();
     let mut cost = |i: usize| {
@@ -584,14 +587,13 @@ pub(crate) fn mosaic_insert(
             moment += m * dx.hypot(dy) / 2.0;
             mass += m;
         }
-        moment / mass.max(1.0)
+        (moment / mass.max(1.0), rects == grid)
     };
-    let n = sizes.len();
-    let append = cost(n);
+    let (append, append_grid) = cost(n);
     let mut best = (append, n);
     for i in (0..n).rev() {
-        let c = cost(i);
-        if c < best.0 {
+        let (c, g) = cost(i);
+        if c < best.0 && (append_grid || !g) {
             best = (c, i);
         }
     }
@@ -802,7 +804,11 @@ pub(crate) fn strip_base(
             .last()
             .map_or(0, |s| s.1 + outer)
     };
+    // `total` only grows with b, so a floor that overflows is the answer.
     let descend = |mut b: i32, floor: i32| {
+        if total(floor) > len {
+            return floor;
+        }
         while b > floor && total(b) > len {
             b -= 1;
         }
@@ -2094,6 +2100,10 @@ mod tests {
         // Review: a strip that overflows anyway (1 px columns beside a wide
         // gap) keeps base lo, so a column never jumps at the fit line.
         assert_eq!(strip_base(800, &[0.7, 0.1, 0.1, 0.1], 0, 8, 100).0, 800);
+        // Review 4: the gaps alone overflow, so the floor is the answer.
+        // Pins the result only (the old 1 px walk gave the same); the probe
+        // count it saves is not testable without instrumenting strip_base.
+        assert_eq!(strip_base(3840, &[0.1; 10], 200, 8, 500), (2456, 692));
         for px in 510..=524 {
             let w = drag_width(800, &[0.1; 4], 0, px, 8, 100, 0);
             let ws = [w, 0.1, 0.1, 0.1];
@@ -2709,6 +2719,15 @@ mod tests {
     fn mosaic_pick_and_insert_ignore_noise() {
         let fhd = r(0, 0, 1920, 1032);
         assert_eq!(mosaic_insert(UHD, &[(1507, 984)], (648, 200), 8, 8), 1);
+        // Review 4: inserting between the two fell back to the grid (a lower
+        // cost) though appending keeps the mosaic.
+        let tall = r(0, 0, 680, 1000);
+        let added = [(420, 800), (420, 800), (540, 700)];
+        assert_ne!(
+            mosaic_layout(tall, &added, 0, 250),
+            grid_layout(tall, 3, 0, 250)
+        );
+        assert_eq!(mosaic_insert(tall, &added[..2], (540, 700), 0, 250), 2);
         let mid = |a: RECT| (a.left + a.right, a.top + a.bottom);
         let two = [(2156, 591), (1534, 922)];
         assert_eq!(mosaic_pick(UHD, &two, 8, 8, 0, mid(UHD)), 0);

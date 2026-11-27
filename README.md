@@ -155,6 +155,8 @@ Good to know:
 - Save as UTF-8.
 - `config_folder = home` keeps them in `%USERPROFILE%\.astur\` instead. Astur moves
   the folder there the next time it starts.
+- Point `ASTUR_CONFIG` / `ASTUR_NAVBAR` outside both Astur folders: an override inside
+  one keeps the folder from moving, or leaves the other file behind.
 - Astur Lite reads only `%USERPROFILE%\.astur\`.
 - Alt+Shift+Space > **Setup > Open config folder** opens the folder.
 

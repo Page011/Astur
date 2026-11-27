@@ -836,6 +836,48 @@ const DRAG_FRAME_TIME: std::time::Duration = std::time::Duration::from_micros(8_
 const DRAG_RETRY_TIME: std::time::Duration = std::time::Duration::from_millis(100);
 static RETILE_AFTER_DRAG: AtomicBool = AtomicBool::new(false);
 static NATIVE_DRAG: AtomicIsize = AtomicIsize::new(0);
+// The window a native drag started on and its GetWindowRect size then (w <<
+// 32 | h), set at MOVESIZESTART: a mosaic drop tells a title-bar move from a
+// resize by it, not by the slot (an app can refuse a slot narrower than its
+// minimum size). Taken once by that window's DragResized.
+static NATIVE_DRAG_FROM: AtomicIsize = AtomicIsize::new(0);
+static NATIVE_DRAG_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// MOVESIZESTART: note `h`'s size. Not for a maximised window: Windows
+/// restores it during the drag, so its start size says nothing about a
+/// resize (the slot comparison decides). IsZoomed and GetWindowRect send
+/// the app no message, so this is safe in the WinEvent callback on a hung
+/// app.
+unsafe fn native_drag_start(h: isize) {
+    let mut r = RECT::default();
+    let ok = !IsZoomed(hwnd_from(h)).as_bool() && GetWindowRect(hwnd_from(h), &mut r).is_ok();
+    let size = (((r.right - r.left) as u32 as u64) << 32) | (r.bottom - r.top) as u32 as u64;
+    NATIVE_DRAG_SIZE.store(size, Ordering::Relaxed);
+    NATIVE_DRAG_FROM.store(if ok { h } else { 0 }, Ordering::Release);
+}
+
+/// The size native_drag_start noted for `h`, taken once.
+fn native_drag_start_size(h: isize) -> Option<(i32, i32)> {
+    NATIVE_DRAG_FROM
+        .compare_exchange(h, 0, Ordering::Acquire, Ordering::Relaxed)
+        .ok()?;
+    let v = NATIVE_DRAG_SIZE.load(Ordering::Relaxed);
+    Some(((v >> 32) as i32, v as i32))
+}
+
+/// Whether a mosaic drop resized its window rather than moved it: more than
+/// RESIZE_SLOP_PX apart on either axis. A native drag with a noted start
+/// size compares that with its release size (`end`, both GetWindowRect);
+/// otherwise the slot with the dropped frame `got`.
+fn mosaic_drop_resized(
+    start: Option<(i32, i32)>,
+    end: (i32, i32),
+    slot: (i32, i32),
+    got: (i32, i32),
+) -> bool {
+    let (a, b) = start.map_or((slot, got), |s| (s, end));
+    (a.0 - b.0).abs() > RESIZE_SLOP_PX || (a.1 - b.1).abs() > RESIZE_SLOP_PX
+}
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct DragFrame {
@@ -2341,7 +2383,7 @@ unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) 
         let h = peek_at(pt);
         if h != 0 && !main_held() && root_window_at(pt).is_some_and(|r| r.0 as isize == h) {
             PEEK_UP.store(true, Ordering::Relaxed);
-            push_cmd(Cmd::ActivateWindow(h));
+            push_cmd(Cmd::PeekClick(h));
             return suppress;
         }
     }
@@ -2611,6 +2653,10 @@ enum Cmd {
     RemoveHidden(isize),
     Focused(isize),
     ActivateWindow(isize),
+    /// A click on this window's peek sliver: ActivateWindow, but only while
+    /// it is still on its monitor's active workspace (a click queued behind
+    /// a switch away must not switch back).
+    PeekClick(isize),
     FocusDir(i32),
     SwapDir(i32),
     PromoteMaster,
@@ -2711,6 +2757,7 @@ impl Cmd {
             Cmd::RemoveHidden(_) => "RemoveHidden",
             Cmd::Focused(_) => "Focused",
             Cmd::ActivateWindow(_) => "ActivateWindow",
+            Cmd::PeekClick(_) => "PeekClick",
             Cmd::FocusDir(_) => "FocusDir",
             Cmd::SwapDir(_) => "SwapDir",
             Cmd::PromoteMaster => "PromoteMaster",
@@ -3123,7 +3170,7 @@ fn scrollmon_at(pt: POINT) -> bool {
 // Hook-visible peek slivers: each part of a Peek tile within `2 * peek +
 // outer` of a strip's strip-axis edges (peek_slivers), with its window.
 // A plain left click there is Astur's: the hook eats it (and its button-up)
-// and pushes ActivateWindow, because the left
+// and pushes PeekClick, because the left
 // sliver is the window's caption-button corner and a quick click would
 // otherwise close the app before the reveal moves it. Written by the manager
 // after every command (strip_after_command); PEEK_N = 0 is the idle
@@ -3216,6 +3263,13 @@ fn peek_at(pt: POINT) -> isize {
         .map_or(0, |i| PEEK_HWND[i].load(Ordering::Relaxed))
 }
 
+/// A queued sliver click still acts: its window is on its monitor's active
+/// workspace. A switch away processed first drops it (no bounce back).
+fn peek_click_live(mgr: &Manager, h: isize) -> bool {
+    mgr.locate(h)
+        .is_some_and(|(mi, wi)| wi == mgr.monitors[mi].active)
+}
+
 /// Whole columns in one Alt+wheel event (`delta` > 0 = right), carrying
 /// partial deltas in `acc` like the bar's wheel_steps. `last` and `now` are
 /// hook timestamps (ms, wrapping): a pause over SCROLL_WHEEL_GAP_MS drops the
@@ -3248,6 +3302,10 @@ fn scroll_wheel_steps(
     if *latch != 0 && now.wrapping_sub(*stepped) < SCROLL_SWIPE_STEP_MS {
         *acc = steps.signum() * 120;
         return 0;
+    }
+    // One column per event: a second whole step waits like the cooldown's.
+    if steps.abs() > 1 {
+        *acc += steps.signum() * 120;
     }
     *latch = steps.signum();
     *stepped = now;
@@ -11100,6 +11158,9 @@ unsafe fn run_window_glide(mut req: GlideReq, wpc: &mut WpCache) {
         // Snapshots the re-aim does not use are freed with `next`, here.
         if let Some(mut next) = motion_take_retarget(generation) {
             let t = start.elapsed().as_secs_f64() * 1000.0 / dur;
+            // Position and slope at the same t: step to now first, so the
+            // new segment neither starts a frame back nor repeats a frame.
+            dirty |= motion_step(&mut items, motion_ease(t, v0));
             let slope = motion_slope(t, v0);
             if let Some(v) = motion_reaim(
                 overlay,
@@ -13563,6 +13624,11 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                 focus_window(h);
             }
         }
+        Cmd::PeekClick(h) => {
+            if peek_click_live(mgr, h) {
+                process(mgr, Cmd::ActivateWindow(h));
+            }
+        }
         Cmd::FocusMouse(h) => {
             // Queued before a programmatic focus change (a switch, keyboard
             // focus) but processed after it: the poll's own settle check ran
@@ -14365,9 +14431,15 @@ unsafe fn process(mgr: &mut Manager, cmd: Cmd) {
                     };
                     // A plain move (title-bar drag) keeps the size: storing
                     // the shown, capped size would lose the window's own.
+                    // A native drag goes by its own start size: an app that
+                    // refuses its slot keeps another size through a move.
                     let size = |r: RECT| (r.right - r.left, r.bottom - r.top);
-                    let ((sw, sh), (gw, gh)) = (size(slot), size(got));
-                    if (sw - gw).abs() > 2 || (sh - gh).abs() > 2 {
+                    let start = if rect.is_none() {
+                        native_drag_start_size(h)
+                    } else {
+                        None
+                    };
+                    if mosaic_drop_resized(start, size(r), size(slot), size(got)) {
                         let nat = mosaic_resized(natural_px(mgr, mi, h), slot, got);
                         natural_store(mgr, mi, h, nat);
                     } else if rect.is_none() {
@@ -20497,6 +20569,7 @@ unsafe extern "system" fn win_event_proc(
         // else snaps back so windows never overlap.
         EVENT_SYSTEM_MOVESIZESTART => {
             NATIVE_DRAG.store(h, Ordering::Relaxed);
+            native_drag_start(h);
             cancel_glide();
         }
         EVENT_SYSTEM_MOVESIZEEND => {
@@ -24621,7 +24694,11 @@ unsafe fn sysmenu_exec(act: SysAct) {
                             "Astur could not restart ({e}) and is still running.\n\n\
                              A changed config folder is saved; it moves the next time Astur starts."
                         );
-                        spawn_named("restart-failed", move || unsafe { message_box(&text) });
+                        // Not spawn_named: its panic would abort Astur; the
+                        // log above is the fallback.
+                        let _ = std::thread::Builder::new()
+                            .name("restart-failed".to_string())
+                            .spawn(move || unsafe { message_box(&text) });
                     }
                 }
             }
@@ -27529,13 +27606,26 @@ mod tests {
         unsafe {
             let mi = nearest_monitor_info(&rc(0, 0, 1, 1)).expect("a primary monitor");
             let (mon, wa) = (mi.rcMonitor, mi.rcWork);
+            // Review 4: an edge with no monitor beyond it, or the window sits
+            // mostly on that monitor and rightly stays put.
+            let exposed = |t: i32| {
+                nearest_monitor_info(&rc(mon.left + 8, t, mon.left + 108, t + 963))
+                    .is_some_and(|m| m.rcMonitor == mon)
+            };
+            let Some(top) = [mon.top - 873, mon.bottom - 90]
+                .into_iter()
+                .find(|&t| exposed(t))
+            else {
+                eprintln!("skipped: monitors both above and below the primary");
+                return;
+            };
             let (a, b) = (test_window(100, 963), test_window(100, 963));
             for w in [a, b] {
                 SetWindowPos(
                     w,
                     None,
                     mon.left + 8,
-                    mon.top - 873,
+                    top,
                     100,
                     963,
                     SWP_NOACTIVATE | SWP_NOZORDER,
@@ -29069,6 +29159,47 @@ mod tests {
         }
         assert!(dist(slot(&mgr, a)) <= before);
         assert_model_sound(&mgr, &[a, b, c]);
+    }
+
+    /// Review 4: a native title-bar move on mosaic keeps the natural size of
+    /// a window that does not show at its slot size (an app that refuses its
+    /// slot): it goes by its own start size. With none noted, by the slot.
+    #[test]
+    fn a_native_mosaic_move_goes_by_its_start_size() {
+        let (slot, app) = ((600, 450), (800, 600));
+        assert!(!mosaic_drop_resized(Some(app), (801, 600), slot, app));
+        assert!(mosaic_drop_resized(Some(app), (900, 600), slot, app));
+        assert!(mosaic_drop_resized(None, app, slot, app));
+        unsafe {
+            let w = test_window(100, 100);
+            let h = w.0 as isize;
+            let mut m = test_manager(1, 1);
+            m.monitors[0].hmon = MonitorFromWindow(w, MONITOR_DEFAULTTONEAREST).0 as isize;
+            m.monitors[0].workspaces[0].layout = Some("mosaic");
+            add(&mut m, 0, 0, h, false);
+            // No start noted: 100x100 in a far larger slot reads as a resize.
+            m.natural.insert(h, (1200, 800));
+            process(&mut m, Cmd::DragResized(h, None));
+            assert_ne!(m.natural[&h], (1200, 800));
+            // Its start size noted: the same size at release is a move.
+            m.natural.insert(h, (1200, 800));
+            native_drag_start(h);
+            process(&mut m, Cmd::DragResized(h, None));
+            assert_eq!(m.natural[&h], (1200, 800));
+            assert_ne!(NATIVE_DRAG_FROM.load(Ordering::Relaxed), h, "taken");
+            // A drag that starts maximised notes nothing (Windows restores
+            // it mid-drag): the slot comparison decides, as before.
+            let style = GetWindowLongW(w, GWL_STYLE) as u32;
+            SetWindowLongW(
+                w,
+                GWL_STYLE,
+                (style | windows::Win32::UI::WindowsAndMessaging::WS_MAXIMIZE.0) as i32,
+            );
+            native_drag_start(h);
+            assert_ne!(NATIVE_DRAG_FROM.load(Ordering::Relaxed), h, "maximised");
+            last_sent_forget(h);
+            let _ = DestroyWindow(w);
+        }
     }
 
     /// #27: mosaic tiles each window at its natural size (half the inner
@@ -30908,6 +31039,14 @@ mod tests {
         assert_eq!(s(0, 10, 100), 0);
         assert_eq!(s(10, 20, 50), 1);
         assert_eq!(s(20, 180, 90), 1);
+        // One event reaching two columns steps once; the second waits.
+        let (mut acc, mut latch, mut stepped) = (0, 0, 0);
+        let mut s = |last, now, delta| {
+            scroll_wheel_steps(&mut acc, &mut latch, &mut stepped, last, now, delta)
+        };
+        assert_eq!(s(0, 10, 100), 0);
+        assert_eq!(s(10, 20, 150), 1);
+        assert_eq!(s(20, 180, 10), 1);
     }
 
     #[test]
@@ -30962,6 +31101,20 @@ mod tests {
         scrollmon_publish(&[left; MAX_SCROLLMONS + 2]);
         assert_eq!(SCROLLMON_N.load(Ordering::Relaxed) as usize, MAX_SCROLLMONS);
         scrollmon_publish(&[]);
+    }
+
+    /// A sliver click queued behind a switch away from its workspace is
+    /// dropped (ActivateWindow would switch straight back).
+    #[test]
+    fn a_stale_peek_click_does_not_undo_a_switch() {
+        let mut m = test_manager(1, 2);
+        let h = 0x5000;
+        m.monitors[0].workspaces[0].windows.push(h);
+        assert!(peek_click_live(&m, h), "on the active workspace: acts");
+        m.monitors[0].active = 1;
+        assert!(!peek_click_live(&m, h), "switched away: dropped");
+        unsafe { process(&mut m, Cmd::PeekClick(h)) };
+        assert_eq!(m.monitors[0].active, 1);
     }
 
     /// 2026-11-23: tile area 0..3840, outer 8, peek 48, so the region
