@@ -60,10 +60,14 @@ jobs:
           $files = @((Resolve-Path astur-windows-x64.exe).Path)
           $files += (Resolve-Path rsb/target/release/rsb.exe).Path
           $files += (Get-ChildItem dist/Astur-Setup-*.exe).FullName
+          # The portable exes carry BSD, Zlib, Unicode and OFL material whose
+          # licences must travel with binary copies (the installer ships it too).
+          $files += (Resolve-Path THIRD_PARTY_NOTICES.md).Path
           $notes = "**Astur $env:GITHUB_REF_NAME** - portable tiling window manager for Windows 10/11.`n`n" +
                    "- ``astur-windows-x64.exe`` - portable window manager, single exe, no installer.`n" +
                    "- ``rsb.exe`` - the RSB status bar, for the portable setup: put it in the same folder.`n" +
-                   "- ``Astur-Setup-*.exe`` - installer bundling the window manager, Settings GUI and RSB.`n`n" +
+                   "- ``Astur-Setup-*.exe`` - installer bundling the window manager, Settings GUI and RSB.`n" +
+                   "- ``THIRD_PARTY_NOTICES.md`` - licences of the code and fonts inside the exes.`n`n" +
                    "See the release commit for the full changelog."
           $ghArgs = @('release','create',$env:GITHUB_REF_NAME) + $files +
                     @('--title',"Astur $env:GITHUB_REF_NAME",'--notes',$notes)
