@@ -336,10 +336,14 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-### arrayref (BSD-2-Clause)
+### arrayref, and resvg's IIR blur (BSD-2-Clause)
 
-Copyright (c) 2015 David Roundy <roundyd@physics.oregonstate.edu>
+arrayref: Copyright (c) 2015 David Roundy <roundyd@physics.oregonstate.edu>
 All rights reserved.
+
+resvg's IIR blur (`src/filter/iir_blur.rs` in the resvg crate) is based on
+Pascal Getreuer's gaussianiir (http://www.getreuer.info/home/gaussianiir):
+Copyright (c) 2011 Pascal Getreuer
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are
