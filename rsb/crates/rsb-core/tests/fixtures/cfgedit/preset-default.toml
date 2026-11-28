@@ -1,0 +1,60 @@
+# default: chevron segments along the top edge, dark or light with Windows.
+# A bar 36 px tall with the segments hanging from its lower 26 px; the button
+# in the middle is centred on the bar. Keys you leave out of your own
+# bar.toml come from here.
+
+[[bar]]
+name = "main"
+monitors = "*"
+position = "top"
+height = 36
+floating = false
+reserve = true
+fullscreen = "below"
+left = ["workspaces", "media"]
+center = ["memory", "cpu", "dashboard", "clock", "date"]
+center_on = "dashboard"
+right = ["status", "battery", "tray", "record", "power"]
+
+[widget.workspaces]
+hide_empty = true
+style = "text"
+active_format = "-{label}-"
+
+[widget.media]
+format = "{title} - {artist}"
+max_width = 320
+hide = "idle"
+progress = true
+icon = "app"
+popup = true
+
+[widget.memory]
+format = "{value}%"
+icon = "memory"
+icons = "svg"
+
+[widget.cpu]
+format = "{value}%"
+icon = "cpu"
+icons = "svg"
+
+[widget.clock]
+format = "HH:mm"
+alt_format = ""
+hover_format = "HH:mm:ss"
+
+[widget.date]
+format = "MM-dd"
+hover_format = "dddd d MMMM, yyyy"
+popup = true
+
+[widget.battery]
+format = "{value}%"
+hover_format = "{time}"
+unknown = "--:--"
+icons = "svg"
+
+[widget.status]
+mic = true
+bluetooth = true

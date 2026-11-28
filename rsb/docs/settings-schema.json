@@ -1,0 +1,118 @@
+{
+  "config_version": 1,
+  "contract": 1,
+  "file_only": [
+    "config_version",
+    "bar.*.center_on",
+    "bar.*.fullscreen",
+    "bar.*.margin",
+    "bar.*.monitors",
+    "bar.*.name",
+    "bar.*.radius",
+    "bar.*.reserve",
+    "bar",
+    "widget.*"
+  ],
+  "keys": [
+    {
+      "default": "default",
+      "file": "bar.toml",
+      "help": "The look and the layout the bar starts from",
+      "key": "preset",
+      "label": "Preset",
+      "type": "choice",
+      "values": [
+        "default",
+        "fluent",
+        "astur-classic",
+        "glass"
+      ]
+    },
+    {
+      "default": "top",
+      "file": "bar.toml",
+      "help": "The screen edge the bar sits on",
+      "key": "bar.*.position",
+      "label": "Position",
+      "type": "choice",
+      "values": [
+        "top",
+        "bottom"
+      ]
+    },
+    {
+      "default": 36,
+      "file": "bar.toml",
+      "help": "How tall the bar is",
+      "key": "bar.*.height",
+      "label": "Height",
+      "max": 128,
+      "min": 16,
+      "type": "int",
+      "unit": "logical px"
+    },
+    {
+      "default": false,
+      "file": "bar.toml",
+      "help": "Keep the bar clear of the screen edge",
+      "key": "bar.*.floating",
+      "label": "Floating",
+      "type": "bool"
+    },
+    {
+      "default": [
+        "workspaces",
+        "media"
+      ],
+      "file": "bar.toml",
+      "help": "The widgets in this part of the bar, in order",
+      "key": "bar.*.left",
+      "label": "Left zone",
+      "max_items": 64,
+      "type": "zone"
+    },
+    {
+      "default": [
+        "memory",
+        "cpu",
+        "dashboard",
+        "clock",
+        "date"
+      ],
+      "file": "bar.toml",
+      "help": "The widgets in this part of the bar, in order",
+      "key": "bar.*.center",
+      "label": "Centre zone",
+      "max_items": 64,
+      "type": "zone"
+    },
+    {
+      "default": [
+        "status",
+        "battery",
+        "tray",
+        "record",
+        "power"
+      ],
+      "file": "bar.toml",
+      "help": "The widgets in this part of the bar, in order",
+      "key": "bar.*.right",
+      "label": "Right zone",
+      "max_items": 64,
+      "type": "zone"
+    },
+    {
+      "file": "style.css",
+      "help": "The highlight colour; every shade of it is worked out so text stays readable",
+      "key": "color.accent",
+      "label": "Accent",
+      "schemes": [
+        "dark",
+        "light"
+      ],
+      "type": "color"
+    }
+  ],
+  "kind": "schema",
+  "ok": true
+}

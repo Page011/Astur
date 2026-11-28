@@ -1,0 +1,22 @@
+{
+  "config_version": "number",
+  "contract": "number",
+  "file_only": [
+    "string"
+  ],
+  "keys": [
+    {
+      "default": "string",
+      "file": "string",
+      "help": "string",
+      "key": "string",
+      "label": "string",
+      "type": "string",
+      "values": [
+        "string"
+      ]
+    }
+  ],
+  "kind": "string",
+  "ok": "bool"
+}

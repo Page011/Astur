@@ -1,0 +1,54 @@
+{
+  "bar": {
+    "config_dir": "string",
+    "diagnostics": "number",
+    "running": "bool",
+    "shows_files": "bool"
+  },
+  "bars": "null",
+  "colors": {
+    "accent": {
+      "dark": {
+        "at": "string",
+        "overridden": [],
+        "shadowed_by": "null",
+        "source": "string",
+        "value": "string"
+      },
+      "editable": "bool",
+      "label": "string",
+      "light": {
+        "at": "string",
+        "overridden": [
+          "string"
+        ],
+        "shadowed_by": "string",
+        "source": "string",
+        "value": "string"
+      }
+    }
+  },
+  "config_dir": "string",
+  "contract": "number",
+  "files": {
+    "bar.toml": {
+      "edited_by_hand": "bool",
+      "error": {
+        "at": "string",
+        "message": "string"
+      },
+      "hash": "string",
+      "last_good": "bool"
+    },
+    "style.css": {
+      "edited_by_hand": "bool",
+      "error": "null",
+      "hash": "string",
+      "last_good": "bool"
+    }
+  },
+  "high_contrast": "bool",
+  "kind": "string",
+  "ok": "bool",
+  "preset": "null"
+}

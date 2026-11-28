@@ -1,0 +1,77 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/rsb-core",
+    "crates/rsb-render",
+    "crates/rsb-win",
+    "crates/rsb-services",
+    "crates/rsb-script",
+    "crates/rsb",
+]
+# Measurement prototypes: their own workspace, never built from here.
+exclude = ["spikes"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[workspace.dependencies]
+rsb-core = { path = "crates/rsb-core" }
+rsb-render = { path = "crates/rsb-render" }
+rsb-win = { path = "crates/rsb-win" }
+rsb-services = { path = "crates/rsb-services" }
+rsb-script = { path = "crates/rsb-script" }
+
+# Every third-party crate is pinned exactly. Licences: MIT, Apache-2.0, BSD,
+# Zlib, ISC or Unicode only.
+windows = "=0.62.2"
+windows-core = "=0.62.2"
+# Flexbox only: grid, block and float layout are not part of the CSS subset.
+taffy = { version = "=0.16.0", default-features = false, features = ["std", "taffy_tree", "flexbox", "content_size"] }
+parley = "=0.13.0"
+swash = "=0.2.10"
+# png-format off: images are decoded with the png crate below, one version.
+tiny-skia = { version = "=0.12.0", default-features = false, features = ["std", "simd"] }
+png = "=0.18.1"
+# Luau only. Luau is always built from its bundled sources (luau0-src), so
+# the `vendored` feature (bundled Lua 5.x / LuaJIT) is not needed.
+mlua = { version = "=0.12.3", features = ["luau"] }
+toml = "=1.2.2"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+# WebSocket client for GlazeWM-compatible window managers: plain ws:// to
+# 127.0.0.1, so no TLS features.
+tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
+# Logging facade so the library crates can log without knowing about the file
+# logger in the binary.
+log = "=0.4.35"
+# SVG icons and images. Default features off: no text (icons draw no text),
+# no system fonts, no embedded raster images and no compressed .svgz, so an
+# SVG can only describe shapes. It draws with the same tiny-skia version.
+resvg = { version = "=0.50.0", default-features = false }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[workspace.lints.clippy]
+undocumented_unsafe_blocks = "warn"
+
+# Panics unwind, so they are visible as errors instead of killing the bar from
+# a script call. Luau is built with C++ exceptions: every script error raised
+# from a Rust callback (a permission denial, a budget stop, a bad argument)
+# travels through Rust frames, and with `panic = "abort"` that aborts the whole
+# process. Real Rust panics still end the process: the binary's panic hook
+# writes the message to the log and then calls `std::process::abort`, so a
+# script, service or pipe thread never dies quietly and leaves a frozen bar.
+# The hook removes every appbar before it aborts, because the shell keeps the
+# reserved space of a process that dies without giving it back.
+[profile.dev]
+panic = "unwind"
+
+[profile.release]
+panic = "unwind"
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

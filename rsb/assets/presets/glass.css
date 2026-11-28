@@ -1,0 +1,87 @@
+/* glass: a floating bar with an acrylic backdrop and a pill behind each
+   zone. The bar's own background is the translucent colour Windows shows
+   when acrylic is off (and over Remote Desktop), kept dark or light enough
+   that text stays readable on any wallpaper. No shadow on the bar: the
+   window edge would cut it off.
+   If the colours block made by rsb settings is at the end of your style.css, change the accent there. */
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		--bg: rgba(24, 26, 36, 0.86);
+		--zone: rgba(255, 255, 255, 0.06);
+		--fg: #f2f4fa;
+		--muted: #c9cedb;
+		--warn: #ffc562;
+		--error: #ffb3b3;
+		--pill: rgba(255, 255, 255, 0.08);
+		--hover: rgba(255, 255, 255, 0.12);
+		--press: rgba(255, 255, 255, 0.2);
+		--accent: #8ab4ff;
+		--accent-fg: #0c1630;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
+	}
+}
+
+@media (prefers-color-scheme: light) {
+	:root {
+		--bg: rgba(244, 246, 250, 0.86);
+		--zone: rgba(0, 0, 0, 0.05);
+		--fg: #1b1e24;
+		--muted: #3a4150;
+		--warn: #7a4600;
+		--error: #9b1c1c;
+		--pill: rgba(0, 0, 0, 0.06);
+		--hover: rgba(0, 0, 0, 0.09);
+		--press: rgba(0, 0, 0, 0.15);
+		--accent: #1f4fb4;
+		--accent-fg: #ffffff;
+		--accent-hover: var(--accent);
+		--accent-press: var(--accent);
+		--accent-text: var(--accent);
+		--accent-line: var(--accent);
+	}
+}
+
+bar {
+	backdrop: acrylic;
+	background: var(--bg);
+	color: var(--fg);
+	padding: 4px 6px;
+}
+
+zone {
+	background: var(--zone);
+	border-radius: 10px;
+}
+
+.item,
+.ws {
+	border-radius: 8px;
+}
+
+.ws {
+	background: var(--pill);
+	border: 1px solid transparent;
+}
+
+.ws.button:hover {
+	background: var(--hover);
+	color: var(--fg);
+}
+
+.ws.empty {
+	color: var(--muted);
+}
+
+.ws.visible {
+	border-color: var(--accent-line);
+}
+
+.ws.focused,
+.ws.focused:hover {
+	background: var(--accent);
+	color: var(--accent-fg);
+}

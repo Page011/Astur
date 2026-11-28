@@ -1,0 +1,31 @@
+# fluent: a full-width bar at the top in Windows' own style, dark or light
+# with Windows: the first default look, kept under its own name.
+# Keys you leave out of your own bar.toml come from here.
+
+[[bar]]
+name = "main"
+monitors = "*"
+position = "top"
+height = 32
+floating = false
+reserve = true
+fullscreen = "below"
+left = ["workspaces", "title"]
+center = ["clock"]
+right = ["media", "network", "volume", "battery", "cpu", "memory", "date"]
+
+[about]
+title = "Fluent"
+description = "A full-width translucent bar in Windows' own style, with accent pills."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }, { var = "bg", label = "Background" }]
+
+[about.contrast]
+text = [
+    "fg on bg bg+hover bg+press bg+pill",
+    "muted on bg bg+pill",
+    "warn on bg",
+    "error on bg",
+    "accent-fg on bg+accent",
+]
+line = ["accent-line on bg bg+pill"]

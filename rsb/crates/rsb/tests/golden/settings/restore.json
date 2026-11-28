@@ -1,0 +1,37 @@
+{
+  "accent": "null",
+  "bar": {
+    "config_dir": "string",
+    "diagnostics": "number",
+    "ms": "number",
+    "running": "bool",
+    "shows_files": "bool"
+  },
+  "contract": "number",
+  "dry_run": "bool",
+  "files": {
+    "bar.toml": {
+      "edited_by_hand": "bool",
+      "hash": "string",
+      "written": "bool"
+    },
+    "style.css": {
+      "edited_by_hand": "bool",
+      "hash": "string",
+      "written": "bool"
+    }
+  },
+  "kept_copy": "string",
+  "kind": "string",
+  "notices": [
+    {
+      "code": "string",
+      "file": "string",
+      "message": "string",
+      "next": "null"
+    }
+  ],
+  "ok": "bool",
+  "preset_switch": "null",
+  "undo": "number"
+}

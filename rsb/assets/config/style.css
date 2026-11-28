@@ -1,0 +1,36 @@
+/* style.css: your changes to the look. Save the file and the bar updates at
+   once; a mistake shows on the bar with its line number and the last good
+   style stays.
+
+   If the colours block made by rsb settings is at the end of this file, change the accent there.
+
+   Change a colour of the preset by setting its custom property. --accent is
+   the fill of the centre button and of today in the calendar; --accent-text colours
+   text and icons in the accent and --accent-line the focus rings and
+   outlines. In the dark theme the last two follow --accent. In the light theme
+   they are darker shades, so set them too, to a darker shade of your colour:
+
+   :root {
+       --accent: #e5a50a;
+       --accent-text: #8a5d00;   light theme: text and icons
+       --accent-line: #8a5d00;   light theme: rings and outlines
+   }
+
+   Change the font of the bar:
+
+   bar { font-family: "Segoe UI"; font-size: 13px; }
+
+   Style one widget by its name, or one instance by its id:
+
+   widget.cpu { margin-left: 8px; }
+   #clock-utc { font-weight: 600; }
+
+   Text, icons and boxes inside a widget:
+
+   .item { border-radius: 12px; }
+   .ws.focused { background: #e5a50a; color: #000000; }
+
+   Pull colours from another file (matugen, pywal):
+
+   @import "colors.css";
+*/

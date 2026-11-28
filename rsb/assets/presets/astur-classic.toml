@@ -1,0 +1,58 @@
+# astur-classic: Astur's own bar. Height 28; workspaces on the left, the
+# window title in the middle, cpu, memory, volume, battery and clock on the
+# right. Labels are text (CPU, RAM, VOL, BAT) like Astur's. Astur's layout
+# indicator has no RSB widget, so it is left out.
+
+[[bar]]
+name = "main"
+monitors = "*"
+position = "top"
+height = 28
+floating = false
+reserve = true
+fullscreen = "below"
+left = ["workspaces"]
+center = ["title"]
+right = ["cpu", "memory", "volume", "battery", "clock"]
+
+[widget.workspaces]
+label = "display_name"
+
+[widget.title]
+max_width = 600
+
+[widget.cpu]
+label = "CPU"
+
+[widget.memory]
+label = "RAM"
+
+[widget.volume]
+label = "VOL"
+muted_format = "MUTE"
+
+[widget.battery]
+label = "BAT"
+absent = "hide"
+
+[widget.clock]
+format = "HH:mm"
+alt_format = ""
+
+[about]
+title = "Astur classic"
+description = "Astur's own bar: square workspace cells and text labels."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }, { var = "bg", label = "Background" }]
+
+[about.contrast]
+text = [
+    "fg on bg bg+hover bg+press",
+    "muted on bg",
+    "warn on bg",
+    "error on bg",
+    "accent-fg on bg+accent",
+    "inactive-text on bg",
+]
+line = ["accent-line on bg"]
+decorative = ["inactive"]

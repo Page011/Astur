@@ -1,0 +1,32 @@
+# glass: a floating bar, 8 px from the screen edge, with rounded corners and
+# an acrylic backdrop; each zone sits on its own pill.
+
+[[bar]]
+name = "main"
+monitors = "*"
+position = "top"
+height = 36
+floating = true
+margin = 8
+radius = 12
+reserve = true
+fullscreen = "below"
+left = ["workspaces", "title"]
+center = ["clock"]
+right = ["media", "network", "volume", "battery", "cpu", "memory", "date"]
+
+[about]
+title = "Glass"
+description = "A floating acrylic bar with a rounded pill behind each zone."
+schemes = ["dark", "light"]
+tune = [{ var = "accent", label = "Accent" }, { var = "fg", label = "Text" }, { var = "bg", label = "Background" }]
+
+[about.contrast]
+text = [
+    "fg on bg+zone bg+zone+hover bg+zone+press bg+zone+pill",
+    "muted on bg+zone bg+zone+pill",
+    "warn on bg+zone",
+    "error on bg+zone",
+    "accent-fg on bg+zone+accent",
+]
+line = ["accent-line on bg+zone bg+zone+pill"]

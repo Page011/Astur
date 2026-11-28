@@ -1,0 +1,75 @@
+{
+  "accent": {
+    "schemes": {
+      "dark": {
+        "fg": "string",
+        "fg_ratio": "number",
+        "hover": "string",
+        "line": "string",
+        "moved": "number",
+        "press": "string",
+        "text": "string"
+      },
+      "light": {
+        "fg": "string",
+        "fg_ratio": "number",
+        "hover": "string",
+        "line": "string",
+        "moved": "number",
+        "press": "string",
+        "text": "string"
+      }
+    },
+    "value": "string"
+  },
+  "bar": {
+    "config_dir": "string",
+    "diagnostics": "number",
+    "ms": "number",
+    "running": "bool",
+    "shows_files": "bool"
+  },
+  "contract": "number",
+  "dry_run": "bool",
+  "files": {
+    "bar.toml": {
+      "edited_by_hand": "bool",
+      "hash": "string",
+      "written": "bool"
+    },
+    "style.css": {
+      "edited_by_hand": "bool",
+      "hash": "string",
+      "written": "bool"
+    }
+  },
+  "kept_copy": "string",
+  "kind": "string",
+  "notices": [
+    {
+      "code": "string",
+      "message": "string",
+      "next": "string",
+      "popup": "string",
+      "widget": "string"
+    }
+  ],
+  "ok": "bool",
+  "preset_switch": {
+    "accent_kept": "string",
+    "bars_listed": "number",
+    "from": "string",
+    "kept": [
+      {
+        "bar": "string",
+        "key": "string",
+        "preset": "bool",
+        "same": "bool",
+        "yours": "bool"
+      }
+    ],
+    "preset_bars": "number",
+    "to": "string"
+  },
+  "undo": "number"
+}

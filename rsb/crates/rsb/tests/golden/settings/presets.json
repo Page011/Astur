@@ -1,0 +1,60 @@
+{
+  "contract": "number",
+  "current": "string",
+  "high_contrast": "bool",
+  "kind": "string",
+  "ok": "bool",
+  "presets": [
+    {
+      "bar": {
+        "floating": "bool",
+        "height": "number",
+        "position": "string"
+      },
+      "bars": "number",
+      "contrast": {
+        "dark": {
+          "graphic": {
+            "lowest": "number",
+            "need": "number",
+            "what": "string"
+          },
+          "pass": "bool",
+          "text": {
+            "lowest": "number",
+            "need": "number",
+            "what": "string"
+          }
+        },
+        "light": {
+          "graphic": {
+            "lowest": "number",
+            "need": "number",
+            "what": "string"
+          },
+          "pass": "bool",
+          "text": {
+            "lowest": "number",
+            "need": "number",
+            "what": "string"
+          }
+        }
+      },
+      "description": "string",
+      "name": "string",
+      "schemes": [
+        "string"
+      ],
+      "title": "string",
+      "tune": [
+        {
+          "dark": "string",
+          "editable": "bool",
+          "label": "string",
+          "light": "string",
+          "var": "string"
+        }
+      ]
+    }
+  ]
+}

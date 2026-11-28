@@ -1,0 +1,25 @@
+{
+  "contract": "number",
+  "entries": [
+    {
+      "changes": [
+        {
+          "key": "string",
+          "op": "string",
+          "value": "string"
+        }
+      ],
+      "files": {
+        "style.css": {
+          "after": "string",
+          "before": "string"
+        }
+      },
+      "n": "number",
+      "time": "string",
+      "what": "string"
+    }
+  ],
+  "kind": "string",
+  "ok": "bool"
+}

@@ -1,0 +1,16 @@
+# glass: a floating bar, 8 px from the screen edge, with rounded corners and
+# an acrylic backdrop; each zone sits on its own pill.
+
+[[bar]]
+name = "main"
+monitors = "*"
+position = "top"
+height = 36
+floating = true
+margin = 8
+radius = 12
+reserve = true
+fullscreen = "below"
+left = ["workspaces", "title"]
+center = ["clock"]
+right = ["media", "network", "volume", "battery", "cpu", "memory", "date"]
