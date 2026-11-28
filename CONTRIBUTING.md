@@ -56,6 +56,8 @@ The main workspace contains:
 | `crates/astur-config` | Shared configuration parsing and defaults |
 | `crates/astur-settings` | Settings GUI |
 
+`rsb/` is the RSB status bar. It is a **separate Cargo workspace** (it needs `panic = "unwind"` for its Luau scripts, the main workspace uses `panic = "abort"`), so run its cargo commands from `rsb/`. See [rsb/README.md](rsb/README.md).
+
 Read [README.md](README.md) for features and usage, and [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) for codebase conventions and architectural guidance.
 
 **Branch note:** `main` is the full Astur edition. Astur Lite is maintained separately on the [`lite` branch](https://github.com/Page011/Astur/tree/lite). Unless your change specifically targets Lite, base your pull request on `main`.
@@ -93,6 +95,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo build --release --workspace
 ```
+
+If you changed anything in `rsb/`, run the same four commands from `rsb/` too. Both test suites must pass.
 
 For changes affecting window management, also **test the behaviour on Windows**, not just compilation. Depending on the change, check Alt-drag move/resize, tiling, workspace switching, multiple monitors, app focus, and quitting Astur cleanly.
 
