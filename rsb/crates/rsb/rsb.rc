@@ -1,0 +1,35 @@
+// Windows resource script for rsb.exe: the icon and the version info
+// (Explorer Properties > Details, antivirus reputation). VMAJ/VMIN/VPAT/VER
+// come from Cargo.toml via build.rs. No manifest, as before: RSB sets
+// per-monitor v2 DPI awareness at runtime (a manifest that set it first would
+// make that call fail).
+1 ICON "rsb.ico"
+
+1 VERSIONINFO
+FILEVERSION VMAJ,VMIN,VPAT,0
+PRODUCTVERSION VMAJ,VMIN,VPAT,0
+FILEFLAGSMASK 0x3F
+FILEFLAGS 0x0
+FILEOS 0x40004
+FILETYPE 0x1
+FILESUBTYPE 0x0
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Astur"
+            VALUE "FileDescription", "RSB status bar"
+            VALUE "FileVersion", VER
+            VALUE "InternalName", "rsb"
+            VALUE "LegalCopyright", "Licensed under the Apache License 2.0"
+            VALUE "OriginalFilename", "rsb.exe"
+            VALUE "ProductName", "Astur"
+            VALUE "ProductVersion", VER
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
