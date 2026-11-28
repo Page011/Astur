@@ -574,6 +574,7 @@ mod tests {
             tiling: true,
             cfg: super::super::Config::defaults(),
             pending_launch_mon: 0,
+            natural: Default::default(),
         };
         mgr.cfg.per_monitor = per_monitor;
         mgr.cfg.workspace_names = vec!["Code \"main\"".into(), "Chat".into()];

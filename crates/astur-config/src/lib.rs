@@ -1,6 +1,8 @@
 //! Runtime configuration: the `Config` struct, its documented-default file
 //! templates, and the key/value parser. No Win32 — pure data and string work.
 
+use std::path::{Path, PathBuf};
+
 /// User-supplied launcher entry. `icon` accepts an .ico/.png/.exe path or
 /// `auto`; resolution belongs to the Win32 UI process, not this pure crate.
 #[derive(Clone, PartialEq, Debug)]
@@ -44,36 +46,40 @@ pub struct HotkeyDef {
 /// Runtime configuration, loaded from astur.conf + navbar.conf at startup.
 #[derive(Clone, PartialEq)]
 pub struct Config {
-    pub per_monitor: bool,        // true: Alt+1..9 switches focused monitor only
-    pub start_tiled: bool,        // tile automatically on launch
-    pub outer_gap: i32,           // gap between windows and screen edge
-    pub inner_gap: i32,           // gap between adjacent windows
-    pub master_ratio: f32,        // fraction of width given to the master window
-    pub workspaces: usize,        // shared: total; per_monitor: each (1..=MAX_WORKSPACES)
-    pub workspace_keys: Vec<u32>, // VK code per workspace; Alt+key switches, +Shift moves
+    pub per_monitor: bool,         // true: Alt+1..9 switches focused monitor only
+    pub start_tiled: bool,         // tile automatically on launch
+    pub outer_gap: i32,            // gap between windows and screen edge (the smallest edge's)
+    pub outer_gap_extra: [i32; 4], // per edge above outer_gap: top, right, bottom, left
+    pub inner_gap: i32,            // gap between adjacent windows
+    pub master_ratio: f32,         // fraction of width given to the master window
+    pub workspaces: usize,         // shared: total; per_monitor: each (1..=MAX_WORKSPACES)
+    pub workspace_keys: Vec<u32>,  // VK code per workspace; Alt+key switches, +Shift moves
     pub workspace_names: Vec<String>, // optional display names, in workspace order
     pub workspace_icons: Vec<String>, // optional short labels/icons, in workspace order
-    pub layout: String,           // default layout: one of LAYOUTS
+    pub layout: String,            // default layout: one of LAYOUTS
     pub monitor_layouts: Vec<String>, // per monitor (1st entry = monitor 1); "" = `layout`
+    pub workspace_layouts: Vec<String>, // per workspace number; "" = its monitor's layout
+    pub monitor_outer_gaps: Vec<String>, // per monitor, gap_entry form; "" = `outer_gap`
     pub scroll_default_width: f32, // scrolling: new column width, fraction of the view
     pub scroll_width_presets: Vec<f32>, // scrolling: column widths Alt+R cycles
     pub scroll_height_presets: Vec<f32>, // scrolling: tile heights Alt+Shift+R cycles
-    pub scroll_center: String,    // scrolling viewport: never | always | on-overflow
-    pub tab_bar_height: i32,      // tabbed-column tab bar, logical px
-    pub terminal: String,         // command launched by Alt+Enter
-    pub browser: String,          // Alt+Shift+Enter; empty = default browser
-    pub unfocused_opacity: f32,   // 0.0-1.0 alpha for unfocused windows (1.0 = off)
-    pub border_enabled: bool,     // draw coloured DWM borders (Windows 11)
-    pub focused_border: u32,      // COLORREF for the focused window border
-    pub unfocused_border: u32,    // COLORREF for unfocused window borders
+    pub scroll_center: String,     // scrolling viewport: never | always | on-overflow
+    pub scroll_peek: i32,          // scrolling: sliver of the next column per edge, logical px
+    pub scroll_move: String,       // scrolling: what move-column moves: column | stack
+    pub tab_bar_height: i32,       // tabbed-column tab bar, logical px
+    pub terminal: String,          // command launched by Alt+Enter
+    pub browser: String,           // Alt+Shift+Enter; empty = default browser
+    pub unfocused_opacity: f32,    // 0.0-1.0 alpha for unfocused windows (1.0 = off)
+    pub border_enabled: bool,      // draw coloured DWM borders (Windows 11)
+    pub focused_border: u32,       // COLORREF for the focused window border
+    pub unfocused_border: u32,     // COLORREF for unfocused window borders
     pub cursor_follows_focus: bool, // warp the mouse to the focused window
     pub focus_follows_mouse: bool, // hovering a window focuses it (focus follows mouse)
-    pub animations: bool,         // animate tiling moves + workspace slides
-    pub animation_ms: i32,        // animation duration in ms (0 disables; clamp 0..2000)
-    pub workspace_slide: bool,    // back-compat: false forces workspace_anim = off
-    pub workspace_anim: String,   // workspace-switch style: off | slide | spring | fade
-    pub window_anim: String,      // window move/open/close/resize: off | glide | spring
-    pub animation_easing: String, // cubic | smooth | spring
+    pub animations: bool,          // animate tiling moves + workspace slides
+    pub animation_ms: i32,         // animation duration in ms (0 disables; clamp 0..2000)
+    pub workspace_slide: bool,     // back-compat: false forces workspace_anim = off
+    pub workspace_anim: String,    // workspace-switch style: off | slide | fade
+    pub window_anim: String,       // window move/open/close/resize: off | glide
     pub popup_font_name: String,
     pub popup_font_size: i32,
     pub popup_font_weight: i32,
@@ -145,6 +151,10 @@ pub struct Config {
     /// hatch should some app misplace under posted placement.
     pub async_window_pos: bool,
     pub persist_state: bool,
+    /// Where the Astur folder lives (#26): `appdata` (%APPDATA%\Astur) or
+    /// `home` (%USERPROFILE%\.astur). The WM moves the folder there at
+    /// startup (`folder_move`); nothing applies it live.
+    pub config_folder: String,
     /// Diagnostics verbosity: off | error | info | debug. Astur ships without a
     /// console, so this file log is the only way a user can report what broke.
     pub log_level: String,
@@ -210,16 +220,17 @@ pub struct Config {
     pub key_center_column: u32,  // Alt+<key> scrolling: centre focused column (default C)
     pub key_consume_left: u32,   // Alt+<key> scrolling: consume/expel left (default [)
     pub key_consume_right: u32,  // Alt+<key> scrolling: consume/expel right (default ])
-    pub theme: String,           // popup palette: dark | light | auto (follows Windows)
-    pub acrylic: bool,           // experimental acrylic blur behind the popups
-    pub bar_floating: bool,      // detached rounded bar (margins from the screen edges)
-    pub bar_margin: i32,         // gap between a floating bar and the screen edges (px)
-    pub bar_radius: i32,         // floating-bar corner radius (px)
-    pub bar_autohide: bool,      // slide the bar away; reveal on screen-edge hover
-    pub bar_wheel_ws: bool,      // mouse wheel over the bar cycles workspaces
-    pub bar_show_net: bool,      // show network up/down speed
-    pub bar_show_volume: bool,   // show volume % (wheel adjusts, click mutes)
-    pub bar_show_apps: bool,     // show app buttons for the active workspace's windows
+    pub key_cycle_layout: u32, // Alt+<key> next layout of this workspace, +Shift previous (default Y)
+    pub theme: String,         // popup palette: dark | light | auto (follows Windows)
+    pub acrylic: bool,         // experimental acrylic blur behind the popups
+    pub bar_floating: bool,    // detached rounded bar (margins from the screen edges)
+    pub bar_margin: i32,       // gap between a floating bar and the screen edges (px)
+    pub bar_radius: i32,       // floating-bar corner radius (px)
+    pub bar_autohide: bool,    // slide the bar away; reveal on screen-edge hover
+    pub bar_wheel_ws: bool,    // mouse wheel over the bar cycles workspaces
+    pub bar_show_net: bool,    // show network up/down speed
+    pub bar_show_volume: bool, // show volume % (wheel adjusts, click mutes)
+    pub bar_show_apps: bool,   // show app buttons for the active workspace's windows
     pub bar_show_media: bool,
     pub bar_left: Vec<String>, // widget names, left zone (drawn left-to-right)
     pub bar_center: Vec<String>, // widget names, centered in the remaining gap
@@ -328,6 +339,7 @@ pub const BAR_ACTIONS: &[(&str, &str)] = &[
     ("workspace_next", "Next workspace"),
     ("workspace_prev", "Previous workspace"),
     ("next_layout", "Next layout"),
+    ("previous_layout", "Previous layout"),
     ("switch_workspace", "Go to workspace\u{2026}"),
     ("launch", "Open an app or command\u{2026}"),
 ];
@@ -574,10 +586,42 @@ pub const LAYOUTS: &[&str] = &[
     "dwindle",
     "master",
     "columns",
+    "rows",
     "grid",
     "monocle",
     "scrolling",
+    "scrolling_vertical",
+    "mosaic",
+    "floating",
 ];
+
+/// A layout that tiles on a scrolling strip: `scrolling` (columns, along x)
+/// or `scrolling_vertical` (rows, along y; plan/scrolling.md "Vertical").
+pub fn is_strip(layout: &str) -> bool {
+    matches!(layout, "scrolling" | "scrolling_vertical")
+}
+
+/// The strip layout whose strip runs top to bottom.
+pub fn strip_vertical(layout: &str) -> bool {
+    layout == "scrolling_vertical"
+}
+
+/// What the `layout` action's argument `arg` switches a workspace on `cur`
+/// to (#28): a name from LAYOUTS, or `next` / `previous`, which step through
+/// LAYOUTS in order and wrap both ways (from an unknown `cur`: the first).
+/// None for anything else, so it is the one check of that argument for the
+/// IPC, extra hotkeys and Settings.
+pub fn layout_step(cur: &str, arg: &str) -> Option<&'static str> {
+    let d = match arg {
+        "next" => 1,
+        "previous" => LAYOUTS.len() - 1,
+        _ => return LAYOUTS.iter().find(|l| **l == arg).copied(),
+    };
+    Some(match LAYOUTS.iter().position(|l| *l == cur) {
+        Some(i) => LAYOUTS[(i + d) % LAYOUTS.len()],
+        None => LAYOUTS[0],
+    })
+}
 
 /// Most workspaces `workspaces =` accepts (#18). The settings slider uses it
 /// too, so the GUI can reach every value the parser accepts (a value dragged
@@ -1135,6 +1179,7 @@ impl Config {
             per_monitor: false,
             start_tiled: true,
             outer_gap: 8,
+            outer_gap_extra: [0; 4],
             inner_gap: 8,
             master_ratio: 0.55,
             workspaces: 10,
@@ -1149,10 +1194,14 @@ impl Config {
             workspace_icons: Vec::new(),
             layout: "dwindle".to_string(),
             monitor_layouts: Vec::new(),
+            workspace_layouts: Vec::new(),
+            monitor_outer_gaps: Vec::new(),
             scroll_default_width: 0.5,
             scroll_width_presets: SCROLL_WIDTHS.to_vec(),
             scroll_height_presets: SCROLL_HEIGHTS.to_vec(),
             scroll_center: "never".to_string(),
+            scroll_peek: 32,
+            scroll_move: "column".to_string(),
             tab_bar_height: 26,
             terminal: "wt.exe".to_string(),
             browser: String::new(),
@@ -1167,7 +1216,6 @@ impl Config {
             workspace_slide: true,
             workspace_anim: "slide".to_string(),
             window_anim: "glide".to_string(),
-            animation_easing: "cubic".to_string(),
             popup_font_name: "Segoe UI".to_string(),
             popup_font_size: 18,
             popup_font_weight: 400,
@@ -1241,6 +1289,7 @@ impl Config {
             foreground_lock_disable: true,
             async_window_pos: true,
             persist_state: true,
+            config_folder: "appdata".to_string(),
             log_level: "error".to_string(),
             unknown_keys: Vec::new(),
             extra_hotkeys: vec![HotkeyDef {
@@ -1300,6 +1349,7 @@ impl Config {
             key_center_column: 0x43,  // C
             key_consume_left: 0xDB,   // [ (VK_OEM_4)
             key_consume_right: 0xDD,  // ] (VK_OEM_6)
+            key_cycle_layout: 0x59,   // Y
             main_key: MainKey::LAlt,
             theme: "dark".to_string(),
             acrylic: false,
@@ -1409,6 +1459,32 @@ impl Config {
         }
     }
 
+    /// The layout workspace `ws` (0-based workspace number) on monitor
+    /// `monitor` gets from the file (#28): its `workspace_layouts` entry when
+    /// set, else the monitor's (layout_for_monitor). A runtime switch beats
+    /// both; the WM holds that.
+    pub fn layout_for_workspace(&self, ws: usize, monitor: usize) -> &str {
+        match self.workspace_layouts.get(ws) {
+            Some(l) if !l.is_empty() => l,
+            _ => self.layout_for_monitor(monitor),
+        }
+    }
+
+    /// `outer_gap` per edge: top, right, bottom, left, each 0..=500 as
+    /// `parse_gaps` (a Settings draft can raise the base past an edge's room).
+    pub fn outer_gaps(&self) -> [i32; 4] {
+        self.outer_gap_extra
+            .map(|e| (self.outer_gap + e).clamp(0, 500))
+    }
+
+    /// Monitor `index`'s outer gaps (0-based, as layout_for_monitor): its
+    /// `monitor_outer_gaps` entry when set, else `outer_gap`.
+    pub fn outer_gaps_for_monitor(&self, index: usize) -> [i32; 4] {
+        (self.monitor_outer_gaps.get(index))
+            .and_then(|g| parse_gaps(g))
+            .unwrap_or_else(|| self.outer_gaps())
+    }
+
     /// What clicking `widget` with `button` (0 left, 1 right, 2 middle)
     /// does, as (action, argument): its `_click` line, else the
     /// BAR_CLICK_DEFAULTS entry, else ("none", ""). No allocation: the bar
@@ -1447,7 +1523,8 @@ const DEFAULT_CONFIG: &str = "\
 # ============================================================================
 # Astur configuration  (window manager)
 # ============================================================================
-# Location : %USERPROFILE%\\.astur\\astur.conf
+# Location : %APPDATA%\\Astur\\astur.conf, or %USERPROFILE%\\.astur\\astur.conf
+#            with config_folder = home (see there)
 #            (override with the ASTUR_CONFIG environment variable)
 # The status bar is configured separately in navbar.conf (same folder).
 # Apply    : save this file; Astur hot-reloads it about 0.1 s after the save,
@@ -1533,11 +1610,22 @@ start_tiled = true
 #             bottom corner (spiral default).
 #   master  = one large master column on the left, the rest stacked on the right.
 #   columns = equal-width columns
+#   rows    = equal-height full-width rows, top to bottom (portrait monitors)
 #   grid    = balanced rows and columns
 #   monocle = every tiled window fills work area; focused window sits on top
 #   scrolling = Niri-style: windows sit in columns on an endless horizontal
 #             strip; columns past the screen edge are a scroll away.
-# values: dwindle | master | columns | grid | monocle | scrolling
+#   scrolling_vertical = the same strip turned: full-width rows from top to
+#             bottom, Alt+Up / Alt+Down scroll it, a row's windows side by
+#             side. With scroll_center = always the focused row is kept
+#             in the middle, like a slot machine (the first and last rows
+#             stop at the edges).
+#   mosaic  = every window keeps its own size, in centred rows; they all
+#             shrink together only when they don't fit (grid below half size).
+#             Alt + right-drag and Alt+H / Alt+L change a window's size.
+#   floating = Astur places nothing: windows stay where you put them.
+# values: dwindle | master | columns | rows | grid | monocle | scrolling |
+#         scrolling_vertical | mosaic | floating
 layout = dwindle
 
 # Per-monitor layout, by monitor number (1 = leftmost, as in window_rules).
@@ -1545,12 +1633,22 @@ layout = dwindle
 # master on monitor 3:  monitor_layouts = scrolling, , master
 monitor_layouts =
 
+# Per-workspace layout, by workspace number. Empty or 'default' = the
+# monitor's layout (monitor_layouts, else layout). Example: workspace 2
+# scrolling, workspace 3 grid:  workspace_layouts = , scrolling, grid
+# Alt+Y / Alt+Shift+Y (key_cycle_layout) and a layout hotkey (extra_hotkeys
+# action layout: a name, next or previous) change only the workspace you are
+# on, until the next config reload.
+workspace_layouts =
+
 # Fraction of the width given to the master window (master layout, and the
 # master split that Alt+H / Alt+L adjust).  float 0.10 - 0.90
 master_ratio = 0.55
 
 # Scrolling layout: width of a new column, as a fraction of the screen
-# (0.5 = two columns side by side).  float 0.10 - 1.00
+# (0.5 = two columns side by side). On scrolling_vertical every width below
+# is the size along the strip, so a row's height, and every height a
+# window's share of its row's width.  float 0.10 - 1.00
 scroll_default_width = 0.5
 # Column widths Alt+R cycles through, smallest to largest.  floats 0.10 - 1.00
 scroll_width_presets = 0.333, 0.5, 0.667, 1.0
@@ -1561,8 +1659,28 @@ scroll_height_presets = 0.333, 0.5, 0.667
 #   never       = scrolls only as far as needed to show it fully
 #   always      = keeps the focused column centred
 #   on-overflow = stays put if the column fits, otherwise centres it
+# Columns that all fit on screen sit centred whatever this says (rows on
+# scrolling_vertical sit at the top).
 # values: never | always | on-overflow
 scroll_center = never
+# How far the next column peeks in past a screen edge, in pixels (scaled
+# with the display; the top and bottom edge on scrolling_vertical), only
+# while there is a column that way: a strip end sits at the outer gap, and
+# columns that fit fill the screen. Click a sliver to bring its column in.
+# Widths of a strip that does not fit are shares of the screen less two
+# slivers.  0 = columns edge to edge, no sliver (an outer_gap wider than
+# inner_gap still shows the difference of the next column).  int 0 - 200
+scroll_peek = 32
+# What Alt+Shift+Left / Right (Up / Down on scrolling_vertical) move along
+# the strip, and Alt+Shift+J / K, Shift+wheel and the move_column IPC
+# commands with them:
+#   column = the whole column swaps places with the next one
+#   stack  = only the window: it stacks into the next column (above, below
+#            or beside its windows), the next press takes it into a column
+#            of its own past it, and so on.  Its own column width does not
+#            travel with it: a new column starts at scroll_default_width
+# values: column | stack
+scroll_move = column
 # Height of the tab bar on a tabbed column (Alt+Shift+T).  int 16 - 64
 tab_bar_height = 26
 
@@ -1570,8 +1688,16 @@ tab_bar_height = 26
 # Gaps
 # ---------------------------------------------------------------------------
 
-# Gap in pixels between windows and the screen edge.  int (>= 0)
+# Gap in pixels between windows and the screen edge.  int 0 - 500
+# One value for every edge, or four for top, right, bottom, left (as in CSS),
+# e.g. room for an auto-hide taskbar at the bottom:  outer_gap = 8, 8, 60, 8
 outer_gap = 8
+# Per-monitor outer gap, by monitor number (1 = leftmost, as in
+# monitor_layouts). Empty or 'default' = outer_gap above. Commas split the
+# monitors, so give one monitor's four values with spaces. Example: monitor 1
+# gets 48 at the bottom, monitor 2 the default:
+#   monitor_outer_gaps = 16 16 48 16, default
+monitor_outer_gaps =
 # Gap in pixels between adjacent windows.  int (>= 0)
 inner_gap = 8
 
@@ -1599,7 +1725,9 @@ focus_follows_mouse = false
 # Enable animations.  bool
 animations = true
 # Animation duration in milliseconds. Lower = snappier, higher = smoother.
-# 0 disables (same as animations = false). Up to 250, clicks and the wheel
+# 0 disables (same as animations = false). The workspace slide and the
+# glide on a scrolling strip last at least 200; fade and other glides take
+# the value as is. Up to 250, clicks and the wheel
 # pass through a running animation to the windows (already in their final
 # place underneath); above 250 the animation blocks mouse input until it ends.
 # int 0-2000
@@ -1607,8 +1735,8 @@ animation_ms = 140
 # Workspace-switch animation style:
 #   off    - instant switch, no overlay
 #   slide  - old slides off one edge, new slides in from the other (default)
-#   spring - slide that overshoots the target then settles back (Hyprland-like)
 #   fade   - old fades out, new fades in, both in place
+# (spring, the old overshooting slide, is retired and reads as slide.)
 # string
 workspace_anim = slide
 # Back-compat toggle. false forces workspace_anim = off; true leaves it as set.
@@ -1618,15 +1746,15 @@ workspace_slide = true
 #   off   - instant placement
 #   glide - windows glide to their new slots, moving and resizing together
 #           (the live window image is scaled in between, 1:1 at both ends).
-#           New layouts or keyboard/mouse input cancel obsolete glides.
+#           An Astur key pressed mid-glide re-aims it at the speed it is
+#           moving; other keys and clicks end it at once.
 #           Composited on a brief overlay (real windows are placed instantly
 #           underneath). Drawn over a
 #           cached copy of the wallpaper: for about 1.5 s after it changes (or a
-#           reload that re-tiles or changes animation settings), and without
-#           Explorer, placement is instant.  string
+#           reload that moves the work area or turns animation on), and without
+#           Explorer, placement is instant. (spring = the same as glide.)
+#           string
 window_anim = glide
-# Motion curve used by popup/placement transitions. values: cubic | smooth | spring
-animation_easing = cubic
 
 # ---------------------------------------------------------------------------
 # Appearance: theme, window borders & dimming
@@ -1765,7 +1893,19 @@ wallpaper_dir =
 workspace_wallpapers =
 media_enabled = false
 persist_state = true
-# Diagnostics log at %USERPROFILE%\\.astur\\astur.log (rotates at 1 MB).
+# Where Astur keeps its folder: this file, navbar.conf, the log, state and
+# the default wallpaper folder.
+#   appdata = %APPDATA%\\Astur (default)
+#   home    = %USERPROFILE%\\.astur (where Astur kept it before 2.5.0)
+# Astur moves the whole folder there the next time it starts, unless a
+# folder is already there (it never merges two: rename or delete that one
+# first). Wallpaper paths inside the old folder follow the move; other paths
+# you typed into it (launcher entries, commands) do not. Astur Lite and
+# builds before 2.5.0 read only %USERPROFILE%\\.astur: set home and restart
+# Astur before switching to one.
+config_folder = appdata
+# Diagnostics log: astur.log in Astur's folder (see Location at the top;
+# rotates at 1 MB).
 #   off   = write nothing
 #   error = failures only (default)
 #   info  = + startup environment, monitors/DPI, hook re-arms, config reloads
@@ -1811,6 +1951,8 @@ async_window_pos = true
 # SHIFT, ALT, WIN and one key name. It needs MOD, ALT or WIN. With
 # main_key = lalt, ALT is Left Alt, the same as MOD.
 # Escape literal field separators with a leading backslash.
+# Next / previous workspace on the focused monitor: workspace_next and
+# workspace_prev, e.g. MOD+CTRL+RIGHT|workspace_next| ;; MOD+CTRL+LEFT|workspace_prev|
 extra_hotkeys = ALT+GRAVE|scratchpad|
 
 # ============================================================================
@@ -1838,7 +1980,9 @@ main_key = lalt
 #   Alt+Shift+arrows     move window by direction (across monitors)
 #   Alt+M                promote focused window to master
 #   Alt+H / Alt+L        master layout: shrink / grow the master column;
-#                        dwindle layout: shrink / grow the focused window's split
+#                        dwindle layout: shrink / grow the focused window's split;
+#                        mosaic: the focused window 10% smaller / bigger
+#   Alt+Y / Alt+Shift+Y  next / previous layout of this workspace
 #   Alt+F                toggle floating for the focused window
 #   Alt+W                close the focused window
 #   Alt+Enter            launch terminal
@@ -1865,14 +2009,20 @@ main_key = lalt
 #   Alt+Shift+T          toggle the column between stacked and tabbed
 #   Alt+Home / End       focus first / last column (+Shift: move column there)
 #   Alt+wheel            focus column, wheel down = right (+Shift: move column);
-#                        acts on the monitor under the cursor
-#   Alt+touchpad swipe   focus column left / right, one per swipe (also
-#                        horizontal wheel)
+#                        acts on the monitor under the cursor, which stays put
+#                        (unless focus_follows_mouse is on)
+#   Alt+touchpad swipe   focus column left / right, a longer swipe goes further
+#                        (also horizontal wheel)
 #   Alt + left-drag      drop on a window's left / right quarter = new column
-#                        beside it, middle = stack into its column
+#                        beside it, middle = stack into its column, the gap
+#                        between two columns = between them
 #   Alt + right-drag     side edge = column width, top/bottom = window height
+# On scrolling_vertical a column is a full-width row and the axes swap:
+#   Alt+Up / Down = row above / below, Alt+Left / Right = inside the row,
+#   right-drag bottom edge = row height, side edge = share of the row
+#   (README, Vertical scrolling).
 #
-# The letter keys above (J K H L M T F W, and R C [ ] for scrolling) are
+# The letter keys above (J K H L M T F W Y, and R C [ ] for scrolling) are
 # rebindable. Each takes a single key name (see the 'keys' type at the top of
 # this file). Arrows, Home, End and Enter are fixed.  key
 key_focus_next = J
@@ -1887,6 +2037,9 @@ key_cycle_width = R
 key_center_column = C
 key_consume_left = [
 key_consume_right = ]
+# Alt+Y / Alt+Shift+Y: this workspace's next / previous layout. Bound after
+# the workspace keys, so a workspace key or extra hotkey on Y keeps it.
+key_cycle_layout = Y
 # ============================================================================
 ";
 
@@ -1894,7 +2047,8 @@ const DEFAULT_NAVBAR: &str = "\
 # ============================================================================
 # Astur navbar configuration  (status bar)
 # ============================================================================
-# Location : %USERPROFILE%\\.astur\\navbar.conf
+# Location : %APPDATA%\\Astur\\navbar.conf, or %USERPROFILE%\\.astur\\navbar.conf
+#            with config_folder = home in astur.conf
 #            (override with the ASTUR_NAVBAR environment variable)
 # Window-manager settings live separately in astur.conf (same folder).
 # Apply    : save this file; Astur hot-reloads it about 0.1 s after the save.
@@ -2063,7 +2217,7 @@ workspace_apps = false
 #   language_settings next_input storage_settings display_settings
 #   windows_settings astur_settings task_manager open_drive
 #   media_play_pause media_next media_prev launcher system_menu
-#   workspace_next workspace_prev next_layout
+#   workspace_next workspace_prev next_layout previous_layout
 #   switch_workspace N        (go to workspace N)
 #   launch COMMAND            (as extra_hotkeys' launch)
 # Without a line, a click does this (left / right; middle does nothing):
@@ -2568,6 +2722,38 @@ fn parse_fractions(v: &str, lo: f32, hi: f32, default: &[f32]) -> Vec<f32> {
     }
 }
 
+/// An outer gap: one number for every edge, or four for top, right, bottom,
+/// left (CSS order) split by commas and/or spaces, each clamped to 0..=500.
+/// None for anything else, so the caller keeps what it had.
+pub fn parse_gaps(v: &str) -> Option<[i32; 4]> {
+    let n: Vec<i32> = (v.split([',', ' ', '\t']).filter(|t| !t.is_empty()))
+        .map(|t| t.parse::<i32>().map(|n| n.clamp(0, 500)))
+        .collect::<Result<_, _>>()
+        .ok()?;
+    match n[..] {
+        [a] => Some([a; 4]),
+        [t, r, b, l] => Some([t, r, b, l]),
+        _ => None,
+    }
+}
+
+/// Gaps `g` as conf text: one number when every edge matches, else all four
+/// joined by `sep` (", " for outer_gap; " " in a monitor_outer_gaps entry,
+/// whose commas split monitors).
+pub fn gaps_text(g: [i32; 4], sep: &str) -> String {
+    if g.iter().all(|&e| e == g[0]) {
+        g[0].to_string()
+    } else {
+        g.map(|e| e.to_string()).join(sep)
+    }
+}
+
+/// One monitor_outer_gaps entry, canonical: "" (inherit outer_gap) for
+/// empty, `default` or anything parse_gaps refuses.
+pub fn gap_entry(v: &str) -> String {
+    parse_gaps(v).map_or_else(String::new, |g| gaps_text(g, " "))
+}
+
 /// Parse a space/comma-separated list of key names into VK codes.
 fn parse_keys(v: &str) -> Vec<u32> {
     v.split([',', ' ', '\t'])
@@ -2634,17 +2820,108 @@ fn parse_color(v: &str, fallback: u32) -> u32 {
     fallback
 }
 
-/// Resolve a config file path: env override, else %USERPROFILE%\.astur\<name>.
-pub fn config_path(env: &str, name: &str) -> std::path::PathBuf {
-    if let Ok(p) = std::env::var(env) {
-        return std::path::PathBuf::from(p);
+/// Resolve a config file path: the `env` override, else <Astur folder>\<name>.
+/// The Astur folder is %APPDATA%\Astur when it exists, else %USERPROFILE%\.astur
+/// when that exists (`config_folder = home`, or a pre-2.5.0 install the WM
+/// has not moved yet), else %APPDATA%\Astur. The new folder wins so a .astur
+/// made later (Astur Lite, an older build) cannot take over.
+pub fn config_path(env: &str, name: &str) -> PathBuf {
+    resolve_path(env, name, |k| std::env::var(k).ok(), |p| p.is_dir())
+}
+
+fn resolve_path(
+    env: &str,
+    name: &str,
+    var: impl Fn(&str) -> Option<String>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> PathBuf {
+    match var(env) {
+        Some(p) => p.into(),
+        None => astur_folders("", &var, &is_dir).0.join(name),
     }
-    let mut dir = std::env::var("USERPROFILE")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("."));
-    dir.push(".astur");
-    dir.push(name);
-    dir
+}
+
+/// (the Astur folder in use, the one `config_folder = choice` names): home
+/// = %USERPROFILE%\.astur, else %APPDATA%\Astur (.astur without %APPDATA%).
+fn astur_folders(
+    choice: &str,
+    var: impl Fn(&str) -> Option<String>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> (PathBuf, PathBuf) {
+    let home = PathBuf::from(var("USERPROFILE").unwrap_or_else(|| ".".into())).join(".astur");
+    let appdata = var("APPDATA").map(|a| PathBuf::from(a).join("Astur"));
+    let in_use = match &appdata {
+        Some(new) if is_dir(new) || !is_dir(&home) => new.clone(),
+        _ => home.clone(),
+    };
+    let chosen = match appdata {
+        Some(new) if choice != "home" => new,
+        _ => home,
+    };
+    (in_use, chosen)
+}
+
+/// `astur_folders` for this process: what Settings shows.
+pub fn config_folders(choice: &str) -> (PathBuf, PathBuf) {
+    astur_folders(choice, |k| std::env::var(k).ok(), |p| p.is_dir())
+}
+
+/// The move the WM makes at startup (#26): Some((from, to)) when the folder
+/// in use is not the one `choice` names and that one does not exist yet.
+/// None when it is already there or the target exists: never merge two.
+pub fn folder_move(choice: &str) -> Option<(PathBuf, PathBuf)> {
+    plan_move(config_folders(choice), |p| p.is_dir())
+}
+
+fn plan_move(
+    (from, to): (PathBuf, PathBuf),
+    is_dir: impl Fn(&Path) -> bool,
+) -> Option<(PathBuf, PathBuf)> {
+    (from != to && is_dir(&from) && !is_dir(&to)).then_some((from, to))
+}
+
+/// The override (any `config_path` env: ASTUR_CONFIG, ASTUR_NAVBAR, ...)
+/// that points inside `from`: moving that folder would strand the file it
+/// names (and its writer would recreate the folder), so the WM does not.
+/// Case-insensitive, as Windows paths are; `..` and relative paths (the
+/// override, or `.\.astur` without USERPROFILE) are made absolute first
+/// (std, lexical).
+// ponytail: 8.3 short names and \\?\ verbatim overrides are not matched;
+// canonicalising would need the file to exist.
+pub fn pinned_by(from: &Path, var: impl Fn(&str) -> Option<String>) -> Option<&'static str> {
+    let from = std::path::absolute(from).unwrap_or_else(|_| from.to_path_buf());
+    let from = from.to_string_lossy().to_lowercase();
+    [
+        "ASTUR_CONFIG",
+        "ASTUR_NAVBAR",
+        "ASTUR_RESCUE",
+        "ASTUR_STATE",
+        "ASTUR_MRU",
+        "ASTUR_LOG",
+        "ASTUR_WALLPAPERS",
+        "ASTUR_CHECK",
+    ]
+    .into_iter()
+    .find(|k| {
+        var(k).is_some_and(|v| {
+            let v = std::path::absolute(&v).unwrap_or(v.into());
+            Path::new(&v.to_string_lossy().to_lowercase()).starts_with(&from)
+        })
+    })
+}
+
+/// `path` re-based from the Astur folder not in use (`other`) onto `dir`,
+/// the one in use: a wallpaper picked inside the folder before a move
+/// follows it. None when it is not inside `other`. Case-insensitive, as
+/// Windows paths are (pinned_by's rule); the rest keeps its own case.
+fn moved_path(path: &str, other: &Path, dir: &Path) -> Option<String> {
+    let low = |p: &Path| PathBuf::from(p.to_string_lossy().to_lowercase());
+    let p = Path::new(path);
+    if !low(p).starts_with(low(other)) {
+        return None;
+    }
+    let rest: PathBuf = p.components().skip(other.components().count()).collect();
+    Some(dir.join(rest).to_string_lossy().into_owned())
 }
 
 /// A config file that exists (or may exist) but could not be read. The file
@@ -2706,6 +2983,21 @@ pub fn load_config() -> Result<Config, ConfigReadError> {
         &read_or_create(&nav, DEFAULT_NAVBAR)?,
         "navbar.conf",
     );
+    // Wallpapers picked inside the folder before a move (#26) follow it,
+    // unless they are still where the file says.
+    let (dir, home) = config_folders("home");
+    let other = if dir == home {
+        config_folders("").1
+    } else {
+        home
+    };
+    for p in std::iter::once(&mut c.wallpaper_dir).chain(&mut c.workspace_wallpapers) {
+        if !Path::new(p.as_str()).exists() {
+            if let Some(m) = moved_path(p, &other, &dir) {
+                *p = m;
+            }
+        }
+    }
     Ok(c)
 }
 
@@ -2745,8 +3037,12 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "workspace_mode" => c.per_monitor = v.eq_ignore_ascii_case("per_monitor"),
             "start_tiled" => c.start_tiled = parse_bool(v),
             "outer_gap" => {
-                if let Ok(n) = v.parse::<i32>() {
-                    c.outer_gap = n.clamp(0, 500);
+                // outer_gap stays the uniform reading (the smallest edge);
+                // the rest rides on top per edge (outer_gaps()).
+                if let Some(g) = parse_gaps(v) {
+                    let base = g.into_iter().min().unwrap_or(0);
+                    c.outer_gap = base;
+                    c.outer_gap_extra = g.map(|e| e - base);
                 }
             }
             "inner_gap" => {
@@ -2779,10 +3075,10 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                     c.layout = m;
                 }
             }
-            "monitor_layouts" => {
+            "monitor_layouts" | "workspace_layouts" => {
                 // Positional: blanks must survive so "scrolling, , master"
                 // still means monitor 3. `default` and typos read as blank
-                // (inherit `layout`) rather than shifting later entries.
+                // (inherit) rather than shifting later entries.
                 let l: Vec<String> = v
                     .split(',')
                     .map(|s| {
@@ -2794,7 +3090,22 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                         }
                     })
                     .collect();
-                c.monitor_layouts = if l.iter().all(String::is_empty) {
+                let l = if l.iter().all(String::is_empty) {
+                    Vec::new()
+                } else {
+                    l
+                };
+                if k == "monitor_layouts" {
+                    c.monitor_layouts = l;
+                } else {
+                    c.workspace_layouts = l;
+                }
+            }
+            "monitor_outer_gaps" => {
+                // Positional like monitor_layouts, so an entry's four values
+                // are split by spaces: the commas split monitors.
+                let l: Vec<String> = v.split(',').map(gap_entry).collect();
+                c.monitor_outer_gaps = if l.iter().all(String::is_empty) {
                     Vec::new()
                 } else {
                     l
@@ -2821,6 +3132,15 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                     c.scroll_center = "on-overflow".to_string(); // underscore spelling
                 }
             }
+            "scroll_peek" => {
+                if let Ok(n) = v.parse::<i32>() {
+                    c.scroll_peek = n.clamp(0, 200);
+                }
+            }
+            "scroll_move" => {
+                let stack = v.trim().eq_ignore_ascii_case("stack");
+                c.scroll_move = if stack { "stack" } else { "column" }.to_string();
+            }
             "tab_bar_height" => {
                 if let Ok(n) = v.parse::<i32>() {
                     c.tab_bar_height = n.clamp(16, 64);
@@ -2846,23 +3166,26 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             }
             "workspace_slide" => c.workspace_slide = parse_bool(v),
             "workspace_anim" => {
-                let m = v.trim().to_ascii_lowercase();
-                if matches!(m.as_str(), "off" | "slide" | "spring" | "fade") {
-                    c.workspace_anim = m;
+                // `spring` (overshoot) was retired in 2.5.0: it reads as slide.
+                match v.trim().to_ascii_lowercase().as_str() {
+                    m @ ("off" | "slide" | "fade") => c.workspace_anim = m.to_string(),
+                    "spring" => c.workspace_anim = "slide".to_string(),
+                    _ => {}
                 }
             }
             "window_anim" => {
-                let m = v.trim().to_ascii_lowercase();
-                if matches!(m.as_str(), "off" | "glide" | "spring") {
-                    c.window_anim = m;
+                // `spring` never had a motion of its own (the WM glided only
+                // on `glide`, so Settings' Springy preset turned glides off):
+                // it reads as glide.
+                match v.trim().to_ascii_lowercase().as_str() {
+                    "off" => c.window_anim = "off".to_string(),
+                    "glide" | "spring" => c.window_anim = "glide".to_string(),
+                    _ => {}
                 }
             }
-            "animation_easing" => {
-                let m = v.trim().to_ascii_lowercase();
-                if matches!(m.as_str(), "cubic" | "smooth" | "spring") {
-                    c.animation_easing = m;
-                }
-            }
+            // Retired in 2.5.0 (nothing ever read it; Settings' "Motion
+            // curve"): accepted so old configs load without a warning.
+            "animation_easing" => {}
             "popup_font_name" => {
                 if !v.is_empty() {
                     c.popup_font_name = v.to_string()
@@ -3012,6 +3335,12 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
                 }
             }
             "persist_state" => c.persist_state = parse_bool(v),
+            "config_folder" => {
+                let m = v.to_ascii_lowercase();
+                if matches!(m.as_str(), "appdata" | "home") {
+                    c.config_folder = m
+                }
+            }
             "ipc_allow_launch" => c.ipc_allow_launch = parse_bool(v),
             "foreground_lock_disable" => c.foreground_lock_disable = parse_bool(v),
             "async_window_pos" => c.async_window_pos = parse_bool(v),
@@ -3072,6 +3401,11 @@ fn parse_into_from(c: &mut Config, text: &str, source: &str) {
             "key_center_column" => {
                 if let Some(k) = key_to_vk(v) {
                     c.key_center_column = k;
+                }
+            }
+            "key_cycle_layout" => {
+                if let Some(k) = key_to_vk(v) {
+                    c.key_cycle_layout = k;
                 }
             }
             "key_consume_left" => {
@@ -3432,6 +3766,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         per_monitor,
         start_tiled,
         outer_gap,
+        outer_gap_extra,
         inner_gap,
         master_ratio,
         workspaces,
@@ -3440,10 +3775,14 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         workspace_icons,
         layout,
         monitor_layouts,
+        workspace_layouts,
+        monitor_outer_gaps,
         scroll_default_width,
         scroll_width_presets,
         scroll_height_presets,
         scroll_center,
+        scroll_peek,
+        scroll_move,
         tab_bar_height,
         terminal,
         browser,
@@ -3458,7 +3797,6 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         workspace_slide,
         workspace_anim,
         window_anim,
-        animation_easing,
         popup_font_name,
         popup_font_size,
         popup_font_weight,
@@ -3518,6 +3856,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         foreground_lock_disable,
         async_window_pos,
         persist_state,
+        config_folder,
         log_level,
         unknown_keys,
         extra_hotkeys,
@@ -3573,6 +3912,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
         key_center_column,
         key_consume_left,
         key_consume_right,
+        key_cycle_layout,
         main_key,
         theme,
         acrylic,
@@ -3626,8 +3966,11 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     // Workspace model and tile geometry. The bar keys here feed reserve_bar
     // (the work area the tiles fill), so they re-tile as well as rebuild.
     diff!(wm: per_monitor, workspaces, outer_gap, inner_gap, master_ratio, layout);
-    diff!(wm: monitor_layouts, scroll_default_width, scroll_width_presets);
-    diff!(wm: scroll_height_presets, scroll_center, tab_bar_height);
+    diff!(wm: monitor_layouts, workspace_layouts, scroll_default_width);
+    diff!(wm: scroll_width_presets);
+    diff!(wm: outer_gap_extra, monitor_outer_gaps);
+    diff!(wm: scroll_height_presets, scroll_center, scroll_peek, tab_bar_height);
+    diff!(live: scroll_move);
     diff!(wm: bar_enabled, bar_height, bar_bottom, bar_floating, bar_margin, bar_autohide);
     // `shape` decides floating, which changes the reserved height; `monitors`
     // which screens reserve one at all.
@@ -3661,7 +4004,7 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     // Read where used: hooks and hotkeys (apply_hook_config), popups and the
     // launcher (UI_CFG / apply_theme), manager commands (mgr.cfg), workers.
     diff!(live: start_tiled, workspace_keys, terminal, browser, cursor_follows_focus);
-    diff!(live: focus_follows_mouse, animation_easing, theme, acrylic);
+    diff!(live: focus_follows_mouse, theme, acrylic);
     diff!(live: popup_font_name, popup_font_size, popup_font_weight, popup_radius);
     diff!(live: popup_border_width, popup_opacity, popup_bg, popup_fg, popup_muted);
     diff!(live: popup_accent, popup_accent_fg, popup_border);
@@ -3679,11 +4022,13 @@ pub fn reload_groups(old: &Config, new: &Config) -> ReloadGroups {
     diff!(live: ipc_allow_launch, foreground_lock_disable, async_window_pos);
     diff!(live: yasb_enabled, yasb_port);
     diff!(live: persist_state, log_level, unknown_keys, extra_hotkeys, window_rules);
+    // Read once, at startup (the folder move): nothing to re-apply.
+    diff!(live: config_folder);
     diff!(live: ignore_classes, float_classes, key_focus_next, key_focus_prev);
     diff!(live: key_shrink_master, key_grow_master, key_promote_master);
     diff!(live: key_toggle_tiling, key_toggle_float, key_close_window);
     diff!(live: key_cycle_width, key_center_column, key_consume_left, key_consume_right);
-    diff!(live: main_key);
+    diff!(live: key_cycle_layout, main_key);
     // Fail-safe: a difference none of the above caught (a field compared in
     // the wrong place, a PartialEq quirk) must still apply, so do it all.
     if g.is_empty() && old != new {
@@ -3881,6 +4226,8 @@ pub enum Action {
     MoveUp,
     MoveRight,
     MoveDown,
+    NextLayout,
+    PreviousLayout,
     SwitchWorkspace,
     MoveToWorkspace,
     Extra,
@@ -3889,7 +4236,7 @@ pub enum Action {
 impl Action {
     /// Every action in declaration order (`ALL[a as usize] == a`), which is
     /// how a table entry stores it.
-    pub const ALL: [Action; 37] = {
+    pub const ALL: [Action; 39] = {
         use Action::*;
         [
             Launcher,
@@ -3926,6 +4273,8 @@ impl Action {
             MoveUp,
             MoveRight,
             MoveDown,
+            NextLayout,
+            PreviousLayout,
             SwitchWorkspace,
             MoveToWorkspace,
             Extra,
@@ -3970,6 +4319,8 @@ impl Action {
             MoveUp => "Move the window up",
             MoveRight => "Move the window right",
             MoveDown => "Move the window down",
+            NextLayout => "Next layout",
+            PreviousLayout => "Previous layout",
             SwitchWorkspace => "Go to a workspace",
             MoveToWorkspace => "Move the window to a workspace",
             Extra => "Custom shortcut",
@@ -4332,6 +4683,7 @@ pub fn grow_master_key(c: &Config) -> u32 {
         c.key_center_column,
         c.key_consume_left,
         c.key_consume_right,
+        c.key_cycle_layout,
     ];
     let extra_on_o = c.extra_hotkeys.iter().any(|h| {
         (h.action != "scratchpad" || c.scratchpad_enabled)
@@ -4410,6 +4762,9 @@ pub fn compile_keys(c: &Config) -> Keymap {
         k.put_loose(c, m, vk, (SwitchWorkspace, i as u16), false);
         k.put_loose(c, m | MOD_SHIFT, vk, (MoveToWorkspace, i as u16), false);
     }
+    // After the workspace keys (new in 2.5.0): a workspace key the user
+    // already had on Y keeps it, and the clash is reported here.
+    k.put_builtin(c, c.key_cycle_layout, NextLayout, Some(PreviousLayout));
     k
 }
 
@@ -4598,6 +4953,22 @@ outer_gap = 4
     }
 
     #[test]
+    fn old_motion_keys_still_load() {
+        // The old Springy preset: its window_anim reads as glide, and the
+        // retired animation_easing is accepted without a warning.
+        // workspace_anim = spring (retired) reads as slide.
+        let c = parse_text(
+            "window_anim = Spring\nanimation_easing = smooth\nworkspace_anim = SPRING\n",
+        );
+        assert_eq!(c.window_anim, "glide");
+        assert_eq!(c.workspace_anim, "slide");
+        assert_eq!(parse_text("workspace_anim = Fade").workspace_anim, "fade");
+        assert!(c.unknown_keys.is_empty(), "{:?}", c.unknown_keys);
+        assert_eq!(parse_text("window_anim = off").window_anim, "off");
+        assert_eq!(parse_text("window_anim = wobble").window_anim, "glide");
+    }
+
+    #[test]
     fn workspaces_past_ten_are_accepted() {
         // #18: an 11th workspace on an extra key (GlazeWM-style 'G').
         let c = parse_text("workspaces = 11\nworkspace_keys = 1 2 3 4 5 6 7 8 9 0 G");
@@ -4635,18 +5006,37 @@ outer_gap = 4
     }
 
     #[test]
-    fn layouts_lists_all_six() {
+    fn layouts_lists_all_ten() {
         for name in [
             "dwindle",
             "master",
             "columns",
+            "rows",
             "grid",
             "monocle",
             "scrolling",
+            "scrolling_vertical",
+            "mosaic",
+            "floating",
         ] {
             assert!(LAYOUTS.contains(&name), "{name}");
         }
-        assert_eq!(LAYOUTS.len(), 6);
+        assert_eq!(LAYOUTS.len(), 10);
+        // next / previous: rows right after columns, vertical right after
+        // scrolling, mosaic and floating last, then wrap.
+        assert_eq!(layout_step("columns", "next"), Some("rows"));
+        assert_eq!(layout_step("rows", "next"), Some("grid"));
+        assert_eq!(layout_step("scrolling", "next"), Some("scrolling_vertical"));
+        assert_eq!(layout_step("scrolling_vertical", "next"), Some("mosaic"));
+        assert_eq!(layout_step("mosaic", "next"), Some("floating"));
+        assert_eq!(layout_step("floating", "next"), Some("dwindle"));
+        assert_eq!(layout_step("dwindle", "previous"), Some("floating"));
+        assert!(!is_strip("mosaic") && !is_strip("floating"));
+        let c = parse_text("workspace_layouts = , mosaic, floating");
+        assert_eq!(c.workspace_layouts, vec!["", "mosaic", "floating"]);
+        let strips: Vec<_> = LAYOUTS.iter().filter(|l| is_strip(l)).collect();
+        assert_eq!(strips, [&"scrolling", &"scrolling_vertical"]);
+        assert!(strip_vertical("scrolling_vertical") && !strip_vertical("scrolling"));
     }
 
     #[test]
@@ -4667,6 +5057,49 @@ outer_gap = 4
     }
 
     #[test]
+    fn outer_gaps_parse_per_edge_and_per_monitor() {
+        // One value: every edge, as before.
+        let c = parse_text("outer_gap = 12");
+        assert_eq!((c.outer_gap, c.outer_gaps()), (12, [12; 4]));
+        // Four (CSS order, commas and/or spaces): outer_gap is the smallest.
+        for v in ["8, 8, 60, 8", "8 8 60 8", "8,8 60  ,8"] {
+            let c = parse_text(&format!("outer_gap = {v}"));
+            assert_eq!((c.outer_gap, c.outer_gaps()), (8, [8, 8, 60, 8]), "{v}");
+        }
+        assert_eq!(
+            parse_text("outer_gap = 900, 0, -5, 3").outer_gaps(),
+            [500, 0, 0, 3]
+        );
+        // A Settings draft raising the base past an edge's room: still 500.
+        let c = Config {
+            outer_gap: 20,
+            outer_gap_extra: [0, 0, 500, 0],
+            ..Config::defaults()
+        };
+        assert_eq!(c.outer_gaps(), [20, 20, 500, 20]);
+        // Two or three values, or a non-number: the old value stays.
+        for v in ["8 60", "8, 8, 60", "8, 8, 60, 8, 8", "8px", ""] {
+            let c = parse_text(&format!("outer_gap = 20\nouter_gap = {v}"));
+            assert_eq!(c.outer_gaps(), [20; 4], "{v:?}");
+        }
+        assert_eq!(gaps_text([8, 8, 60, 8], ", "), "8, 8, 60, 8");
+        assert_eq!(gaps_text([5; 4], ", "), "5");
+        // Per monitor: positional, spaces inside an entry, blanks inherit.
+        let c = parse_text(
+            "outer_gap = 8, 8, 60, 8\nmonitor_outer_gaps = 16 16 48 16, default, 40, oops",
+        );
+        assert_eq!(c.monitor_outer_gaps, vec!["16 16 48 16", "", "40", ""]);
+        assert_eq!(c.outer_gaps_for_monitor(0), [16, 16, 48, 16]);
+        assert_eq!(c.outer_gaps_for_monitor(1), [8, 8, 60, 8]);
+        assert_eq!(c.outer_gaps_for_monitor(2), [40; 4]);
+        assert_eq!(c.outer_gaps_for_monitor(9), [8, 8, 60, 8]);
+        for v in ["", "default", " , "] {
+            let c = parse_text(&format!("monitor_outer_gaps = {v}"));
+            assert!(c.monitor_outer_gaps.is_empty(), "{v:?}");
+        }
+    }
+
+    #[test]
     fn layout_for_monitor_falls_back_to_layout() {
         let mut c = parse_text("layout = columns\nmonitor_layouts = scrolling, , master");
         assert_eq!(c.layout_for_monitor(0), "scrolling");
@@ -4678,6 +5111,40 @@ outer_gap = 4
         assert_eq!(c.layout_for_monitor(0), "columns");
     }
 
+    /// #28: workspace_layouts parses like monitor_layouts; a workspace's
+    /// entry beats its monitor's layout, a blank or missing one inherits it.
+    #[test]
+    fn workspace_layouts_beat_the_monitor_layout() {
+        let c = parse_text(
+            "layout = columns\nmonitor_layouts = master\nworkspace_layouts = , Scrolling, default, grid",
+        );
+        assert_eq!(c.workspace_layouts, vec!["", "scrolling", "", "grid"]);
+        assert_eq!(c.monitor_layouts, vec!["master"], "its own key");
+        assert_eq!(c.layout_for_workspace(1, 0), "scrolling");
+        assert_eq!(c.layout_for_workspace(3, 1), "grid");
+        assert_eq!(c.layout_for_workspace(0, 0), "master"); // blank: monitor 1
+        assert_eq!(c.layout_for_workspace(2, 1), "columns"); // blank: monitor 2
+        assert_eq!(c.layout_for_workspace(9, 0), "master"); // past the list
+        assert!(parse_text("workspace_layouts = , default")
+            .workspace_layouts
+            .is_empty());
+    }
+
+    /// The layout action's argument: a name, or next / previous in LAYOUTS
+    /// order, wrapping both ways.
+    #[test]
+    fn layout_step_cycles_both_ways() {
+        let (first, last) = (LAYOUTS[0], LAYOUTS[LAYOUTS.len() - 1]);
+        assert_eq!(layout_step(first, "next"), Some(LAYOUTS[1]));
+        assert_eq!(layout_step(last, "next"), Some(first));
+        assert_eq!(layout_step(first, "previous"), Some(last));
+        assert_eq!(layout_step(LAYOUTS[1], "previous"), Some(first));
+        assert_eq!(layout_step("bogus", "next"), Some(first));
+        assert_eq!(layout_step(first, "grid"), Some("grid"));
+        assert_eq!(layout_step(first, "nope"), None);
+        assert_eq!(layout_step(first, ""), None);
+    }
+
     #[test]
     fn scrolling_keys_parse_clamp_and_fall_back() {
         let d = Config::defaults();
@@ -4685,6 +5152,8 @@ outer_gap = 4
         assert_eq!(d.scroll_width_presets, vec![0.333, 0.5, 0.667, 1.0]);
         assert_eq!(d.scroll_height_presets, vec![0.333, 0.5, 0.667]);
         assert_eq!(d.scroll_center, "never");
+        assert_eq!(d.scroll_peek, 32);
+        assert_eq!(d.scroll_move, "column");
         assert_eq!(d.tab_bar_height, 26);
 
         let mut c = Config::defaults();
@@ -4722,6 +5191,17 @@ outer_gap = 4
         parse_into(&mut c, "scroll_center = never");
         assert_eq!(c.scroll_center, "never");
 
+        parse_into(&mut c, "scroll_peek = 0");
+        assert_eq!(c.scroll_peek, 0);
+        parse_into(&mut c, "scroll_peek = 900");
+        assert_eq!(c.scroll_peek, 200);
+        parse_into(&mut c, "scroll_peek = wide"); // invalid -> keeps previous
+        assert_eq!(c.scroll_peek, 200);
+        parse_into(&mut c, "scroll_move = STACK");
+        assert_eq!(c.scroll_move, "stack");
+        parse_into(&mut c, "scroll_move = sideways"); // invalid -> column
+        assert_eq!(c.scroll_move, "column");
+
         parse_into(&mut c, "tab_bar_height = 5");
         assert_eq!(c.tab_bar_height, 16);
         parse_into(&mut c, "tab_bar_height = 100");
@@ -4745,6 +5225,28 @@ outer_gap = 4
         assert_eq!(c.key_center_column, 0x71);
         assert_eq!(c.key_consume_left, 0xDD);
         assert_eq!(c.key_consume_right, 0xDD, "invalid name keeps the default");
+        assert_eq!(d.key_cycle_layout, 0x59); // Y
+        assert_eq!(parse_text("key_cycle_layout = q").key_cycle_layout, 0x51);
+        assert_eq!(parse_text("key_cycle_layout = ??").key_cycle_layout, 0x59);
+    }
+
+    /// Alt+Y / Alt+Shift+Y cycle the layout (#28), compiled after the
+    /// workspace keys, so a workspace key the user had on Y keeps it.
+    #[test]
+    fn cycle_layout_key_yields_to_the_workspace_keys() {
+        let c = default_config();
+        let m = keymap(&c);
+        assert_eq!(m[&(MOD_ALT, 0x59)], (Action::NextLayout, 0));
+        assert_eq!(m[&(MOD_ALT | MOD_SHIFT, 0x59)], (Action::PreviousLayout, 0));
+        assert!(compile_keys(&c).issues.is_empty());
+        let mut c = default_config();
+        c.workspace_keys = vec![0x59, 0x55, 0x49, 0x4F];
+        assert_eq!(keymap(&c)[&(MOD_ALT, 0x59)], (Action::SwitchWorkspace, 0));
+        let clash: Vec<_> = (compile_keys(&c).issues.into_iter())
+            .filter(|i| i.action == Action::NextLayout)
+            .map(|i| i.level)
+            .collect();
+        assert_eq!(clash, [Level::Warn]);
     }
 
     #[test]
@@ -4753,15 +5255,19 @@ outer_gap = 4
         let d = Config::defaults();
         assert_eq!(t.layout, d.layout);
         assert_eq!(t.monitor_layouts, d.monitor_layouts);
+        assert_eq!(t.workspace_layouts, d.workspace_layouts);
         assert_eq!(t.scroll_default_width, d.scroll_default_width);
         assert_eq!(t.scroll_width_presets, d.scroll_width_presets);
         assert_eq!(t.scroll_height_presets, d.scroll_height_presets);
         assert_eq!(t.scroll_center, d.scroll_center);
+        assert_eq!(t.scroll_peek, d.scroll_peek);
+        assert_eq!(t.scroll_move, d.scroll_move);
         assert_eq!(t.tab_bar_height, d.tab_bar_height);
         assert_eq!(t.key_cycle_width, d.key_cycle_width);
         assert_eq!(t.key_center_column, d.key_center_column);
         assert_eq!(t.key_consume_left, d.key_consume_left);
         assert_eq!(t.key_consume_right, d.key_consume_right);
+        assert_eq!(t.key_cycle_layout, d.key_cycle_layout);
     }
 
     #[test]
@@ -5161,6 +5667,8 @@ outer_gap = 4
             "islands",
             "win",
             "dot",
+            "home",
+            "stack",
         ];
         let base = parse_pair(DEFAULT_CONFIG, DEFAULT_NAVBAR);
         assert!(reload_groups(&base, &base).is_empty());
@@ -5421,12 +5929,14 @@ floating = true"
             wm: true,
             ..ReloadGroups::default()
         };
-        let edits: [fn(&mut Config); 6] = [
+        let edits: [fn(&mut Config); 8] = [
             |c| c.monitor_layouts = vec!["scrolling".into()],
+            |c| c.workspace_layouts = vec!["scrolling".into()],
             |c| c.scroll_default_width = 0.3,
             |c| c.scroll_width_presets = vec![0.5],
             |c| c.scroll_height_presets = vec![0.5],
             |c| c.scroll_center = "always".into(),
+            |c| c.scroll_peek = 0,
             |c| c.tab_bar_height = 30,
         ];
         for edit in edits {
@@ -5438,7 +5948,9 @@ floating = true"
             live: true,
             ..ReloadGroups::default()
         };
-        let keys: [fn(&mut Config); 4] = [
+        let keys: [fn(&mut Config); 6] = [
+            |c| c.scroll_move = "stack".into(),
+            |c| c.key_cycle_layout = 0x51,
             |c| c.key_cycle_width = 0x51,
             |c| c.key_center_column = 0x51,
             |c| c.key_consume_left = 0x51,
@@ -5458,6 +5970,121 @@ floating = true"
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn config_path_prefers_override_then_old_folder_then_appdata() {
+        use std::path::{Path, PathBuf};
+        let env = |k: &str| match k {
+            "USERPROFILE" => Some(r"C:\U".to_string()),
+            "APPDATA" => Some(r"C:\U\R".to_string()),
+            _ => None,
+        };
+        let path = |old: bool, new: bool| {
+            resolve_path("ASTUR_X", "a.conf", env, |p: &Path| {
+                (old && p == Path::new(r"C:\U\.astur")) || (new && p == Path::new(r"C:\U\R\Astur"))
+            })
+        };
+        assert_eq!(path(true, false), PathBuf::from(r"C:\U\.astur\a.conf"));
+        assert_eq!(path(false, false), PathBuf::from(r"C:\U\R\Astur\a.conf"));
+        // Both exist (a .astur made later by Lite or an older build): new wins.
+        assert_eq!(path(true, true), PathBuf::from(r"C:\U\R\Astur\a.conf"));
+        let over = |k: &str| {
+            (k == "ASTUR_X")
+                .then(|| r"D:\x.conf".to_string())
+                .or(env(k))
+        };
+        assert_eq!(
+            resolve_path("ASTUR_X", "a.conf", over, |_| true),
+            PathBuf::from(r"D:\x.conf")
+        );
+        // No %APPDATA%: the old folder, as before.
+        let bare = |k: &str| (k == "USERPROFILE").then(|| r"C:\U".to_string());
+        assert_eq!(
+            resolve_path("ASTUR_X", "a.conf", bare, |_| false),
+            PathBuf::from(r"C:\U\.astur\a.conf")
+        );
+    }
+
+    #[test]
+    fn the_folder_moves_only_to_a_target_that_does_not_exist() {
+        let env = |k: &str| match k {
+            "USERPROFILE" => Some(r"C:\U".to_string()),
+            "APPDATA" => Some(r"C:\U\R".to_string()),
+            _ => None,
+        };
+        let (old, new) = (
+            PathBuf::from(r"C:\U\.astur"),
+            PathBuf::from(r"C:\U\R\Astur"),
+        );
+        let plan = |choice: &str, has_old: bool, has_new: bool| {
+            let is_dir = |p: &Path| (has_old && p == old) || (has_new && p == new);
+            plan_move(astur_folders(choice, env, is_dir), is_dir)
+        };
+        // A pre-2.5.0 .astur moves to the default; back again with `home`.
+        assert_eq!(
+            plan("appdata", true, false),
+            Some((old.clone(), new.clone()))
+        );
+        assert_eq!(plan("home", false, true), Some((new.clone(), old.clone())));
+        // Already there, nothing there yet, or the target exists: no move.
+        assert_eq!(plan("appdata", false, true), None);
+        assert_eq!(plan("home", true, false), None);
+        assert_eq!(plan("home", false, false), None);
+        assert_eq!(plan("home", true, true), None);
+        // No %APPDATA%: .astur is the only folder there is.
+        let bare = |k: &str| (k == "USERPROFILE").then(|| r"C:\U".to_string());
+        assert_eq!(
+            astur_folders("appdata", bare, |_| true),
+            (old.clone(), old.clone())
+        );
+        // A wallpaper picked in the old folder follows the move.
+        assert_eq!(
+            moved_path(r"C:\U\.astur\wallpapers\a.jpg", &old, &new).as_deref(),
+            Some(r"C:\U\R\Astur\wallpapers\a.jpg")
+        );
+        assert_eq!(moved_path(r"D:\pics\a.jpg", &old, &new), None);
+        // Typed by hand in another case (review 3): still follows.
+        assert_eq!(
+            moved_path(r"c:\u\.ASTUR\Wallpapers\A.jpg", &old, &new).as_deref(),
+            Some(r"C:\U\R\Astur\Wallpapers\A.jpg")
+        );
+        assert_eq!(moved_path(r"C:\U\.asturx\a.jpg", &old, &new), None);
+    }
+
+    #[test]
+    fn an_override_inside_the_folder_pins_it() {
+        let at =
+            |path: &'static str| move |k: &str| (k == "ASTUR_CONFIG").then(|| path.to_string());
+        let old = Path::new(r"C:\U\.astur");
+        assert_eq!(
+            pinned_by(old, at(r"c:\u\.astur\astur.conf")),
+            Some("ASTUR_CONFIG")
+        );
+        assert_eq!(pinned_by(old, at(r"D:\x.conf")), None);
+        assert_eq!(pinned_by(old, at(r"C:\U\.asturx\a.conf")), None);
+        assert_eq!(
+            pinned_by(old, at(r"C:\U\x\..\.astur\a.conf")),
+            Some("ASTUR_CONFIG"),
+            "a `..` spelling still pins it"
+        );
+        // No USERPROFILE: the folder is the relative `.\.astur`.
+        assert_eq!(
+            pinned_by(Path::new(r".\.astur"), at(r".\.astur\a.conf")),
+            Some("ASTUR_CONFIG")
+        );
+        // Every override config_path reads, not just the two confs.
+        for k in [
+            "ASTUR_RESCUE",
+            "ASTUR_STATE",
+            "ASTUR_MRU",
+            "ASTUR_LOG",
+            "ASTUR_WALLPAPERS",
+            "ASTUR_CHECK",
+        ] {
+            let var = |v: &str| (v == k).then(|| r"C:\U\.astur\x".to_string());
+            assert_eq!(pinned_by(old, var), Some(k));
+        }
     }
 
     #[test]
