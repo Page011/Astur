@@ -70,6 +70,17 @@ impl SourceStore for DiskStore {
     }
 }
 
+/// Behaviour tests, not speed tests: script CPU is never charged, so a slow or busy PC cannot stop a widget
+/// mid-test (the per-second CPU window counts on the manual clock, which stands still between key presses).
+/// The wall-clock hang guard still applies; the limits have their own tests (limits.rs, sandbox.rs).
+struct NoCpu;
+
+impl ThreadTime for NoCpu {
+    fn now(&self) -> Duration {
+        Duration::ZERO
+    }
+}
+
 fn bench() -> Harness {
     let mut h = Harness::new();
     let user = h.store.clone();
@@ -83,7 +94,7 @@ fn bench() -> Harness {
             path_env: path_env(),
             limits: Limits::default(),
             dark: true,
-            thread_time: None::<Arc<dyn ThreadTime>>,
+            thread_time: Some(Arc::new(NoCpu)),
             heartbeat: heartbeat.clone(),
         },
         Box::new(FakeHub(h.hub.clone(), heartbeat.clone(), h.hub_busy.clone())),
