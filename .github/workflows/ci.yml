@@ -102,8 +102,14 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # GitHub's runners run as an administrator, and RSB refuses settings
+      # writes from one; its test builds can be told to treat the run as a
+      # normal user (release builds cannot). --no-fail-fast: one run shows
+      # every failing test.
       - name: Test
-        run: cargo test --workspace --locked
+        env:
+          RSB_TESTS_IGNORE_ELEVATION: "1"
+        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Build release
         run: cargo build --release --workspace --locked

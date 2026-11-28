@@ -231,6 +231,13 @@ pub(crate) fn is_elevated() -> bool {
     if let Some(fake) = FAKE_HIGH.with(std::cell::Cell::get) {
         return fake;
     }
+    // CI runners run the tests as an administrator. A debug build (the tests)
+    // can be told to treat the run as a normal user; a release build, the one
+    // people run, does not have this check at all.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("RSB_TESTS_IGNORE_ELEVATION").is_some_and(|v| v == "1") {
+        return false;
+    }
     token_is_high()
 }
 
