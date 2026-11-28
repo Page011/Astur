@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "rsb"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "log",
  "rsb-core",
@@ -933,7 +933,7 @@ dependencies = [
 
 [[package]]
 name = "rsb-core"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "log",
  "serde",
@@ -944,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "rsb-render"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "log",
  "parley",
@@ -957,7 +957,7 @@ dependencies = [
 
 [[package]]
 name = "rsb-script"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "log",
  "mlua",
@@ -969,7 +969,7 @@ dependencies = [
 
 [[package]]
 name = "rsb-services"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "log",
  "rsb-core",
@@ -981,7 +981,7 @@ dependencies = [
 
 [[package]]
 name = "rsb-win"
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 dependencies = [
  "log",
  "rsb-core",

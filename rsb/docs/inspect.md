@@ -29,7 +29,7 @@ rsb inspect [widget] [--bar NAME] [--style] [--depth N] [--redact] [--json]
 ## What the summary shows
 
 ```text
-rsb 0.1.0, as of 11:10:04 (session console)
+rsb 3.0.0-alpha.1, as of 11:10:04 (session console)
 process CPU 0.42 s in the last 60 s, 31.00 s since start (uptime 1 h 2 min)
 costliest in the last 60 s: service system 180 ms; clock 21 ms; media 9 ms
 bar main  monitor 0  scale 1.5  52 nodes  1,214 frames: style 0.12 s, layout 0.11 s, paint 0.10 s; slowest 1.1 ms; last 0.4 s ago; 40 ms in the last 60 s
