@@ -40,7 +40,7 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
-      # One version for Astur and RSB (D18): the three crates, RSB's workspace
+      # One version for Astur and RSB: the three crates, RSB's workspace
       # and the installer must agree, or a release ships mismatched numbers.
       # -List takes each file's first match, which is the package version.
       - name: Version consistency
@@ -67,7 +67,8 @@ jobs:
 
   # RSB (the bar) is its own Cargo workspace in rsb/: its release profile
   # unwinds, because Luau script errors cross Rust frames, and Astur's aborts.
-  # Its desktop-gated tests are #[ignore]d and stay on the release checklist.
+  # Its tests that need a real desktop are #[ignore]d; run them by hand before
+  # a release (from rsb/: cargo test --workspace -- --ignored --test-threads=1).
   rsb:
     runs-on: windows-latest
     defaults:

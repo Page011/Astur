@@ -32,7 +32,7 @@ jobs:
 
       # RSB, the status bar: its own workspace in rsb/ (its release profile
       # unwinds; Astur's aborts). rsb.exe goes into the installer and out as its
-      # own asset, named rsb.exe because Astur looks for it under that name.
+      # own asset, named rsb.exe: the name Astur 3.0 will look for beside itself.
       - name: Build RSB
         working-directory: rsb
         run: cargo build --release --locked

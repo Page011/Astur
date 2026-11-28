@@ -61,7 +61,8 @@ Name: "startup"; Description: "Start Astur automatically when I sign in"; GroupD
 Source: "..\target\release\astur.exe"; DestDir: "{app}"; DestName: "{#AppExe}"; Flags: ignoreversion
 ; The settings GUI — the tray "Settings" item and the power menu launch this sibling.
 Source: "..\target\release\astur-settings.exe"; DestDir: "{app}"; Flags: ignoreversion
-; The status bar. Never in Startup: only Astur goes there, and Astur starts RSB.
+; The status bar. Never in Startup: only Astur goes there (Astur 3.0 will start
+; RSB when RSB is the chosen bar).
 ; A running rsb.exe is closed by CloseApplications above, like Astur.
 Source: "..\rsb\target\release\rsb.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion

@@ -110,8 +110,8 @@ cargo build --release --locked
 
 Both test suites (root and `rsb/`) must pass before a change is done. RSB's
 desktop tests are `#[ignore]`d (`cargo test --workspace -- --ignored
---test-threads=1`, see `rsb/README.md`); they stay out of CI and run on the
-release checklist.
+--test-threads=1`, see `rsb/README.md`); they stay out of CI, so run them by
+hand before a release.
 
 ## Style
 
