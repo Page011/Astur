@@ -28,7 +28,8 @@ jobs:
           rustup default 1.98.1
 
       # Keyed on the lockfile; the windows crate is the expensive part of a cold
-      # build and it moves rarely.
+      # build and it moves rarely. Astur's lockfile only: RSB's (rsb/) has its
+      # own job and cache.
       - name: Cache cargo
         uses: actions/cache@v4
         with:
@@ -36,8 +37,19 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
+
+      # One version for Astur and RSB (D18): the three crates, RSB's workspace
+      # and the installer must agree, or a release ships mismatched numbers.
+      # -List takes each file's first match, which is the package version.
+      - name: Version consistency
+        run: |
+          $found = @(Select-String -List -Pattern '^version = "([^"]+)"' -Path crates/astur/Cargo.toml, crates/astur-config/Cargo.toml, crates/astur-settings/Cargo.toml, rsb/Cargo.toml)
+          $found += Select-String -List -Pattern '^#define AppVersion "([^"]+)"' -Path packaging/astur.iss
+          $found | ForEach-Object { "$($_.Path): $($_.Matches[0].Groups[1].Value)" }
+          $versions = @($found | ForEach-Object { $_.Matches[0].Groups[1].Value } | Sort-Object -Unique)
+          if ($found.Count -ne 5 -or $versions.Count -ne 1) { throw "Versions disagree or one is missing" }
 
       - name: Format
         run: cargo fmt --all --check
@@ -50,5 +62,47 @@ jobs:
 
       # Catches anything that only fails under LTO / codegen-units=1 /
       # panic=abort, which is what users actually run.
+      - name: Build release
+        run: cargo build --release --workspace --locked
+
+  # RSB (the bar) is its own Cargo workspace in rsb/: its release profile
+  # unwinds, because Luau script errors cross Rust frames, and Astur's aborts.
+  # Its desktop-gated tests are #[ignore]d and stay on the release checklist.
+  rsb:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: rsb
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal -c rustfmt,clippy
+          rustup default 1.98.1
+
+      # Own key prefix, so this job and `check` never restore or overwrite each
+      # other's target dir.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            rsb/target
+          key: ${{ runner.os }}-rsb-cargo-${{ hashFiles('rsb/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-rsb-cargo-
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --locked
+
       - name: Build release
         run: cargo build --release --workspace --locked
