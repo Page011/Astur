@@ -12,7 +12,7 @@ members = [
 exclude = ["spikes"]
 
 [workspace.package]
-version = "0.1.0"
+version = "3.0.0-alpha.1"
 edition = "2024"
 license = "Apache-2.0"
 publish = false
@@ -51,6 +51,9 @@ log = "=0.4.35"
 # no system fonts, no embedded raster images and no compressed .svgz, so an
 # SVG can only describe shapes. It draws with the same tiny-skia version.
 resvg = { version = "=0.50.0", default-features = false }
+# Build time only: compiles rsb.rc (the icon and the version info) into
+# rsb.exe. The same version Astur's own build uses.
+embed-resource = "=2.5.2"
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

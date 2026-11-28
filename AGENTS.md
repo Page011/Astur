@@ -71,6 +71,11 @@ cargo build                    # fast debug build of the whole workspace
 cargo run -p astur             # run the WM from source
 ```
 
+RSB (`rsb/`) is a separate workspace: run its cargo commands from `rsb/`
+(`cargo build --release` -> `rsb/target/release/rsb.exe`; checks in
+`rsb/README.md`). Run cargo through PowerShell, not Git Bash (its `link`
+shadows MSVC's). Both test suites, root and `rsb/`, must pass.
+
 Quit: tray Quit or `Ctrl+C` in the console (runs `restore_all_windows`: shows
 hidden windows and unparks parked ones; an exit watchdog ends the process 2 s
 after the restore starts, so a hung app cannot keep it alive), or kill the
@@ -93,6 +98,7 @@ on first run, fully commented, **hot-reloaded on save**.
 | `crates/astur-config/src/lib.rs` | ~5800 | `Config` struct, `LAYOUTS` (the one list of layout names), bar `PALETTES`, `BAR_PRESETS`, `BAR_ACTIONS` / `BAR_CLICK_DEFAULTS` and the shared bar formatters (`format_clock`, `format_date`, `workspace_label`, `bar_on`), documented-default file templates, key/value parser. **No Win32** — pure data, shared with the settings GUI (aliased `config` in the WM). |
 | `crates/astur-settings/` | ~11200 (~1900 tests) | Settings GUI (egui), shipped. Separate process — a GUI crash can't touch the WM. Instant apply with Undo, Ctrl+F search, card rows (`row_core`), tables for record keys (`table`, `Rows`, `fold_*` / `*_check`), key capture chips, the Astur key picker with its 15 s Keep / revert trial (`key_picker`, `switch_key`, `Trial`) and per-shortcut notes from astur-config's `compile_keys` (`notes`, `row_noted`; the GUI has no conflict model of its own), the Status bar page (preset gallery `presets_ui` / `stamp` / `preset_diff`, egui previews `bar_preview` built from astur-config's own `format_clock` / `format_date` / `workspace_label`, drag-and-drop zones `zone_editor` / `move_widget`, format drop-downs `format_pick`, click actions `click_rows` / `click_ui` / `set_click` (the default is kept as no line), the screens picker `monitors_row`; `status_bar_rows_fit_their_width` guards against a row pushing the page past the window), Home's Quick setup (`bar_style_row`, `gaps_row`, `tips`), and pickers for non-technical users (`choice_row` drop-downs of detected apps / web searches with Custom… into More options, `font_row` with a GDI-drawn sample, `path_row` / `browse_button`, `window_picker`). Its only Win32 is `mod sys` (windows 0.58, the WM's version): font families, a font sample, installed browsers and App Paths, the open windows, the screen count, the file / folder dialog on its own thread. Never launch it to check a visual change: `cargo test -p astur-settings -- --ignored render_pages` renders every page to PNGs in %TEMP%\astur-settings-render. |
 | `Cargo.toml` (root) | — | `[workspace]` manifest + release profile. WM deps live in `crates/astur/Cargo.toml`. |
+| `rsb/` | — | RSB status bar (3.0): **its own Cargo workspace**, not a root member, because its profiles are `panic = "unwind"` (Luau script errors cross Rust frames; Astur's `panic = "abort"` would abort the process). `rsb.exe` is its own process. Built-in widgets are Luau files embedded in the binary, on the public API. Crates, threads and conventions: `rsb/README.md`, `rsb/docs/architecture.md` (third-party crates pinned exactly in `rsb/Cargo.toml`; MIT, Apache-2.0, BSD, Zlib, ISC or Unicode licences only). Takes Astur's version number. |
 
 `main.rs` is large but sectioned with `// ====` banners. Use the function map
 (`grep -n "^fn \|^unsafe extern\|^struct \|^static " crates/astur/src/main.rs`).

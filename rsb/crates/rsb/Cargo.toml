@@ -17,6 +17,9 @@ path = "src/lib.rs"
 name = "rsb"
 path = "src/main.rs"
 
+[build-dependencies]
+embed-resource.workspace = true
+
 [dependencies]
 rsb-core.workspace = true
 rsb-render.workspace = true

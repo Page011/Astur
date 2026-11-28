@@ -1,18 +1,20 @@
 ; Astur (Full) installer — Inno Setup script.
 ;
 ; Builds a per-user setup.exe (no admin) that installs the window-manager exe
-; + the settings-GUI exe, a Start-Menu shortcut, an optional run-at-sign-in
-; shortcut, and an uninstaller. The portable exe (GitHub release) stays the
-; alternative for people who don't want an installer; this is the friendly path.
+; + the settings-GUI exe + the status bar (rsb.exe), a Start-Menu shortcut, an
+; optional run-at-sign-in shortcut, and an uninstaller. The portable exe (GitHub
+; release) stays the alternative for people who don't want an installer; this
+; is the friendly path.
 ;
 ; Build:  ISCC.exe packaging\astur.iss   (from the repo root; needs a prior
-;         `cargo build --release` so target\release\*.exe exist)
+;         `cargo build --release` in the root and in rsb\, so target\release\*.exe
+;         and rsb\target\release\rsb.exe exist)
 ; Output: dist\Astur-Setup-<version>.exe
 ;
-; (The hawk .ico is embedded in both exes via build.rs + embed-resource.)
+; (The hawk .ico is embedded in every exe via build.rs + embed-resource.)
 
 #define AppName "Astur"
-#define AppVersion "2.5.0"
+#define AppVersion "3.0.0-alpha.1"
 #define AppPublisher "Astur"
 #define AppURL "https://astur.app"
 #define AppExe "Astur.exe"
@@ -59,6 +61,10 @@ Name: "startup"; Description: "Start Astur automatically when I sign in"; GroupD
 Source: "..\target\release\astur.exe"; DestDir: "{app}"; DestName: "{#AppExe}"; Flags: ignoreversion
 ; The settings GUI — the tray "Settings" item and the power menu launch this sibling.
 Source: "..\target\release\astur-settings.exe"; DestDir: "{app}"; Flags: ignoreversion
+; The status bar. Never in Startup: only Astur goes there (Astur 3.0 will start
+; RSB when RSB is the chosen bar).
+; A running rsb.exe is closed by CloseApplications above, like Astur.
+Source: "..\rsb\target\release\rsb.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\THIRD_PARTY_NOTICES.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion

@@ -69,6 +69,16 @@ pre-workspace); the workspace below is the evolving full "Astur" (v2). See
   drift from the WM. `cargo test -p astur-settings -- --ignored render_pages`
   renders every page to PNGs in %TEMP%\astur-settings-render without opening a
   window.
+- `rsb/` — RSB, the status bar (3.0, merged from its own repo with history).
+  **Its own Cargo workspace** (own `Cargo.toml`, `Cargo.lock`, `rustfmt.toml`),
+  never a member of the root one: RSB's profiles are `panic = "unwind"` because
+  Luau script errors travel through Rust frames, and Astur's `panic = "abort"`
+  would turn every one into a process abort. `rsb.exe` is its own process (a
+  bar crash can't touch the WM). Built-in widgets are Luau files inside the
+  binary, on the same public API as user widgets. Conventions in
+  `rsb/README.md` and `rsb/docs/architecture.md` (every third-party crate
+  pinned exactly in `rsb/Cargo.toml`; MIT, Apache-2.0, BSD, Zlib, ISC or
+  Unicode licences only). RSB takes Astur's version number.
 
 NOTE: plan/ docs written before the workspace say `src/main.rs` / `src/config.rs` —
 those now map to `crates/astur/src/main.rs` / `crates/astur-config/src/lib.rs`.
@@ -87,6 +97,21 @@ cargo +stable-x86_64-pc-windows-gnu build --target x86_64-pc-windows-gnu
 If crate downloads fail with a cert-revocation error
 (`CRYPT_E_NO_REVOCATION_CHECK`), prefix with `CARGO_HTTP_CHECK_REVOKE=false`.
 Note: Git Bash's MSYS `link` shadows MSVC `link.exe` — don't build MSVC from Bash.
+Run cargo through PowerShell.
+
+RSB builds and verifies from `rsb/`, never the root (its own workspace):
+
+```
+cargo fmt --all --check
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
+cargo build --release --locked
+```
+
+Both test suites (root and `rsb/`) must pass before a change is done. RSB's
+desktop tests are `#[ignore]`d (`cargo test --workspace -- --ignored
+--test-threads=1`, see `rsb/README.md`); they stay out of CI, so run them by
+hand before a release.
 
 ## Style
 
